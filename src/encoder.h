@@ -3,6 +3,16 @@
 
 class MagneticEncoder {
 private:
+	// position variables
+	double last_angle_deg;
+
+	// velocity vars
+	DoubleList ang_vel = DoubleList(20);
+	double last_angular_vel;
+
+	// acceleration vars
+	DoubleList ang_acc = DoubleList(20);
+
 	int16_t dir_pin;
 	bool debug;
 
@@ -28,20 +38,59 @@ private:
 		// Serial.println(acc_interval);
 	}
 
+	void update_position() {
+		// cum position assumes at least 4 readings per revolution
+		counts = as5600.getCumulativePosition();
+		angle_deg = counts * AS5600_RAW_TO_DEGREES;
+		revolutions = angle_deg / 360.0;
+	}
+
+	void update_velocity(double seconds_past) {
+		// calculate angular velocity myself
+		// double current_ang_vel_deg = (angle_deg - last_angle_deg) / seconds_past;
+		// last_angle_deg = angle_deg;
+
+		// or use library to calculate angular velocity - may be more accurate because it does not rely o nthe cumulative position fx
+		double current_ang_vel_deg = as5600.getAngularSpeed(0);
+
+		// add current_ang_vel_deg to list
+		if (ang_vel.length < ang_vel.max_length) {
+			ang_vel.append(current_ang_vel_deg);
+		} else {
+			ang_vel.remove(0);
+			ang_vel.append(current_ang_vel_deg);
+		}
+
+		// ang_vel.print();
+		angular_velocity_deg = ang_vel.average();
+		rpm = (angular_velocity_deg / 360.0) * 60.0;
+	}
+
+	void update_acceleration(double seconds_past) {
+		// add current_ang_acc_deg to list
+		double current_ang_acc_deg = (angular_velocity_deg - last_angular_vel) / seconds_past;
+		last_angular_vel = angular_velocity_deg;
+
+		if (ang_acc.length < ang_acc.max_length) {
+			ang_acc.append(current_ang_acc_deg);
+		} else {
+			ang_acc.remove(0);
+			ang_acc.append(current_ang_acc_deg);
+		}
+		angular_acceleration_deg = ang_acc.average();
+	}
+
 
 public:
+	// position variables
 	int32_t counts; // counts 4096 is one rev
 	double angle_deg; // degrees
 	double angle_rad; //
 	double revolutions;
 
-	double last_angle_deg;
-	DoubleList ang_vel = DoubleList(10);
 	double angular_velocity_deg;  // deg / sec
 	double rpm;  // revolutions / minute
 
-	double last_angular_vel;
-	DoubleList ang_acc = DoubleList(20);
 	double angular_acceleration_deg; // deg / sec2
 
 
@@ -78,49 +127,12 @@ public:
 
 		if (currentmicros - update_timer >= update_interval) {
 			double seconds_past = ((double)(currentmicros - update_timer) / 1000000.0);
-			// cum position assumes at least 4 readings per revolution
-			counts = as5600.getCumulativePosition();
-			angle_deg = counts * AS5600_RAW_TO_DEGREES;
-			revolutions = angle_deg / 360.0;
 
+			update_position();
 
-			// calculate angular velocity myself
-			// double current_ang_vel_deg = (angle_deg - last_angle_deg) / seconds_past;
-			// last_angle_deg = angle_deg;
-			// use library to calculate angular velocity - may be more accurate because it does not rely o nthe cumulative position fx
-			double current_ang_vel_deg = as5600.getAngularSpeed(0);
-			// angular_velocity_deg = as5600.getAngularSpeed(0);
-			// Serial.println(current_ang_vel_deg);
-			// Serial.println(angle_deg);
-			// Serial.println(last_angle_deg);
-			// Serial.println(seconds_past);
+			update_velocity(seconds_past);
 
-			// add current_ang_vel_deg to list
-			if (ang_vel.length < ang_vel.max_length) {
-				ang_vel.append(current_ang_vel_deg);
-			} else {
-				ang_vel.remove(0);
-				ang_vel.append(current_ang_vel_deg);
-			}
-
-			// ang_vel.print();
-			angular_velocity_deg = ang_vel.average();
-			rpm = (angular_velocity_deg / 360.0) * 60.0;
-
-
-			// TODO - do averaging of angular acceleration - average last 10 points or so
-			// add current_ang_acc_deg to list
-			double current_ang_acc_deg = (angular_velocity_deg - last_angular_vel) / seconds_past;
-			last_angular_vel = angular_velocity_deg;
-
-			if (ang_acc.length < ang_acc.max_length) {
-				ang_acc.append(current_ang_acc_deg);
-			} else {
-				ang_acc.remove(0);
-				ang_acc.append(current_ang_acc_deg);
-			}
-			angular_acceleration_deg = ang_acc.average();
-
+			update_acceleration(seconds_past);
 
 			update_timer = currentmicros;
 

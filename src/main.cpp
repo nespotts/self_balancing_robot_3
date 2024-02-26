@@ -4,7 +4,7 @@
 #include "motor_controls.h"
 Motor motor(3, 4, 5);
 #include "encoder.h"
-MagneticEncoder enc1(6, 200, false);
+MagneticEncoder enc1(6, 500, false);
 
 #include "Plotter.h"
 Plotter p;

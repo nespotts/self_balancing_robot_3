@@ -54,7 +54,7 @@ public:
 		String output = "[";
 
 		for (int i = 0; i < length; i++) {
-			output += data[i];
+			output += String(data[i], 3);
 			if (i < length - 1) {
 				output += ", ";
 			}
