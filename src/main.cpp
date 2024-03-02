@@ -7,7 +7,7 @@
 Motor motor(3, 4, 5);
 
 #include "encoder.h"
-MagneticEncoder enc1(6, 500, false);
+// MagneticEncoder enc1(6, 500, false);
 
 #include "mpu6050.h"
 // IMU imu;
@@ -15,22 +15,24 @@ MagneticEncoder enc1(6, 500, false);
 #include "Plotter.h"
 Plotter p;
 
+int x = 1;
+int y = 2;
+
 
 void setup() {
 	Serial.begin(115200);
 	Wire.begin();
 
-	enc1.setup();
+	// enc1.setup();
 
 	motor.setup();
 	pinMode(A7, INPUT);
 
 	// imu.setup();
-  int x = 1;
-  int y = 2;
 
-	p.Begin();
-  p.AddTimeGraph("Test", 5000, "test", x, "test2", y);
+
+	// p.Begin();
+  // p.AddTimeGraph("Test", 5000, "test", x, "test2", y);
 	// p.AddTimeGraph("Encoder", 5000, "Angular Position", enc1.angle_deg, "Angular Velocity", enc1.angular_velocity_deg, "Angular Acceleration", enc1.angular_acceleration_deg);
 	// p.AddTimeGraph("IMU Orientation", 10000, "Yaw", imu.ypr[0], "Pitch", imu.ypr[1], "Roll", imu.ypr[2]);
 	// p.AddTimeGraph("IMU Linear Acceleration", 10000, "X", imu.aaReal.x, "Y", imu.aaReal.y, "Z", imu.aaReal.z);
@@ -39,11 +41,20 @@ void setup() {
 	// p.AddTimeGraph("IMU Angular Velocity Comparison", 10000, "X gyro", imu.angular_velocity.x, "X calculated", imu.angular_velocity.x);
 	// p.AddTimeGraph("IMU Gravity Vector", 10000, "X", imu.gravity.x, "Y", imu.gravity.y, "Z", imu.gravity.z);
 	// p.AddTimeGraph("IMU Gravity Vector", 10000, "X", imu.gravity.x, "Y", imu.gravity.y, "Z", imu.gravity.z);
+  Serial.println("test1,test2");
 }
 
 
 void loop() {
-	p.Plot();
+	// p.Plot();
+  // Serial.print("var1:");
+  Serial.print(x);
+  Serial.print(",");
+  // Serial.print("var2:");
+  Serial.print(millis());
+  Serial.println();
+  delay(50);
+
 	// enc1.run();
 	// imu.run();
 
