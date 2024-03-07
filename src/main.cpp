@@ -19,6 +19,10 @@ int x = 1;
 int y = 2;
 
 
+#include "reboot.h"
+Reset reset;
+
+
 void setup() {
 	Serial.begin(115200);
 	Wire.begin();
@@ -42,10 +46,14 @@ void setup() {
 	// p.AddTimeGraph("IMU Gravity Vector", 10000, "X", imu.gravity.x, "Y", imu.gravity.y, "Z", imu.gravity.z);
 	// p.AddTimeGraph("IMU Gravity Vector", 10000, "X", imu.gravity.x, "Y", imu.gravity.y, "Z", imu.gravity.z);
   Serial.println("test1,test2");
+
+	pinMode(23, INPUT_PULLUP);
+	pinMode(13, OUTPUT);
 }
 
 
 void loop() {
+	reset.run();
 	// p.Plot();
   // Serial.print("var1:");
   Serial.print(x);
@@ -54,6 +62,8 @@ void loop() {
   Serial.print(millis());
   Serial.println();
   delay(50);
+
+	digitalWrite(13, !digitalRead(13));
 
 	// enc1.run();
 	// imu.run();
