@@ -25,6 +25,9 @@ public:
         digitalWrite(en_pin, LOW);
         digitalWrite(dir_pin1, LOW);
         digitalWrite(dir_pin2, LOW);
+
+        analogWriteFrequency(en_pin, 36621.09); 
+        analogWriteResolution(12);
     }
 
     void command_motor(int speed) {

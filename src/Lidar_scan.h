@@ -23,7 +23,7 @@ PWMServo servo;
 scanList scan{ &servo, 5, 32, 0, 2500, 0, {}, {}, 0, 0, 0, 0, 0 };
 
 void scan_setup(int servo_pin = 5, int subdivisions = 16) {
-  Lidar_setup(28, 29, 34, 25);
+  Lidar_setup(34, 35, 28, 29);
   scan.subdivisions = subdivisions;
   scan.servo_pin = servo_pin;
   servo.attach(scan.servo_pin);
@@ -63,12 +63,13 @@ void scan_run() {
       scan.front_index += scan.direction;
       scan.rear_index = scan.front_index + scan.subdivisions;
 
-      // Serial.println(scan.ranges[scan.rear_index]);
+      // Serial.println(scan.ranges[scan.front_index]);
     }
 
     // start servo move
   } else if (scan.state == 2) {
     scan.pservo->write(scan.positions[scan.front_index]);
+    // scan.pservo->write(scan.positions[0]);
     scan.servo_start_time = currenttime;
     scan.state = 3;
 

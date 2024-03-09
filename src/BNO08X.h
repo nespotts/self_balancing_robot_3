@@ -1,7 +1,9 @@
 #include <Adafruit_BNO08x.h>
+#include "IMU.h"
 
 
-class IMU {
+// this class should be focused on interfacing with the sensor
+class IMU_helper {
 private:
 	int CS_pin = 10;
 	int INT_pin = 30;
@@ -103,7 +105,7 @@ private:
 
 public:
 
-	IMU() {
+	IMU_helper() {
 		// do anything?
 		if (fast_mode) {
 			reportType = SH2_GYRO_INTEGRATED_RV;

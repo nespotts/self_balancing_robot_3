@@ -30,7 +30,7 @@ Adafruit_VL53L0X sensor2;
 sensorList_t sensors[] = {
     {&sensor1, &SENSOR1_WIRE, 0x30, 28, 29,
      Adafruit_VL53L0X::VL53L0X_SENSE_LONG_RANGE, 0, 0, 0, 0, 0, 2500, false},
-    {&sensor2, &SENSOR2_WIRE, 0x31, 24, 25,
+    {&sensor2, &SENSOR2_WIRE, 0x31, 34, 35,
      Adafruit_VL53L0X::VL53L0X_SENSE_LONG_RANGE, 0, 0, 0, 0, 0, 2500, false},
 };
 

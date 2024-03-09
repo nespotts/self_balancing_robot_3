@@ -1,36 +1,46 @@
 #include <Arduino.h>
+#include "helper_3dmath.h"
 #include "helper_functions.h"
 #include "Wire.h"
-
-
-#include <jled.h>
-// breathe LED for 5 times, LED is connected to pin 9 (PWM capable) gpio
-// can't use pin 13 because that is SCK for SPI 0
-// auto led = JLed(13).Breathe(2000).Forever();
-
-#include "motor_controls.h"
-Motor left_motor(4,5,6);
-Motor right_motor(7,8,9);
-
+#include "IMU.h"
+#include "Lidar_scan.h"
 #include "encoder.h"
+// #include "Odometry.h"
+#include "motor_controls.h"
+// #include "PID_controls.h"
+// #include "battery_monitor.h"
+#include "NRF_radio.h"
+// #include "beeper_controller.h"
+// #include "control_logic.h"
+#include "functions.h"
+#include "reboot.h"
+#include "Plotter.h"
+
+// #include <jled.h>
+// // breathe LED for 5 times, LED is connected to pin 9 (PWM capable) gpio
+// // can't use pin 13 because that is SCK for SPI 0
+// // auto led = JLed(13).Breathe(2000).Forever();
+
+
+Motor left_motor(4, 5, 6);
+Motor right_motor(7, 8, 9);
+
 
 MagneticEncoder enc1(38, 0, 500, false);
 MagneticEncoder enc2(39, 1, 500, false);
 
-#include "BNO08X.h"
+
 IMU imu;
 
-#include "Plotter.h"
 Plotter p;
 
 int x = 1;
 int y = 2;
 
 
-#include "reboot.h"
 Reset reset;
 
-#include "Lidar_scan.h"
+
 
 
 void setup() {
@@ -43,15 +53,17 @@ void setup() {
 
 	imu.setup();
 
-  // servo pin, num subdivisions
+	// servo pin, num subdivisions
 	scan_setup(2, 16);
+
+	Radio_Setup(3);
 
 	// motor.setup();
 	// pinMode(A7, INPUT);
 
 
 	// p.Begin();
-  // p.AddTimeGraph("Test", 5000, "test", x, "test2", y);
+	// p.AddTimeGraph("Test", 5000, "test", x, "test2", y);
 	// p.AddTimeGraph("Encoder", 5000, "Angular Position", enc1.angle_deg, "Angular Velocity", enc1.angular_velocity_deg, "Angular Acceleration", enc1.angular_acceleration_deg);
 	// p.AddTimeGraph("IMU Orientation", 10000, "Yaw", imu.ypr[0], "Pitch", imu.ypr[1], "Roll", imu.ypr[2]);
 	// p.AddTimeGraph("IMU Linear Acceleration", 10000, "X", imu.aaReal.x, "Y", imu.aaReal.y, "Z", imu.aaReal.z);
@@ -60,8 +72,11 @@ void setup() {
 	// p.AddTimeGraph("IMU Angular Velocity Comparison", 10000, "X gyro", imu.angular_velocity.x, "X calculated", imu.angular_velocity.x);
 	// p.AddTimeGraph("IMU Gravity Vector", 10000, "X", imu.gravity.x, "Y", imu.gravity.y, "Z", imu.gravity.z);
 	// p.AddTimeGraph("IMU Gravity Vector", 10000, "X", imu.gravity.x, "Y", imu.gravity.y, "Z", imu.gravity.z);
-  // Serial.println("test1,test2");
+	// Serial.println("test1,test2");
 }
+
+uint32_t print_timer;
+uint32_t interval = 50;
 
 
 void loop() {
@@ -72,487 +87,37 @@ void loop() {
 	enc2.run();
 	imu.run();
 
+
 	// scan_run();
 
-	// left_motor.command_motor(-100);
-	// right_motor.command_motor(-100);
+	Receive_Data();
+
+	if (millis() - print_timer >= interval) {
+		print_timer = millis();
+
+		// Serial.print(imu.data.Pitch());
+		// Serial.println(imu.data.Pitch());
+		// serial_printer("Pitch: ", String(imu.data.Pitch()), " Roll: ", String(imu.data.Roll()), "Yaw", String(imu.data.Yaw()));
+		// serial_printer("angular velocity x: ", String(imu.data.ang_vel.x), "\ty: ", String(imu.data.ang_vel.y), "\t z: ", String(imu.data.ang_vel.z));
+		serial_printer("linear acceleration x: ", String(imu.data.lin_acc.x), "\t y: ", String(imu.data.lin_acc.y), "\t z: ", String(imu.data.lin_acc.z));
+	}
+
+	// int left_command = (receive_data.throttle - 512 + receive_data.rudder - 512)*(2047.0/512.0);
+	// if (left_command > 0) {
+	// 	left_command += 2047;
+	// } else {
+	// 	left_command -= 2047;
+	// }
+	// int right_command = (receive_data.throttle - 512 - (receive_data.rudder - 512))*(2047.0/512.0);
+	// if (right_command > 0) {
+	// 	right_command += 2047;
+	// } else {
+	// 	right_command -= 2047;
+	// }
+
+	// left_motor.command_motor(left_command);
+	// right_motor.command_motor(right_command);
 
 	// Serial.println(imu.Pitch());
 
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// #include <Arduino.h>
-// // This demo explores two reports (SH2_ARVR_STABILIZED_RV and SH2_GYRO_INTEGRATED_RV) both can be used to give 
-// // quartenion and euler (yaw, pitch roll) angles.  Toggle the FAST_MODE define to see other report.  
-// // Note sensorValue.status gives calibration accuracy (which improves over time)
-// #include <Adafruit_BNO08x.h>
-
-// // For SPI mode, we need a CS pin
-// #define BNO08X_CS 10
-// #define BNO08X_INT 30
-
-
-// // #define FAST_MODE
-
-// // For SPI mode, we also need a RESET 
-// #define BNO08X_RESET 33
-// // but not for I2C or UART
-// // #define BNO08X_RESET -1
-
-// struct euler_t {
-//   float yaw;
-//   float pitch;
-//   float roll;
-// } ypr;
-
-// Adafruit_BNO08x  bno08x(BNO08X_RESET);
-// sh2_SensorValue_t sensorValue;
-
-// #ifdef FAST_MODE
-//   // Top frequency is reported to be 1000Hz (but freq is somewhat variable)
-//   sh2_SensorId_t reportType = SH2_GYRO_INTEGRATED_RV;
-//   long reportIntervalUs = 2000;
-// #else
-//   // Top frequency is about 250Hz but this report is more accurate
-//   sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
-//   long reportIntervalUs = 5000;
-// #endif
-// void setReports(sh2_SensorId_t reportType, long report_interval) {
-//   Serial.println("Setting desired reports");
-//   if (! bno08x.enableReport(reportType, report_interval)) {
-//     Serial.println("Could not enable stabilized remote vector");
-//   }
-// }
-
-// void setup(void) {
-
-//   Serial.begin(115200);
-//   while (!Serial) delay(10);     // will pause Zero, Leonardo, etc until serial console opens
-
-//   Serial.println("Adafruit BNO08x test!");
-
-//   // Try to initialize!
-//   // if (!bno08x.begin_I2C()) {
-//   //if (!bno08x.begin_UART(&Serial1)) {  // Requires a device with > 300 byte UART buffer!
-//   if (!bno08x.begin_SPI(BNO08X_CS, BNO08X_INT)) {
-//     Serial.println("Failed to find BNO08x chip");
-//     while (1) { delay(10); }
-//   }
-//   Serial.println("BNO08x Found!");
-
-
-//   setReports(reportType, reportIntervalUs);
-
-//   Serial.println("Reading events");
-//   delay(100);
-// }
-
-// void quaternionToEuler(float qr, float qi, float qj, float qk, euler_t* ypr, bool degrees = false) {
-
-//     float sqr = sq(qr);
-//     float sqi = sq(qi);
-//     float sqj = sq(qj);
-//     float sqk = sq(qk);
-
-//     ypr->yaw = atan2(2.0 * (qi * qj + qk * qr), (sqi - sqj - sqk + sqr));
-//     ypr->pitch = asin(-2.0 * (qi * qk - qj * qr) / (sqi + sqj + sqk + sqr));
-//     ypr->roll = atan2(2.0 * (qj * qk + qi * qr), (-sqi - sqj + sqk + sqr));
-
-//     if (degrees) {
-//       ypr->yaw *= RAD_TO_DEG;
-//       ypr->pitch *= RAD_TO_DEG;
-//       ypr->roll *= RAD_TO_DEG;
-//     }
-// }
-
-// void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotational_vector, euler_t* ypr, bool degrees = false) {
-//     quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
-// }
-
-// void quaternionToEulerGI(sh2_GyroIntegratedRV_t* rotational_vector, euler_t* ypr, bool degrees = false) {
-//     quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
-// }
-
-// void loop() {
-
-//   if (bno08x.wasReset()) {
-//     Serial.print("sensor was reset ");
-//     setReports(reportType, reportIntervalUs);
-//   }
-
-//   if (bno08x.getSensorEvent(&sensorValue)) {
-//     // in this demo only one report type will be received depending on FAST_MODE define (above)
-//     switch (sensorValue.sensorId) {
-//       case SH2_ARVR_STABILIZED_RV:
-//         quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
-//       case SH2_GYRO_INTEGRATED_RV:
-//         // faster (more noise?)
-//         quaternionToEulerGI(&sensorValue.un.gyroIntegratedRV, &ypr, true);
-//         break;
-//     }
-//     static long last = 0;
-//     long now = micros();
-//     Serial.print(now - last);             Serial.print("\t");
-//     last = now;
-//     Serial.print(sensorValue.status);     Serial.print("\t");  // This is accuracy in the range of 0 to 3
-//     Serial.print(ypr.yaw);                Serial.print("\t");
-//     Serial.print(ypr.pitch);              Serial.print("\t");
-//     Serial.println(ypr.roll);
-//   }
-
-// }
-
-
-
-
-
-
-
-
-
-
-
-
-
-// #include "Arduino.h"
-// // Basic demo for readings from Adafruit BNO08x
-// #include <Adafruit_BNO08x.h>
-
-// // For SPI mode, we need a CS pin
-// #define BNO08X_CS 10
-// #define BNO08X_INT 30
-
-// // For SPI mode, we also need a RESET 
-// #define BNO08X_RESET 33
-// // but not for I2C or UART
-// // #define BNO08X_RESET -1
-
-// Adafruit_BNO08x bno08x(BNO08X_RESET);
-// sh2_SensorValue_t sensorValue;
-
-
-// // Here is where you define the sensor outputs you want to receive
-// void setReports(void) {
-// 	Serial.println("Setting desired reports");
-// 	// if (!bno08x.enableReport(SH2_ACCELEROMETER)) {
-// 	//   Serial.println("Could not enable accelerometer");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED)) {
-// 	//   Serial.println("Could not enable gyroscope");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_MAGNETIC_FIELD_CALIBRATED)) {
-// 	//   Serial.println("Could not enable magnetic field calibrated");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_LINEAR_ACCELERATION)) {
-// 	//   Serial.println("Could not enable linear acceleration");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_GRAVITY)) {
-// 	// 	Serial.println("Could not enable gravity vector");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_ROTATION_VECTOR)) {
-// 	//   Serial.println("Could not enable rotation vector");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_GEOMAGNETIC_ROTATION_VECTOR)) {
-// 	//   Serial.println("Could not enable geomagnetic rotation vector");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_GAME_ROTATION_VECTOR)) {
-// 	//   Serial.println("Could not enable game rotation vector");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_STEP_COUNTER)) {
-// 	//   Serial.println("Could not enable step counter");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_STABILITY_CLASSIFIER)) {
-// 	//   Serial.println("Could not enable stability classifier");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_RAW_ACCELEROMETER)) {
-// 	//   Serial.println("Could not enable raw accelerometer");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_RAW_GYROSCOPE)) {
-// 	//   Serial.println("Could not enable raw gyroscope");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_RAW_MAGNETOMETER)) {
-// 	//   Serial.println("Could not enable raw magnetometer");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_SHAKE_DETECTOR)) {
-// 	//   Serial.println("Could not enable shake detector");
-// 	// }
-// 	// if (!bno08x.enableReport(SH2_PERSONAL_ACTIVITY_CLASSIFIER)) {
-// 	//   Serial.println("Could not enable personal activity classifier");
-// 	// }
-// }
-// void printActivity(uint8_t activity_id) {
-// 	switch (activity_id) {
-// 	case PAC_UNKNOWN:
-// 		Serial.print("Unknown");
-// 		break;
-// 	case PAC_IN_VEHICLE:
-// 		Serial.print("In Vehicle");
-// 		break;
-// 	case PAC_ON_BICYCLE:
-// 		Serial.print("On Bicycle");
-// 		break;
-// 	case PAC_ON_FOOT:
-// 		Serial.print("On Foot");
-// 		break;
-// 	case PAC_STILL:
-// 		Serial.print("Still");
-// 		break;
-// 	case PAC_TILTING:
-// 		Serial.print("Tilting");
-// 		break;
-// 	case PAC_WALKING:
-// 		Serial.print("Walking");
-// 		break;
-// 	case PAC_RUNNING:
-// 		Serial.print("Running");
-// 		break;
-// 	case PAC_ON_STAIRS:
-// 		Serial.print("On Stairs");
-// 		break;
-// 	default:
-// 		Serial.print("NOT LISTED");
-// 	}
-// 	Serial.print(" (");
-// 	Serial.print(activity_id);
-// 	Serial.print(")");
-// }
-
-
-// void setup(void) {
-// 	Serial.begin(115200);
-// 	while (!Serial)
-// 		delay(10); // will pause Zero, Leonardo, etc until serial console opens
-
-// 	Serial.println("Adafruit BNO08x test!");
-
-// 	// Try to initialize!
-// 	// if (!bno08x.begin_I2C()) {
-// 		// if (!bno08x.begin_UART(&Serial1)) {  // Requires a device with > 300 byte
-// 		// UART buffer! 
-// 	if (!bno08x.begin_SPI(BNO08X_CS, BNO08X_INT)) {
-// 		Serial.println("Failed to find BNO08x chip");
-// 		while (1) {
-// 			delay(10);
-// 		}
-// 	}
-// 	Serial.println("BNO08x Found!");
-
-// 	for (int n = 0; n < bno08x.prodIds.numEntries; n++) {
-// 		Serial.print("Part ");
-// 		Serial.print(bno08x.prodIds.entry[n].swPartNumber);
-// 		Serial.print(": Version :");
-// 		Serial.print(bno08x.prodIds.entry[n].swVersionMajor);
-// 		Serial.print(".");
-// 		Serial.print(bno08x.prodIds.entry[n].swVersionMinor);
-// 		Serial.print(".");
-// 		Serial.print(bno08x.prodIds.entry[n].swVersionPatch);
-// 		Serial.print(" Build ");
-// 		Serial.println(bno08x.prodIds.entry[n].swBuildNumber);
-// 	}
-
-// 	setReports();
-
-// 	Serial.println("Reading events");
-// 	delay(100);
-// }
-
-
-// void loop() {
-// 	delay(10);
-
-// 	if (bno08x.wasReset()) {
-// 		Serial.print("sensor was reset ");
-// 		setReports();
-// 	}
-
-// 	if (!bno08x.getSensorEvent(&sensorValue)) {
-// 		return;
-// 	}
-
-// 	switch (sensorValue.sensorId) {
-
-// 	case SH2_ACCELEROMETER:
-// 		Serial.print("Accelerometer - x: ");
-// 		Serial.print(sensorValue.un.accelerometer.x);
-// 		Serial.print(" y: ");
-// 		Serial.print(sensorValue.un.accelerometer.y);
-// 		Serial.print(" z: ");
-// 		Serial.println(sensorValue.un.accelerometer.z);
-// 		break;
-// 	case SH2_GYROSCOPE_CALIBRATED:
-// 		Serial.print("Gyro - x: ");
-// 		Serial.print(sensorValue.un.gyroscope.x);
-// 		Serial.print(" y: ");
-// 		Serial.print(sensorValue.un.gyroscope.y);
-// 		Serial.print(" z: ");
-// 		Serial.println(sensorValue.un.gyroscope.z);
-// 		break;
-// 	case SH2_MAGNETIC_FIELD_CALIBRATED:
-// 		Serial.print("Magnetic Field - x: ");
-// 		Serial.print(sensorValue.un.magneticField.x);
-// 		Serial.print(" y: ");
-// 		Serial.print(sensorValue.un.magneticField.y);
-// 		Serial.print(" z: ");
-// 		Serial.println(sensorValue.un.magneticField.z);
-// 		break;
-// 	case SH2_LINEAR_ACCELERATION:
-// 		Serial.print("Linear Acceration - x: ");
-// 		Serial.print(sensorValue.un.linearAcceleration.x);
-// 		Serial.print(" y: ");
-// 		Serial.print(sensorValue.un.linearAcceleration.y);
-// 		Serial.print(" z: ");
-// 		Serial.println(sensorValue.un.linearAcceleration.z);
-// 		break;
-// 	case SH2_GRAVITY:
-// 		Serial.print("Gravity - x: ");
-// 		Serial.print(sensorValue.un.gravity.x);
-// 		Serial.print(" y: ");
-// 		Serial.print(sensorValue.un.gravity.y);
-// 		Serial.print(" z: ");
-// 		Serial.println(sensorValue.un.gravity.z);
-// 		break;
-// 	case SH2_ROTATION_VECTOR:
-// 		Serial.print("Rotation Vector - r: ");
-// 		Serial.print(sensorValue.un.rotationVector.real);
-// 		Serial.print(" i: ");
-// 		Serial.print(sensorValue.un.rotationVector.i);
-// 		Serial.print(" j: ");
-// 		Serial.print(sensorValue.un.rotationVector.j);
-// 		Serial.print(" k: ");
-// 		Serial.println(sensorValue.un.rotationVector.k);
-// 		break;
-// 	case SH2_GEOMAGNETIC_ROTATION_VECTOR:
-// 		Serial.print("Geo-Magnetic Rotation Vector - r: ");
-// 		Serial.print(sensorValue.un.geoMagRotationVector.real);
-// 		Serial.print(" i: ");
-// 		Serial.print(sensorValue.un.geoMagRotationVector.i);
-// 		Serial.print(" j: ");
-// 		Serial.print(sensorValue.un.geoMagRotationVector.j);
-// 		Serial.print(" k: ");
-// 		Serial.println(sensorValue.un.geoMagRotationVector.k);
-// 		break;
-
-// 	case SH2_GAME_ROTATION_VECTOR:
-// 		Serial.print("Game Rotation Vector - r: ");
-// 		Serial.print(sensorValue.un.gameRotationVector.real);
-// 		Serial.print(" i: ");
-// 		Serial.print(sensorValue.un.gameRotationVector.i);
-// 		Serial.print(" j: ");
-// 		Serial.print(sensorValue.un.gameRotationVector.j);
-// 		Serial.print(" k: ");
-// 		Serial.println(sensorValue.un.gameRotationVector.k);
-// 		break;
-
-// 	case SH2_STEP_COUNTER:
-// 		Serial.print("Step Counter - steps: ");
-// 		Serial.print(sensorValue.un.stepCounter.steps);
-// 		Serial.print(" latency: ");
-// 		Serial.println(sensorValue.un.stepCounter.latency);
-// 		break;
-
-// 	case SH2_STABILITY_CLASSIFIER: {
-// 		Serial.print("Stability Classification: ");
-// 		sh2_StabilityClassifier_t stability = sensorValue.un.stabilityClassifier;
-// 		switch (stability.classification) {
-// 		case STABILITY_CLASSIFIER_UNKNOWN:
-// 			Serial.println("Unknown");
-// 			break;
-// 		case STABILITY_CLASSIFIER_ON_TABLE:
-// 			Serial.println("On Table");
-// 			break;
-// 		case STABILITY_CLASSIFIER_STATIONARY:
-// 			Serial.println("Stationary");
-// 			break;
-// 		case STABILITY_CLASSIFIER_STABLE:
-// 			Serial.println("Stable");
-// 			break;
-// 		case STABILITY_CLASSIFIER_MOTION:
-// 			Serial.println("In Motion");
-// 			break;
-// 		}
-// 		break;
-// 	}
-
-// 	case SH2_RAW_ACCELEROMETER:
-// 		Serial.print("Raw Accelerometer - x: ");
-// 		Serial.print(sensorValue.un.rawAccelerometer.x);
-// 		Serial.print(" y: ");
-// 		Serial.print(sensorValue.un.rawAccelerometer.y);
-// 		Serial.print(" z: ");
-// 		Serial.println(sensorValue.un.rawAccelerometer.z);
-// 		break;
-// 	case SH2_RAW_GYROSCOPE:
-// 		Serial.print("Raw Gyro - x: ");
-// 		Serial.print(sensorValue.un.rawGyroscope.x);
-// 		Serial.print(" y: ");
-// 		Serial.print(sensorValue.un.rawGyroscope.y);
-// 		Serial.print(" z: ");
-// 		Serial.println(sensorValue.un.rawGyroscope.z);
-// 		break;
-// 	case SH2_RAW_MAGNETOMETER:
-// 		Serial.print("Raw Magnetic Field - x: ");
-// 		Serial.print(sensorValue.un.rawMagnetometer.x);
-// 		Serial.print(" y: ");
-// 		Serial.print(sensorValue.un.rawMagnetometer.y);
-// 		Serial.print(" z: ");
-// 		Serial.println(sensorValue.un.rawMagnetometer.z);
-// 		break;
-
-// 	case SH2_SHAKE_DETECTOR: {
-// 		Serial.print("Shake Detector - shake detected on axis: ");
-// 		sh2_ShakeDetector_t detection = sensorValue.un.shakeDetector;
-// 		switch (detection.shake) {
-// 		case SHAKE_X:
-// 			Serial.println("X");
-// 			break;
-// 		case SHAKE_Y:
-// 			Serial.println("Y");
-// 			break;
-// 		case SHAKE_Z:
-// 			Serial.println("Z");
-// 			break;
-// 		default:
-// 			Serial.println("None");
-// 			break;
-// 		}
-// 	}
-
-// 	case SH2_PERSONAL_ACTIVITY_CLASSIFIER: {
-
-// 		sh2_PersonalActivityClassifier_t activity =
-// 			sensorValue.un.personalActivityClassifier;
-// 		Serial.print("Activity classification - Most likely: ");
-// 		printActivity(activity.mostLikelyState);
-// 		Serial.println("");
-
-// 		Serial.println("Confidences:");
-// 		// if PAC_OPTION_COUNT is ever > 10, we'll need to
-// 		// care about page
-// 		for (uint8_t i = 0; i < PAC_OPTION_COUNT; i++) {
-// 			Serial.print("\t");
-// 			printActivity(i);
-// 			Serial.print(": ");
-// 			Serial.println(activity.confidence[i]);
-// 		}
-// 	}
-// 	}
-// }
