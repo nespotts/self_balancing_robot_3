@@ -27,7 +27,9 @@ private:
 	// uint32_t acc_interval;  // (micros between each update)
 	// uint32_t acc_timer;
 
-	AS5600 as5600 = AS5600(&Wire);
+	// AS5600 as5600 = AS5600(&Wire);
+	// AS5600 as5600 = AS5600(&Wire1);
+	AS5600 as5600;
 
 	void calculate_update_interval() {
 		update_interval = 1000000.0 / (float)rate;
@@ -94,10 +96,15 @@ public:
 	double angular_acceleration_deg; // deg / sec2
 
 
-	MagneticEncoder(int p_dir_pin, int p_rate = 100, bool p_debug = false) {
+	MagneticEncoder(int p_dir_pin, int p_wire, int p_rate = 100, bool p_debug = false) {
 		dir_pin = p_dir_pin;
 		rate = p_rate;
 		debug = p_debug;
+		if (p_wire == 0) {
+			as5600 = AS5600(&Wire);
+		} else {
+			as5600 = AS5600(&Wire1);
+		}
 	}
 
 	void resetPosition() {

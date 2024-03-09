@@ -12,6 +12,8 @@ public:
         en_pin = p_en_pin;
         dir_pin1 = p_dir_pin1;
         dir_pin2 = p_dir_pin2;
+
+        setup();
     }
 
     // setup motor pins
