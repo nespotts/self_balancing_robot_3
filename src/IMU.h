@@ -1,53 +1,36 @@
 #include <Adafruit_BNO08x.h>
 
-// this class should be a model for IMU data
-class IMU_data {
+class IMU {
 public:
-	IMU_data() {}
+	IMU() {}
 
 	// orientation
+	int orientation_status = 0;  // 0 - 3, 3 being most reliable
 	Quaternion pose_quaternion;
 	VectorFloat pose;  // in degrees
+	struct euler_t {
+		float yaw;
+		float pitch;
+		float roll;
+	} ypr;
 
 	// angular velocity
-	VectorFloat ang_vel;
+	VectorFloat ang_vel;   // rad/s
+	VectorFloat ang_vel_deg;   // rad/s
+	VectorFloat last_angular_velocity;
 	// angular acceleration
-	VectorFloat ang_acc;
+	VectorFloat inst_ang_acc;
+	ImuComponent angular_acceleration = ImuComponent(10, 10);  // rad/s^2
+	VectorFloat angular_acceleration_deg;
+
+
 	// linear acceleration
 	VectorFloat lin_acc;
 
-	float Yaw() {
-		return pose.z;
-	}
-
-	float Pitch() {
-		return pose.y;
-	}
-
-	float Roll() {
-		return pose.x;
-	}
-
-private:
-};
-
-
-// this class should be focused on interfacing with the sensor
-class IMU {
-public:
-	int orientation_status = 0;  // 0 - 3, 3 being most reliable
-	IMU_data data;
-
-	IMU() {
-		// do anything?
-		if (fast_mode) {
-			reportType = SH2_GYRO_INTEGRATED_RV;
-			reportIntervalUs = 2000;
-		} else {
-			reportType = SH2_ARVR_STABILIZED_RV;
-			reportIntervalUs = 5000;
-		}
-	}
+	// rates
+	float pose_rate;
+	float ang_vel_rate;
+	float lin_acc_rate;
 
 
 	void setup(void) {
@@ -58,7 +41,7 @@ public:
 		if (debug) Serial.println("BNO08x Found!");
 
 		setReports();
-		delay(100);
+		delay(10);
 	}
 
 
@@ -78,78 +61,25 @@ private:
 	bool fast_mode = true;
 	bool debug = false;
 
-	sh2_SensorId_t reportType;
-	long reportIntervalUs;
-
-	struct euler_t {
-		float yaw;
-		float pitch;
-		float roll;
-	} ypr;
+	uint32_t last_pose_time;
+	float seconds_past;
+	uint32_t last_ang_time;
+	uint32_t last_acc_time;
 
 	Adafruit_BNO08x bno08x = Adafruit_BNO08x(RESET_pin);
 	sh2_SensorValue_t sensorValue;
 
 	void setReports() {
 		if (debug) Serial.println("Setting desired reports");
-
-		// ************************ Orientation Quaternion ****************************
-		// slower 
-		if (!bno08x.enableReport(SH2_ARVR_STABILIZED_RV, 5000)) {
-			Serial.println("Could not enable stabilized remote vector");
+		if (!bno08x.enableReport(SH2_ROTATION_VECTOR)) {
+			Serial.println("Could not enable rotation vector");
 		}
-		// faster
-		// if (!bno08x.enableReport(SH2_GYRO_INTEGRATED_RV, 2000)) {
-		// 	Serial.println("Could not enable stabilized remote vector");
-		// }
-
-		// if (!bno08x.enableReport(SH2_ROTATION_VECTOR)) {
-		// 	Serial.println("Could not enable rotation vector");
-		// }
-		// if (!bno08x.enableReport(SH2_GEOMAGNETIC_ROTATION_VECTOR)) {
-		// 	Serial.println("Could not enable geomagnetic rotation vector");
-		// }
-		// if (!bno08x.enableReport(SH2_GAME_ROTATION_VECTOR)) {
-		// 	Serial.println("Could not enable game rotation vector");
-		// ****************************************************************************
-		// if (!bno08x.enableReport(SH2_ACCELEROMETER)) {
-		// 	Serial.println("Could not enable accelerometer");
-		// }
 		if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED)) {
 			Serial.println("Could not enable gyroscope");
 		}
-		// if (!bno08x.enableReport(SH2_MAGNETIC_FIELD_CALIBRATED)) {
-		// 	Serial.println("Could not enable magnetic field calibrated");
-		// }
 		if (!bno08x.enableReport(SH2_LINEAR_ACCELERATION)) {
 			Serial.println("Could not enable linear acceleration");
 		}
-		// if (!bno08x.enableReport(SH2_GRAVITY)) {
-		// 	Serial.println("Could not enable gravity vector");
-		// }
-
-		// }
-		// if (!bno08x.enableReport(SH2_STEP_COUNTER)) {
-		// 	Serial.println("Could not enable step counter");
-		// }
-		// if (!bno08x.enableReport(SH2_STABILITY_CLASSIFIER)) {
-		// 	Serial.println("Could not enable stability classifier");
-		// }
-		// if (!bno08x.enableReport(SH2_RAW_ACCELEROMETER)) {
-		// 	Serial.println("Could not enable raw accelerometer");
-		// }
-		// if (!bno08x.enableReport(SH2_RAW_GYROSCOPE)) {
-		// 	Serial.println("Could not enable raw gyroscope");
-		// }
-		// if (!bno08x.enableReport(SH2_RAW_MAGNETOMETER)) {
-		// 	Serial.println("Could not enable raw magnetometer");
-		// }
-		// if (!bno08x.enableReport(SH2_SHAKE_DETECTOR)) {
-		// 	Serial.println("Could not enable shake detector");
-		// }
-		// if (!bno08x.enableReport(SH2_PERSONAL_ACTIVITY_CLASSIFIER)) {
-		// 	Serial.println("Could not enable personal activity classifier");
-		// }
 	}
 
 	void getSensorEvent() {
@@ -157,205 +87,72 @@ private:
 			return;
 		}
 
-		static long last = 0;
-		long now = micros();
-
-
 		if (debug) { Serial.print(sensorValue.status); Serial.print("\t"); }
-		switch (sensorValue.sensorId) {
 
-		case SH2_ACCELEROMETER:
-			// Serial.print("Accelerometer - x: ");
-			// Serial.print(sensorValue.un.accelerometer.x);
-			// Serial.print(" y: ");
-			// Serial.print(sensorValue.un.accelerometer.y);
-			// Serial.print(" z: ");
-			// Serial.println(sensorValue.un.accelerometer.z);
-			break;
+		switch (sensorValue.sensorId) {
 		case SH2_GYROSCOPE_CALIBRATED:
-			// Serial.print("Gyro - x: ");
-			// Serial.print(sensorValue.un.gyroscope.x);
-			// Serial.print(" y: ");
-			// Serial.print(sensorValue.un.gyroscope.y);
-			// Serial.print(" z: ");
-			// Serial.println(sensorValue.un.gyroscope.z);
-			data.ang_vel.x = sensorValue.un.gyroscope.x;
-			data.ang_vel.y = sensorValue.un.gyroscope.y;
-			data.ang_vel.z = sensorValue.un.gyroscope.z;
-			break;
-		case SH2_MAGNETIC_FIELD_CALIBRATED:
-			// Serial.print("Magnetic Field - x: ");
-			// Serial.print(sensorValue.un.magneticField.x);
-			// Serial.print(" y: ");
-			// Serial.print(sensorValue.un.magneticField.y);
-			// Serial.print(" z: ");
-			// Serial.println(sensorValue.un.magneticField.z);
+			// angular velocity
+			seconds_past = ((double)micros() - (double)last_ang_time) / 1000000.0;
+			ang_vel.x = sensorValue.un.gyroscope.x;
+			ang_vel.y = sensorValue.un.gyroscope.y;
+			ang_vel.z = sensorValue.un.gyroscope.z;
+
+			ang_vel_deg.x = ang_vel.x * RAD_TO_DEG;
+			ang_vel_deg.y = ang_vel.y * RAD_TO_DEG;
+			ang_vel_deg.y = ang_vel.y * RAD_TO_DEG;
+
+			calculate_angular_acceleration();
+
+			ang_vel_rate = 1000000.0 / (micros() - last_ang_time);
+			last_ang_time = micros();
 			break;
 		case SH2_LINEAR_ACCELERATION:
-			// Serial.print("Linear Acceration - x: ");
-			// Serial.print(sensorValue.un.linearAcceleration.x);
-			// Serial.print(" y: ");
-			// Serial.print(sensorValue.un.linearAcceleration.y);
-			// Serial.print(" z: ");
-			// Serial.println(sensorValue.un.linearAcceleration.z);
-			data.lin_acc.x = sensorValue.un.linearAcceleration.x;
-			data.lin_acc.y = sensorValue.un.linearAcceleration.y;
-			data.lin_acc.z = sensorValue.un.linearAcceleration.z;
-			break;
-		case SH2_GRAVITY:
-			// Serial.print("Gravity - x: ");
-			// Serial.print(sensorValue.un.gravity.x);
-			// Serial.print(" y: ");
-			// Serial.print(sensorValue.un.gravity.y);
-			// Serial.print(" z: ");
-			// Serial.println(sensorValue.un.gravity.z);
+			// linear acceleration
+			lin_acc.x = sensorValue.un.linearAcceleration.x;
+			lin_acc.y = sensorValue.un.linearAcceleration.y;
+			lin_acc.z = sensorValue.un.linearAcceleration.z;
+
+			lin_acc_rate = 1000000.0 / (micros() - last_acc_time);
+			last_acc_time = micros();
 			break;
 		case SH2_ROTATION_VECTOR:
+			// orientation
+			orientation_status = sensorValue.status;
 			quaternionToEulerRV(&sensorValue.un.rotationVector, &ypr, true);
 
-			// Serial.print(now - last);             Serial.print("\t");
-			// last = now;
-			// Serial.print(sensorValue.status);     Serial.print("\t");  // This is accuracy in the range of 0 to 3
-			// Serial.print(ypr.yaw);                Serial.print("\t");
-			// Serial.print(ypr.pitch);              Serial.print("\t");
-			// Serial.print(ypr.roll); 							Serial.print("\t");
+			pose_quaternion.w = sensorValue.un.rotationVector.real;
+			pose_quaternion.x = sensorValue.un.rotationVector.i;
+			pose_quaternion.y = sensorValue.un.rotationVector.j;
+			pose_quaternion.z = sensorValue.un.rotationVector.k;
 
-			// Serial.print("Rotation Vector - r: ");
-			// Serial.print(sensorValue.un.rotationVector.real);
-			// Serial.print(" i: ");
-			// Serial.print(sensorValue.un.rotationVector.i);
-			// Serial.print(" j: ");
-			// Serial.print(sensorValue.un.rotationVector.j);
-			// Serial.print(" k: ");
-			// Serial.println(sensorValue.un.rotationVector.k);
-			break;
-		case SH2_ARVR_STABILIZED_RV:
-			orientation_status = sensorValue.status;
-			quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
+			pose.x = ypr.roll;
+			pose.y = ypr.pitch;
+			pose.z = ypr.yaw;
 
-			data.pose_quaternion.w = sensorValue.un.arvrStabilizedRV.real;
-			data.pose_quaternion.x = sensorValue.un.arvrStabilizedRV.i;
-			data.pose_quaternion.y = sensorValue.un.arvrStabilizedRV.j;
-			data.pose_quaternion.z = sensorValue.un.arvrStabilizedRV.k;
-
-			data.pose.x = ypr.roll;
-			data.pose.y = ypr.pitch;
-			data.pose.z = ypr.yaw;
-
-			// Serial.print(now - last);             Serial.print("\t");
-			// last = now;
-			// Serial.print(sensorValue.status);     Serial.print("\t");  // This is accuracy in the range of 0 to 3
-			// Serial.print(ypr.yaw);                Serial.print("\t");
-			// Serial.print(ypr.pitch);              Serial.print("\t");
-			// Serial.print(ypr.roll); 							Serial.print("\t");
-
-			// Serial.print("Rotation Vector - r: ");
-			// Serial.print(sensorValue.un.arvrStabilizedRV.real);
-			// Serial.print(" i: ");
-			// Serial.print(sensorValue.un.arvrStabilizedRV.i);
-			// Serial.print(" j: ");
-			// Serial.print(sensorValue.un.arvrStabilizedRV.j);
-			// Serial.print(" k: ");
-			// Serial.println(sensorValue.un.arvrStabilizedRV.k);
-			break;
-		case SH2_GYRO_INTEGRATED_RV:
-			quaternionToEulerGI(&sensorValue.un.gyroIntegratedRV, &ypr, true);
-
-			// Serial.print(now - last);             Serial.print("\t");
-			// last = now;
-			// Serial.print(sensorValue.status);     Serial.print("\t");  // This is accuracy in the range of 0 to 3
-			// Serial.print(ypr.yaw);                Serial.print("\t");
-			// Serial.print(ypr.pitch);              Serial.print("\t");
-			// Serial.print(ypr.roll); 							Serial.print("\t");
-
-			// Serial.print("Rotation Vector - r: ");
-			// Serial.print(sensorValue.un.gyroIntegratedRV.real);
-			// Serial.print(" i: ");
-			// Serial.print(sensorValue.un.gyroIntegratedRV.i);
-			// Serial.print(" j: ");
-			// Serial.print(sensorValue.un.gyroIntegratedRV.j);
-			// Serial.print(" k: ");
-			// Serial.println(sensorValue.un.gyroIntegratedRV.k);
-			break;
-
-		case SH2_GEOMAGNETIC_ROTATION_VECTOR:
-			// Serial.print("Geo-Magnetic Rotation Vector - r: ");
-			// Serial.print(sensorValue.un.geoMagRotationVector.real);
-			// Serial.print(" i: ");
-			// Serial.print(sensorValue.un.geoMagRotationVector.i);
-			// Serial.print(" j: ");
-			// Serial.print(sensorValue.un.geoMagRotationVector.j);
-			// Serial.print(" k: ");
-			// Serial.println(sensorValue.un.geoMagRotationVector.k);
-			break;
-
-		case SH2_GAME_ROTATION_VECTOR:
-			// Serial.print("Game Rotation Vector - r: ");
-			// Serial.print(sensorValue.un.gameRotationVector.real);
-			// Serial.print(" i: ");
-			// Serial.print(sensorValue.un.gameRotationVector.i);
-			// Serial.print(" j: ");
-			// Serial.print(sensorValue.un.gameRotationVector.j);
-			// Serial.print(" k: ");
-			// Serial.println(sensorValue.un.gameRotationVector.k);
-			break;
-
-		case SH2_STEP_COUNTER:
-			// Serial.print("Step Counter - steps: ");
-			// Serial.print(sensorValue.un.stepCounter.steps);
-			// Serial.print(" latency: ");
-			// Serial.println(sensorValue.un.stepCounter.latency);
-			break;
-
-		case SH2_STABILITY_CLASSIFIER: {
-			// Serial.print("Stability Classification: ");
-			sh2_StabilityClassifier_t stability = sensorValue.un.stabilityClassifier;
-			switch (stability.classification) {
-			case STABILITY_CLASSIFIER_UNKNOWN:
-				Serial.println("Unknown");
-				break;
-			case STABILITY_CLASSIFIER_ON_TABLE:
-				Serial.println("On Table");
-				break;
-			case STABILITY_CLASSIFIER_STATIONARY:
-				Serial.println("Stationary");
-				break;
-			case STABILITY_CLASSIFIER_STABLE:
-				Serial.println("Stable");
-				break;
-			case STABILITY_CLASSIFIER_MOTION:
-				Serial.println("In Motion");
-				break;
-			}
-			break;
-		}
-
-		case SH2_RAW_ACCELEROMETER:
-			// Serial.print("Raw Accelerometer - x: ");
-			// Serial.print(sensorValue.un.rawAccelerometer.x);
-			// Serial.print(" y: ");
-			// Serial.print(sensorValue.un.rawAccelerometer.y);
-			// Serial.print(" z: ");
-			// Serial.println(sensorValue.un.rawAccelerometer.z);
-			break;
-		case SH2_RAW_GYROSCOPE:
-			// Serial.print("Raw Gyro - x: ");
-			// Serial.print(sensorValue.un.rawGyroscope.x);
-			// Serial.print(" y: ");
-			// Serial.print(sensorValue.un.rawGyroscope.y);
-			// Serial.print(" z: ");
-			// Serial.println(sensorValue.un.rawGyroscope.z);
-			break;
-		case SH2_RAW_MAGNETOMETER:
-			// Serial.print("Raw Magnetic Field - x: ");
-			// Serial.print(sensorValue.un.rawMagnetometer.x);
-			// Serial.print(" y: ");
-			// Serial.print(sensorValue.un.rawMagnetometer.y);
-			// Serial.print(" z: ");
-			// Serial.println(sensorValue.un.rawMagnetometer.z);
+			pose_rate = 1000000.0 / (micros() - last_pose_time);
+			last_pose_time = micros();
 			break;
 		}
 	}
+
+
+	void calculate_angular_acceleration() {
+		inst_ang_acc.x = (ang_vel.x - last_angular_velocity.x) / seconds_past;
+		inst_ang_acc.y = (ang_vel.y - last_angular_velocity.y) / seconds_past;
+		inst_ang_acc.z = (ang_vel.z - last_angular_velocity.z) / seconds_past;
+
+
+		angular_acceleration.add_new_values(inst_ang_acc.x, inst_ang_acc.y, inst_ang_acc.z);
+
+		angular_acceleration_deg.x = angular_acceleration.x * RAD_TO_DEG;
+		angular_acceleration_deg.y = angular_acceleration.y * RAD_TO_DEG;
+		angular_acceleration_deg.z = angular_acceleration.z * RAD_TO_DEG;
+
+		last_angular_velocity.x = ang_vel.x;
+		last_angular_velocity.y = ang_vel.y;
+		last_angular_velocity.z = ang_vel.z;
+	}
+
 
 	void quaternionToEuler(float qr, float qi, float qj, float qk, euler_t* ypr, bool degrees = false) {
 		float sqr = sq(qr);
@@ -375,10 +172,6 @@ private:
 	}
 
 	void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotational_vector, euler_t* ypr, bool degrees = false) {
-		quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
-	}
-
-	void quaternionToEulerGI(sh2_GyroIntegratedRV_t* rotational_vector, euler_t* ypr, bool degrees = false) {
 		quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
 	}
 };

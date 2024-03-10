@@ -16,6 +16,8 @@ private:
 	int16_t dir_pin;
 	bool debug;
 
+	bool set_clockwise = true;
+
 	uint16_t rate;  // Hz  (updates / second)
 
 	uint32_t update_interval;  // (micros between each update)
@@ -96,7 +98,7 @@ public:
 	double angular_acceleration_deg; // deg / sec2
 
 
-	MagneticEncoder(int p_dir_pin, int p_wire, int p_rate = 100, bool p_debug = false) {
+	MagneticEncoder(int p_dir_pin, int p_wire, bool p_set_clockwise, int p_rate = 100, bool p_debug = false) {
 		dir_pin = p_dir_pin;
 		rate = p_rate;
 		debug = p_debug;
@@ -105,6 +107,9 @@ public:
 		} else {
 			as5600 = AS5600(&Wire1);
 		}
+
+		set_clockwise = p_set_clockwise;
+
 	}
 
 	void resetPosition() {
@@ -115,7 +120,11 @@ public:
 		// calculate update interval
 		calculate_update_interval();
 		as5600.begin(dir_pin);  //  set direction pin.
-		as5600.setDirection(AS5600_CLOCK_WISE);  //  default, just be explicit.
+		if (set_clockwise) {
+			as5600.setDirection(AS5600_CLOCK_WISE);  //  default, just be explicit
+		} else {
+			as5600.setDirection(AS5600_COUNTERCLOCK_WISE);  //  default, just be explicit
+		}
 
 		if (debug) {
 			Serial.print("AS5600 Address: ");
