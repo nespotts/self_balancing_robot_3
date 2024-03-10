@@ -1,13 +1,19 @@
-#include "Encoder.h"
+#pragma once
+
+#include "wheel.h"
 
 class Odometry {
 private:
 public:
-	MagneticEncoder enc1 = MagneticEncoder(38, 0, false, 500, false);
-	MagneticEncoder enc2 = MagneticEncoder(39, 1, true, 500, false);
-	
-	Odometry() {
+	MagneticEncoder left_encoder = MagneticEncoder(38, 0, false, 500, false);
+	MagneticEncoder right_encoder = MagneticEncoder(39, 1, true, 500, false);
+	// update rate
+	uint16_t rate;
 
+	Wheel left_wheel = Wheel(&left_encoder);
+
+	Odometry(uint16_t p_rate=500) {
+		rate = p_rate;
 	}
 
 	double theta_rate;
@@ -144,12 +150,10 @@ public:
 
 
 	void setup() {
-		enc1.setup();
-		enc2.setup();
+		left_wheel.setup();
 	}
 
 	void run() {
-		enc1.run();
-		enc2.run();
+		left_wheel.run();
 	}
 };

@@ -1,3 +1,5 @@
+#pragma once
+
 #include <PID_v1.h>
 
 uint32_t currenttime;

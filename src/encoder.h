@@ -1,103 +1,31 @@
+#pragma once
+
+#include "helper_functions.h"
 #include "AS5600.h"
 
 
 class MagneticEncoder {
-private:
-	// position variables
-	double last_angle_deg;
-
-	// velocity vars
-	DoubleList ang_vel = DoubleList(20);
-	double last_angular_vel;
-
-	// acceleration vars
-	DoubleList ang_acc = DoubleList(20);
-
-	int16_t dir_pin;
-	bool debug;
-
-	bool set_clockwise = true;
-
-	uint16_t rate;  // Hz  (updates / second)
-
-	uint32_t update_interval;  // (micros between each update)
-	uint32_t update_timer;
-
-	// uint32_t velocity_interval;  // (micros between each update)
-	// uint32_t velocity_timer;
-
-	// uint32_t acc_interval;  // (micros between each update)
-	// uint32_t acc_timer;
-
-	// AS5600 as5600 = AS5600(&Wire);
-	// AS5600 as5600 = AS5600(&Wire1);
-	AS5600 as5600;
-
-	void calculate_update_interval() {
-		update_interval = 1000000.0 / (float)rate;
-		// velocity_interval = (double)update_interval * 1.0;
-		// acc_interval = (double)update_interval * 1.0;
-
-		// Serial.println(velocity_interval);
-		// Serial.println(acc_interval);
-	}
-
-	void update_position() {
-		// cum position assumes at least 4 readings per revolution
-		counts = as5600.getCumulativePosition();
-		angle_deg = counts * AS5600_RAW_TO_DEGREES;
-		revolutions = angle_deg / 360.0;
-	}
-
-	void update_velocity(double seconds_past) {
-		// calculate angular velocity myself
-		// double current_ang_vel_deg = (angle_deg - last_angle_deg) / seconds_past;
-		// last_angle_deg = angle_deg;
-
-		// or use library to calculate angular velocity - may be more accurate because it does not rely o nthe cumulative position fx
-		double current_ang_vel_deg = as5600.getAngularSpeed(0);
-
-		// add current_ang_vel_deg to list
-		if (ang_vel.length < ang_vel.max_length) {
-			ang_vel.append(current_ang_vel_deg);
-		} else {
-			ang_vel.remove(0);
-			ang_vel.append(current_ang_vel_deg);
-		}
-
-		// ang_vel.print();
-		angular_velocity_deg = ang_vel.average();
-		rpm = (angular_velocity_deg / 360.0) * 60.0;
-	}
-
-	void update_acceleration(double seconds_past) {
-		// add current_ang_acc_deg to list
-		double current_ang_acc_deg = (angular_velocity_deg - last_angular_vel) / seconds_past;
-		last_angular_vel = angular_velocity_deg;
-
-		if (ang_acc.length < ang_acc.max_length) {
-			ang_acc.append(current_ang_acc_deg);
-		} else {
-			ang_acc.remove(0);
-			ang_acc.append(current_ang_acc_deg);
-		}
-		angular_acceleration_deg = ang_acc.average();
-	}
-
-
 public:
+	// update rate Hz  (updates / second)
+	uint16_t rate;
+	// flag flips every time a measurement update is complete
+	bool update_flag;
 	// position variables
 	int32_t counts; // counts 4096 is one rev
-	double angle_deg; // degrees
 	double angle_rad; //
+	double angle_deg; // degrees
 	double revolutions;
 
+	// angular velocity
+	double angular_velocity_rad;  // rad / sec
 	double angular_velocity_deg;  // deg / sec
 	double rpm;  // revolutions / minute
 
+	// angular acceleration
+	double angular_acceleration_rad; // rad / sec2
 	double angular_acceleration_deg; // deg / sec2
 
-
+	// constructor
 	MagneticEncoder(int p_dir_pin, int p_wire, bool p_set_clockwise, int p_rate = 100, bool p_debug = false) {
 		dir_pin = p_dir_pin;
 		rate = p_rate;
@@ -107,9 +35,7 @@ public:
 		} else {
 			as5600 = AS5600(&Wire1);
 		}
-
 		set_clockwise = p_set_clockwise;
-
 	}
 
 	void resetPosition() {
@@ -165,7 +91,90 @@ public:
 				Serial.print("\t");
 				Serial.println(revolutions);
 			}
+			update_flag = !update_flag;
 		}
+	}
+private:
+	// position variables
+	double last_angle_deg;
+
+	// velocity vars
+	DoubleList ang_vel = DoubleList(20);
+	double last_angular_vel;
+
+	// acceleration vars
+	DoubleList ang_acc = DoubleList(20);
+
+	int16_t dir_pin;
+	bool debug;
+
+	bool set_clockwise = true;
+
+	uint32_t update_interval;  // (micros between each update)
+	uint32_t update_timer;
+
+	// uint32_t velocity_interval;  // (micros between each update)
+	// uint32_t velocity_timer;
+
+	// uint32_t acc_interval;  // (micros between each update)
+	// uint32_t acc_timer;
+
+	// AS5600 as5600 = AS5600(&Wire);
+	// AS5600 as5600 = AS5600(&Wire1);
+	AS5600 as5600;
+
+	void calculate_update_interval() {
+		update_interval = 1000000.0 / (float)rate;
+		// velocity_interval = (double)update_interval * 1.0;
+		// acc_interval = (double)update_interval * 1.0;
+
+		// Serial.println(velocity_interval);
+		// Serial.println(acc_interval);
+	}
+
+	void update_position() {
+		// cum position assumes at least 4 readings per revolution
+		counts = as5600.getCumulativePosition();
+		angle_deg = counts * AS5600_RAW_TO_DEGREES;
+		angle_rad = counts * AS5600_RAW_TO_RADIANS;
+		revolutions = angle_deg / 360.0;
+	}
+
+	void update_velocity(double seconds_past) {
+		// calculate angular velocity myself
+		// double current_ang_vel_deg = (angle_deg - last_angle_deg) / seconds_past;
+		// last_angle_deg = angle_deg;
+
+		// or use library to calculate angular velocity - may be more accurate because it does not rely o nthe cumulative position fx
+		double current_ang_vel_deg = as5600.getAngularSpeed(0);
+
+		// add current_ang_vel_deg to list
+		if (ang_vel.length < ang_vel.max_length) {
+			ang_vel.append(current_ang_vel_deg);
+		} else {
+			ang_vel.remove(0);
+			ang_vel.append(current_ang_vel_deg);
+		}
+
+		// ang_vel.print();
+		angular_velocity_deg = ang_vel.average();
+		angular_velocity_rad = angular_velocity_deg * DEG_TO_RAD;
+		rpm = (angular_velocity_deg / 360.0) * 60.0;
+	}
+
+	void update_acceleration(double seconds_past) {
+		// add current_ang_acc_deg to list
+		double current_ang_acc_deg = (angular_velocity_deg - last_angular_vel) / seconds_past;
+		last_angular_vel = angular_velocity_deg;
+
+		if (ang_acc.length < ang_acc.max_length) {
+			ang_acc.append(current_ang_acc_deg);
+		} else {
+			ang_acc.remove(0);
+			ang_acc.append(current_ang_acc_deg);
+		}
+		angular_acceleration_deg = ang_acc.average();
+		angular_acceleration_rad = angular_acceleration_deg * DEG_TO_RAD; 
 	}
 };
 

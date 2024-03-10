@@ -54,8 +54,10 @@ void setup() {
 
 	p.Begin();
 	// p.AddTimeGraph("Test", 5000, "test", x, "test2", y);
-	p.AddTimeGraph("Left Encoder", 5000, "Angular Position", odom.enc1.angle_deg, "Angular Velocity", odom.enc1.angular_velocity_deg, "Angular Acceleration", odom.enc1.angular_acceleration_deg);
-	p.AddTimeGraph("Right Encoder", 5000, "Angular Position", odom.enc2.angle_deg, "Angular Velocity", odom.enc2.angular_velocity_deg, "Angular Acceleration", odom.enc2.angular_acceleration_deg);
+	p.AddTimeGraph("Left Encoder Deg", 5000, "Angular Position", odom.left_wheel.encoder->angle_deg);
+	p.AddTimeGraph("Left Encoder Rad", 5000, "Angular Position", odom.left_wheel.encoder->angle_rad);
+	// p.AddTimeGraph("Left Encoder", 5000, "Angular Position", odom.wheel.enc1.angle_deg, "Angular Velocity", odom.wheel.enc1.angular_velocity_deg, "Angular Acceleration", odom.wheel.enc1.angular_acceleration_deg);
+	// p.AddTimeGraph("Right Encoder", 5000, "Angular Position", odom.wheel.enc2.angle_deg, "Angular Velocity", odom.wheel.enc2.angular_velocity_deg, "Angular Acceleration", odom.wheel.enc2.angular_acceleration_deg);
 	// p.AddTimeGraph("IMU Orientation", 5000, "Yaw", imu.ypr.yaw, "Pitch", imu.ypr.pitch, "Roll", imu.ypr.roll);
 	// p.AddTimeGraph("IMU Linear Acceleration", 5000, "z", imu.lin_acc.z, "y", imu.lin_acc.y, "x", imu.lin_acc.x);
 	// p.AddTimeGraph("IMU Angular Velocity", 5000, "z", imu.ang_vel_deg.z, "y", imu.ang_vel_deg.y, "x", imu.ang_vel_deg.x);
