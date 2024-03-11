@@ -1,5 +1,5 @@
 #include <Adafruit_BNO08x.h>
-#include "IMU.h"
+#include "IMU/IMU.h"
 
 
 // this class should be focused on interfacing with the sensor

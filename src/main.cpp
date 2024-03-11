@@ -1,21 +1,16 @@
 #include <Arduino.h>
 #include "Wire.h"
 // #include "battery_monitor.h"
-#include "reboot.h"
-// #include "beeper_controller.h"
-#include "helper_3dmath.h"
-#include "helper_functions.h"
-#include "Lidar_scan.h"
-#include "Odometry.h"
-#include "IMU.h"
-#include "motor_controls.h"
-
-Motor left_motor(4, 5, 6);
-Motor right_motor(7, 8, 9);
-Odometry odom;
-IMU imu;
-
-#include "PID_controls.h"
+#include "Helpers/reboot.h"
+// #include "Beeper/beeper_controller.h"
+// BalanceBeeper beeper;
+#include "Helpers/helper_3dmath.h"
+#include "Helpers/helper_functions.h"
+#include "Lidar/Lidar_scan.h"
+#include "Odometry/Odometry.h"
+#include "IMU/IMU.h"
+#include "Motors/motor_controls.h"
+#include "Motors/PID_controls.h"
 // #include "control_logic.h"
 #include "NRF_radio.h"
 #include "functions.h"
@@ -52,10 +47,13 @@ void setup() {
 
 	// motor.setup();
 
+	// beeper.setup();
+
 	p.Begin();
 	// p.AddTimeGraph("Test", 5000, "test", x, "test2", y);
-	p.AddTimeGraph("Left Encoder Deg", 5000, "Angular Position", odom.left_wheel.encoder->angle_deg);
-	p.AddTimeGraph("Left Encoder Rad", 5000, "Angular Position", odom.left_wheel.encoder->angle_rad);
+	// p.AddTimeGraph("Left Encoder Deg", 2500, "Position", odom.left_wheel.encoder->angle_deg, "Velocity", odom.left_wheel.encoder->angular_velocity_deg, "Acceleration", odom.left_wheel.encoder->angular_acceleration_deg);
+	p.AddTimeGraph("Left Encoder", 5000, "Distance", odom.left_wheel.linear_distance, "Velocity", odom.left_wheel.linear_velocity, "Acceleration", odom.left_wheel.linear_acceleration);
+	p.AddTimeGraph("Left Encoder Rate", 5000, "Rate", odom.left_wheel.encoder->actual_rate);
 	// p.AddTimeGraph("Left Encoder", 5000, "Angular Position", odom.wheel.enc1.angle_deg, "Angular Velocity", odom.wheel.enc1.angular_velocity_deg, "Angular Acceleration", odom.wheel.enc1.angular_acceleration_deg);
 	// p.AddTimeGraph("Right Encoder", 5000, "Angular Position", odom.wheel.enc2.angle_deg, "Angular Velocity", odom.wheel.enc2.angular_velocity_deg, "Angular Acceleration", odom.wheel.enc2.angular_acceleration_deg);
 	// p.AddTimeGraph("IMU Orientation", 5000, "Yaw", imu.ypr.yaw, "Pitch", imu.ypr.pitch, "Roll", imu.ypr.roll);
@@ -77,6 +75,7 @@ void loop() {
 	// scan_run();
 	Receive_Data();
 	// controls_run();
+	// beeper.loop();
 
 	if (millis() - print_timer >= interval) {
 		print_timer = millis();

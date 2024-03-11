@@ -23,10 +23,10 @@ class BalanceBeeper {
 
     void loop(){
       beeper.loop();
-      if (battery.warning) {
-        beeper.queueSad();
-        battery.warning = false;
-      }
+      // if (battery.warning) {
+      //   beeper.queueSad();
+      //   battery.warning = false;
+      // }
     }
 
 };

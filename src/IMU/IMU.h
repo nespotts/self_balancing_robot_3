@@ -1,3 +1,5 @@
+#include "Helpers/helper_functions.h"
+#include "Helpers/helper_3dmath.h"
 #include <Adafruit_BNO08x.h>
 
 class IMU {

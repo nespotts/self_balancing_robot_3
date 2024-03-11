@@ -39,7 +39,7 @@ typedef struct {
   const int COUNT_SENSORS;   // number of lidar sensors
   bool start_ranging;        // flag to start ranging
   bool ranging_complete;     // flag to indicate all ranging is finished
-  long timeout;              // sensor reading timeout
+  uint32_t timeout;              // sensor reading timeout
   uint32_t start_time;       // timer started at beg. of each range
 } lidar_vars;
 
@@ -137,7 +137,7 @@ void lidar_update() {
   }
 
   // record ranges if both sensors have completed measurement.  Set ranging_complete flag
-  if (sensors[0].results_ready && sensors[1].results_ready || ((millis() - lidar.start_time) > lidar.timeout)) {
+  if ((sensors[0].results_ready && sensors[1].results_ready) || ((millis() - lidar.start_time) > lidar.timeout)) {
 
     for (int i = 0; i < lidar.COUNT_SENSORS; i++) {
         sensors[i].range = sensors[i].psensor->readRangeResult();
@@ -151,7 +151,7 @@ void lidar_update() {
         sensors[i].last_range = sensors[i].range;
     }
 
-    uint32_t delta_time = millis() - lidar.start_time;
+    // uint32_t delta_time = millis() - lidar.start_time;
 
     sensors[0].results_ready = false;
     sensors[1].results_ready = false;

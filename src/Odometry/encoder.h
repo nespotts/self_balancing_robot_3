@@ -1,6 +1,6 @@
 #pragma once
 
-#include "helper_functions.h"
+#include "Helpers/helper_functions.h"
 #include "AS5600.h"
 
 
@@ -8,6 +8,7 @@ class MagneticEncoder {
 public:
 	// update rate Hz  (updates / second)
 	uint16_t rate;
+	float actual_rate;
 	// flag flips every time a measurement update is complete
 	bool update_flag;
 	// position variables
@@ -69,6 +70,7 @@ public:
 
 		if (currentmicros - update_timer >= update_interval) {
 			double seconds_past = ((double)(currentmicros - update_timer) / 1000000.0);
+			actual_rate = 1 / seconds_past;
 
 			update_position();
 
@@ -103,7 +105,7 @@ private:
 	double last_angular_vel;
 
 	// acceleration vars
-	DoubleList ang_acc = DoubleList(20);
+	DoubleList ang_acc = DoubleList(25);
 
 	int16_t dir_pin;
 	bool debug;

@@ -1,6 +1,5 @@
 #include "PWMServo.h"
-#include "lidar.h"
-
+#include "Lidar/lidar.h"
 
 typedef struct {
   PWMServo* pservo;  // pointer to servo object
@@ -8,13 +7,13 @@ typedef struct {
   float subdivisions;   // number of subdivisions of 180 deg travel
   float increment_deg;  // subdivision degrees
   long us_per_deg;     // servo rotate time per degree
-  long travel_time;   // time allowed for servo travel in us
+  uint32_t travel_time;   // time allowed for servo travel in us
   int ranges[100];         // array containing all laser readings front and back in mm
   int positions[100];        // array containing servo positions in degrees
   int front_index;          // position to record front range
   int rear_index;       // position to record rear range
   int direction;       // direction of servo travel
-  long servo_start_time;   // time servo start moving
+  uint32_t servo_start_time;   // time servo start moving
   int state;        // 0 start ranging, 1 waiting on range, 2 servo move, 3 waiting on servo
 } scanList;
 

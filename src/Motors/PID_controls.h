@@ -2,6 +2,13 @@
 
 #include <PID_v1.h>
 
+
+Motor left_motor(4, 5, 6);
+Motor right_motor(7, 8, 9);
+Odometry odom;
+IMU imu;
+
+
 uint32_t currenttime;
 
 typedef struct{

@@ -1,16 +1,20 @@
 #pragma once
 
-#include "wheel.h"
+#include "Odometry/wheel.h"
 
 class Odometry {
 private:
 public:
-	MagneticEncoder left_encoder = MagneticEncoder(38, 0, false, 500, false);
-	MagneticEncoder right_encoder = MagneticEncoder(39, 1, true, 500, false);
+	// should probably move these declaratioions into the Wheel class.  Works for now.
+	MagneticEncoder left_encoder = MagneticEncoder(38, 0, false, 250, false);
+	MagneticEncoder right_encoder = MagneticEncoder(39, 1, true, 250, false);
+
+	Wheel left_wheel = Wheel(&left_encoder);
+	Wheel right_wheel = Wheel(&right_encoder);
+
 	// update rate
 	uint16_t rate;
 
-	Wheel left_wheel = Wheel(&left_encoder);
 
 	Odometry(uint16_t p_rate=500) {
 		rate = p_rate;
