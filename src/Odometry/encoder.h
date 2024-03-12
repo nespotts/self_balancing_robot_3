@@ -44,6 +44,7 @@ public:
 	}
 
 	void setup() {
+		Serial.println("setting up");
 		// calculate update interval
 		calculate_update_interval();
 		as5600.begin(dir_pin);  //  set direction pin.

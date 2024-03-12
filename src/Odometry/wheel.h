@@ -6,12 +6,15 @@ class Wheel {
 private:
 	double wheel_diameter = 66.0; // mm
 	double wheel_radius;
+	double last_distance;
 	// flag flips every time a measurement update is complete
-	bool update_flag;
 public:
+	bool update_flag;
 	MagneticEncoder *encoder;
 
 	double circumference;
+
+	double inst_distance;
 	double linear_distance;
 	double linear_velocity;
 	double linear_acceleration;
@@ -35,6 +38,9 @@ public:
 			linear_distance = encoder->angle_rad * wheel_radius;
 			linear_velocity = encoder->angular_velocity_rad * wheel_radius;
 			linear_acceleration = encoder->angular_acceleration_rad * wheel_radius;
+
+			inst_distance = linear_distance - last_distance;
+			last_distance = linear_distance;
 		}
 	}
 };

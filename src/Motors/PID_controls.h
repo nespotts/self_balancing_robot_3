@@ -190,7 +190,7 @@ void Command_Velocity(float lin_vel, float ang_vel){
 
 // 2. velocity from odom is added
 void velocity_run() {
-  velocity.input = odom.cent_velocity;
+  velocity.input = odom.cent.velocity;
   VelocityPID.Compute();
   // Serial.print(velocity.setpoint); Serial.print("\t");
   // Serial.print(velocity.input); Serial.print("\t"); Serial.print(velocity.output);
