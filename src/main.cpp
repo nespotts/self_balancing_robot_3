@@ -11,6 +11,8 @@
 #include "IMU/IMU.h"
 #include "Motors/motor_controls.h"
 #include "Motors/PID_controls.h"
+
+PID_Manager pids;
 // #include "control_logic.h"
 #include "NRF_radio.h"
 #include "functions.h"
@@ -43,7 +45,7 @@ void setup() {
 
 	Radio_Setup(3);
 
-	controls_setup();
+	pids.setup();
 
 	// motor.setup();
 
@@ -73,12 +75,12 @@ uint32_t interval = 20;
 
 void loop() {
 	reset.run();
-	p.Plot();
+	// p.Plot();
 	odom.run();
 	imu.run();
 	// scan_run();
 	Receive_Data();
-	// controls_run();
+	pids.run();
 	// beeper.loop();
 
 	if (millis() - print_timer >= interval) {

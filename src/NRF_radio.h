@@ -78,7 +78,7 @@ void Receive_Data() {
 
     // Serial.println(sizeof(receive_data));
 
-    // control.balance_angle = map((float)receive_data.left_knob, 0, 1023, -15, 15);
+    pids.control.balance_angle = map((float)receive_data.left_knob, 0, 1023, -15, 15);
     // mpu.gyro_drift_compensation = map((float)receive_data.right_knob, 0, 1023, -0.15, 0.15); 
 
     // if (receive_data.SWC == 0) {
