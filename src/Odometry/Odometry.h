@@ -28,7 +28,7 @@ public:
 	typedef struct {
 		double inst_distance;
 		double total_distance;
-		double velocity;
+		double velocity; // mm/s
 		double acceleration;
 		double x;       // x position delta
 		double y;       // y position delta

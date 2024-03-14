@@ -65,8 +65,8 @@ float setpoint_duration = 20000; // us
 void ApplyRemoteData() {
   // do this every time thru the loop - should be based on timed interval ****************
 
-  // cmd_vel.lin_vel = receive_data.elevator;
-  // cmd_vel.ang_vel = receive_data.aileron + map((float)receive_data.right_knob, 0, 1023, -250, 250);
+  pids.cmd_vel.lin_vel = receive_data.elevator;
+  pids.cmd_vel.ang_vel = receive_data.aileron + map((float)receive_data.right_knob, 0, 1023, -250, 250);
 }
 
 

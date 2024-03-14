@@ -67,28 +67,40 @@ public:
     control.min_power = 500;
     control.max_power = 4095;
     control.power_range = control.max_power - control.min_power;
-    control.balance_angle = -1.0;
+    control.balance_angle = 3.15;
     control.balance_cutoff_angle = 40;
 
-    cmd_vel.max_lin_vel = 0.35; // m/s
-    cmd_vel.max_ang_vel = 360; // deg/s
+    cmd_vel.max_lin_vel = 350; // mm/s
+    cmd_vel.max_ang_vel = 90; // deg/s
     cmd_vel.rate = 50;
     cmd_vel.duration = 1000.0 / cmd_vel.rate * 1000.0;
 
-    // velocity_setup();
+    velocity_setup();
     balance_setup();
-    // steer_setup();
+    steer_setup();
   }
 
   void run() {
     currenttime = micros();
     setTunings();
+    Command_Velocity(cmd_vel.lin_vel, cmd_vel.ang_vel);
 
+    // Serial.print(cmd_vel.ang_vel);
+    // Serial.print("\t");
+    // Serial.print(steer.setpoint);
+    // Serial.print("\t");
+    // Serial.print(steer.input);
+    // Serial.print("\t");
+    // Serial.println(steer.output);
+    // Serial.println(control.balance_angle);
+
+
+    // Serial.println(imu.absolute_yaw);
 
     // Don't start steering until balanced first
     if (millis() - control.startbalancetimer >= 500) {
-      control.leftoutput = bal.output;// + steer.output * 1.0;
-      control.rightoutput = bal.output;// - steer.output;
+      control.leftoutput = (bal.output - steer.output) * 1.0;
+      control.rightoutput = bal.output + steer.output;
     } else {
       control.leftoutput = bal.output;
       control.rightoutput = bal.output;
@@ -96,37 +108,40 @@ public:
 
     // Send Motor Command 
     if (fabs(imu.ypr.pitch) < control.balance_cutoff_angle && fabs(imu.ypr.roll) < control.balance_cutoff_angle) {
-      // velocity_run();
+      velocity_run();
       balance_run();
-      // steer_run();
+      steer_run();
       left_motor.command_motor(control.leftoutput);
       right_motor.command_motor(control.rightoutput);
     } else {
       left_motor.command_motor(0);
       right_motor.command_motor(0);
-      // steer.input = mpu.Zangle;
-      // steer.setpoint = steer.input;
-      odom.pose.angle_rad = imu.ypr.yaw * DEG_TO_RAD;
+      imu.reset_absolute_yaw();
+      steer.input = imu.absolute_yaw;
+      steer.setpoint = steer.input;
+      velocity.input = velocity.setpoint;
+
+      // odom.pose.angle_rad = imu.absolute_yaw * DEG_TO_RAD;
       control.startbalancetimer = millis();
     }
   }
 
   void velocity_setup() {
-    velocity.kp = 10.0;
-    velocity.ki = 4.7;
-    velocity.kd = 0.02;
+    velocity.kp = 0.0060;//0.001;//0.002;//0.01;//10.0;
+    velocity.ki = 0.00869;//0.0005;//0.019;//0.002;// 4.7;
+    velocity.kd = 0.00007;//0.000023;//0.0006;//0.0002;//0.02;
     velocity.rate = 100;
 
     VelocityPID.SetTunings(velocity.kp, velocity.ki, velocity.kd);
     VelocityPID.SetMode(AUTOMATIC);
-    VelocityPID.SetOutputLimits(-control.power_range, control.power_range);
+    VelocityPID.SetOutputLimits(-15, 15);
     VelocityPID.SetSampleTime(1000.0 / velocity.rate);
   }
 
   void balance_setup() {
-    bal.kp = 262; //262//105; //110; //130
-    bal.ki = 1067;// 1675; //2503; //2507; //2750
-    bal.kd = 11.73;//10.6; //5.7; //6.8;  //6.5
+    bal.kp = 203;//214;// 262; //262//105; //110; //130
+    bal.ki = 1118;//1119; //1067;// 1675; //2503; //2507; //2750
+    bal.kd = 10.42;//11.34; //11.73;//10.6; //5.7; //6.8;  //6.5
     bal.rate = 100;
     bal.setpoint = control.balance_angle;
 
@@ -142,7 +157,9 @@ public:
     steer.ki = 3.0;
     steer.kd = 0.03;
     steer.rate = 100;
-    // steer.setpoint = mpu6050.getAngleZ();  
+    // steer.input = imu.absolute_yaw;
+    steer.setpoint = imu.absolute_yaw;
+
     SteerPID.SetTunings(steer.kp, steer.ki, steer.kd);
     SteerPID.SetMode(AUTOMATIC);
     SteerPID.SetOutputLimits(-control.power_range, control.power_range);
@@ -153,23 +170,28 @@ public:
   void Command_Velocity(float lin_vel, float ang_vel) {
     if (currenttime - cmd_vel.timer >= cmd_vel.duration) {
 
+
       // balancing version
-      velocity.setpoint = map(lin_vel, 0, 1023, -0.35, 0.35);
+      velocity.setpoint = map(lin_vel, 0, 1023, -cmd_vel.max_lin_vel, cmd_vel.max_lin_vel);
       // for non-balancing version
       // velocity.setpoint = map(lin_vel, 0, 1023, -0.75,0.75);
 
-      steer.setpoint -= map(ang_vel, 0, 1023, -cmd_vel.max_ang_vel * (cmd_vel.duration / 1000000.0), cmd_vel.max_ang_vel * (cmd_vel.duration / 1000000.0));
+      if (fabs(imu.ypr.pitch) < control.balance_cutoff_angle && fabs(imu.ypr.roll) < control.balance_cutoff_angle) {
+        steer.setpoint -= map(ang_vel, 0, 1023, -cmd_vel.max_ang_vel * (cmd_vel.duration / 1000000.0), cmd_vel.max_ang_vel * (cmd_vel.duration / 1000000.0));
+      }
+
       cmd_vel.timer = currenttime;
     }
   }
 
   // 2. velocity from odom is added
   void velocity_run() {
-
+    velocity.input = odom.cent.velocity;
+    VelocityPID.Compute();
   }
 
   void balance_run() {
-    bal.setpoint = control.balance_angle;
+    bal.setpoint = control.balance_angle - velocity.output;// + map(cmd_vel.lin_vel, 0, 1023, 5, -5);
     bal.input = -imu.ypr.pitch;
     BalancePID.Compute();
 
@@ -182,7 +204,16 @@ public:
   }
 
   void steer_run() {
+    steer.input = imu.absolute_yaw;
+    SteerPID.Compute();
 
+    // Serial.println(steer.setpoint);
+    // set steer power deadband
+    // if (steer.output > 0) {
+    //   steer.output += control.min_power;
+    // } else if (steer.output < 0) {
+    //   steer.output -= control.min_power;
+    // }
   }
 
   void setTunings() {
@@ -194,17 +225,17 @@ public:
       inByte[1] = '\0';
       // Serial.print(inByte);
       if (strcmp(inByte, "q") == 0) {
-        bal.kp *= 1.01;
+        steer.kp *= 1.01;
       } else if (strcmp(inByte, "a") == 0) {
-        bal.kp *= 0.99;
+        steer.kp *= 0.99;
       } else if (strcmp(inByte, "w") == 0) {
-        bal.ki *= 1.01;
+        steer.ki *= 1.01;
       } else if (strcmp(inByte, "s") == 0) {
-        bal.ki *= 0.99;
+        steer.ki *= 0.99;
       } else if (strcmp(inByte, "e") == 0) {
-        bal.kd *= 1.01;
+        steer.kd *= 1.01;
       } else if (strcmp(inByte, "d") == 0) {
-        bal.kd *= 0.99;
+        steer.kd *= 0.99;
       } else if (strcmp(inByte, "r") == 0) {
         bal.setpoint += 0.1;
       } else if (strcmp(inByte, "f") == 0) {
@@ -223,13 +254,13 @@ public:
         velocity.kd *= 1.01;
       }
 
-      Serial.print(bal.kp, 8); Serial.print("\t"); Serial.print(bal.ki, 8);
-      Serial.print("\t"); Serial.print(bal.kd, 8); Serial.print("\t"); Serial.print(bal.setpoint, 2);
+      Serial.print(steer.kp, 8); Serial.print("\t"); Serial.print(steer.ki, 8);
+      Serial.print("\t"); Serial.print(steer.kd, 8); Serial.print("\t"); Serial.print(bal.setpoint, 2);
       Serial.print("\t"); Serial.print(velocity.kp, 8); Serial.print("\t"); Serial.print(velocity.ki, 8);
       Serial.print("\t"); Serial.println(velocity.kd, 8);
 
-      BalancePID.SetTunings(bal.kp, bal.ki, bal.kd);
-      // SteerStraightPID.SetTunings(steer.kp, steer.ki, steer.kd);
+      // BalancePID.SetTunings(bal.kp, bal.ki, bal.kd);
+      // SteerPID.SetTunings(steer.kp, steer.ki, steer.kd);
       VelocityPID.SetTunings(velocity.kp, velocity.ki, velocity.kd);
       index++;
     }

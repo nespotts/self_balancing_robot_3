@@ -54,7 +54,9 @@ void setup() {
 	p.Begin();
 	// p.AddXYGraph("Test", 5000, "X", odom.cent.x, "Y", odom.cent.y);
 	// p.AddTimeGraph("Test", 5000, "test", x, "test2", y);
-	p.AddTimeGraph("Angular Velocity", 5000, "Velocity", odom.cent.total_distance);
+	// p.AddTimeGraph("IMU", 5000, "Absolute Yaw 1", imu.absolute_yaw, "yaw", imu.ypr.yaw);
+	p.AddTimeGraph("PIDs", 5000, "left motor", pids.control.leftoutput, "right motor", pids.control.rightoutput);
+	// p.AddTimeGraph("Angular Velocity", 5000, "Velocity", odom.cent.total_distance);
 	// p.AddTimeGraph("Angular Velocity", 5000, "Velocity", odom.pose.inst_angle_rad);
 	// p.AddTimeGraph("Left Encoder Deg", 2500, "Position", odom.left_wheel.encoder->angle_deg, "Velocity", odom.left_wheel.encoder->angular_velocity_deg, "Acceleration", odom.left_wheel.encoder->angular_acceleration_deg);
 	// p.AddTimeGraph("Left Encoder", 5000, "Distance", odom.left_wheel.linear_distance, "Velocity", odom.left_wheel.linear_velocity, "Acceleration", odom.left_wheel.linear_acceleration);

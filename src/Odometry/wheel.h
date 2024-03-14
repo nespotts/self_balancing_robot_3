@@ -16,7 +16,7 @@ public:
 
 	double inst_distance;
 	double linear_distance;
-	double linear_velocity;
+	double linear_velocity; // mm/s
 	double linear_acceleration;
 
 	Wheel(MagneticEncoder *p_encoder) {

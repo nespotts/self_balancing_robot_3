@@ -10,6 +10,9 @@ public:
 	int orientation_status = 0;  // 0 - 3, 3 being most reliable
 	Quaternion pose_quaternion;
 	VectorFloat pose;  // in degrees
+
+	double absolute_yaw;
+
 	struct euler_t {
 		float yaw;
 		float pitch;
@@ -55,6 +58,15 @@ public:
 		getSensorEvent();
 	}
 
+	void reset_absolute_yaw() {
+		revs = 0;
+		if (ypr.yaw >= 0) {
+			absolute_yaw = ypr.yaw;
+		} else {
+			absolute_yaw = (360.0 + ypr.yaw);
+		}
+	}
+
 
 private:
 	int CS_pin = 10;
@@ -67,6 +79,10 @@ private:
 	float seconds_past;
 	uint32_t last_ang_time;
 	uint32_t last_acc_time;
+
+	float last_yaw;
+	bool init_absolute_yaw = false;
+	int16_t revs = 0;
 
 	Adafruit_BNO08x bno08x = Adafruit_BNO08x(RESET_pin);
 	sh2_SensorValue_t sensorValue;
@@ -131,9 +147,40 @@ private:
 			pose.y = ypr.pitch;
 			pose.z = ypr.yaw;
 
+			calculate_absolute_yaw();
+
 			pose_rate = 1000000.0 / (micros() - last_pose_time);
 			last_pose_time = micros();
+
+			// Serial.print(sensorValue.status);     Serial.print("\t");  // This is accuracy in the range of 0 to 3
+			// Serial.print(ypr.yaw);                Serial.print("\t");
+			// Serial.print(last_yaw);              Serial.print("\t");
+			// // Serial.print(absolute_yaw); 							Serial.print("\t");
+			// Serial.print(absolute_yaw2); 							Serial.print("\t");
+			// Serial.print(revs); 							Serial.print("\t");
+			// Serial.println();
 			break;
+		}
+	}
+
+
+	void calculate_absolute_yaw() {
+		if (!init_absolute_yaw) {
+			last_yaw = ypr.yaw;
+			init_absolute_yaw = true;
+		}
+
+		if (ypr.yaw <= 0 && last_yaw >= 0 && ypr.yaw > -90.0) {
+			revs--;
+		} else if (ypr.yaw >= 0 && last_yaw <= 0 && last_yaw > -90.0) {
+			revs++;
+		}
+		last_yaw = ypr.yaw;
+
+		if (ypr.yaw >= 0) {
+			absolute_yaw = revs * 360.0 + ypr.yaw;
+		} else {
+			absolute_yaw = revs * 360.0 + (360.0 + ypr.yaw);
 		}
 	}
 
