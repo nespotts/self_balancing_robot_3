@@ -1,54 +1,73 @@
-typedef struct {
-  int cell1_pin;
-  int cell2_pin;
-  int cell3_pin;
-  float cell1_volts;
-  float cell2_volts;
-  float cell3_volts;
-  float total_voltage;
-  float min_cell_voltage;
-  int cell1_adc;
-  int cell2_adc;
-  int cell3_adc;
-  long timer;
-  long interval;
-  float adcPerV;
-  bool warning;
-} battery_stats;
+class BatteryMonitor {
+public:
+	// constructor
+	BatteryMonitor() {
+		// pass
+	}
 
-battery_stats battery{16,15,14,0,0,0,0,3.5,0,0,0,0,5000,55.6, false};
+	typedef struct {
+		float cell1;
+		float cell2;
+		float cell3;
+	} cellF;
 
-// setup and select run interval in ms
-void battery_setup(long interval = 5000) {
-  // pin assignments & scaling
-  pinMode(battery.cell1_pin, INPUT);
-  pinMode(battery.cell2_pin, INPUT);
-  pinMode(battery.cell3_pin, INPUT);
-  battery.interval = interval;
-}
+	cellF volts;
 
-void battery_run() {
-  if ((millis() - battery.timer) >= battery.interval) {
-    battery.cell1_adc= analogRead(battery.cell1_pin);
-    battery.cell2_adc = analogRead(battery.cell2_pin);
-    battery.cell3_adc = analogRead(battery.cell3_pin);
-    battery.cell1_volts = battery.cell1_adc / battery.adcPerV;
-    battery.cell2_volts = (battery.cell2_adc-battery.cell1_adc) / battery.adcPerV;
-    battery.cell3_volts = (battery.cell3_adc-battery.cell2_adc) / battery.adcPerV;
-    battery.total_voltage = battery.cell1_volts+battery.cell2_volts+battery.cell3_volts;
-    battery.timer = millis();
+	float total_voltage;
+	float min_cell_voltage;
+	bool warning = false;
+	bool debug = true;
 
-    if (battery.cell1_volts < battery.min_cell_voltage || battery.cell2_volts < battery.min_cell_voltage || battery.cell3_volts < battery.min_cell_voltage) {
-      Serial.println("Battery Too Low");
-      Serial.print("Cell 1: "); Serial.print(battery.cell1_volts);
-      Serial.print("V\tCell 2: "); Serial.print(battery.cell2_volts);
-      Serial.print("V\tCell 3: "); Serial.print(battery.cell3_volts);
-      Serial.print("V\tTotal Voltage: "); Serial.print(battery.total_voltage); 
-      Serial.println("V");
-      battery.warning = true;
-    } else {
-      battery.warning = false;
-    }
-  }
+	void setup() {
+		// pin assignments & scaling
+		pinMode(pins.cell1, INPUT);
+		pinMode(pins.cell2, INPUT);
+		pinMode(pins.cell3, INPUT);
+		pins.cell1 = 14;
+		pins.cell2 = 40;
+		pins.cell3 = 41;
+	}
 
-}
+	void run() {
+		if ((millis() - timer) >= interval) {
+			adc.cell1 = analogRead(pins.cell1);
+			adc.cell2 = analogRead(pins.cell2);
+			adc.cell3 = analogRead(pins.cell3);
+			volts.cell1 = adc.cell1 / adcPerV;
+			volts.cell2 = (adc.cell2 - adc.cell1) / adcPerV;
+			volts.cell3 = (adc.cell3 - adc.cell2) / adcPerV;
+			total_voltage = volts.cell1 + volts.cell2 + volts.cell3;
+			timer = millis();
+
+			if (volts.cell1 < min_cell_voltage || volts.cell2 < min_cell_voltage || volts.cell3 < min_cell_voltage) {
+				if (debug) Serial.println("Battery Too Low");
+				warning = true;
+			} else {
+				warning = false;
+			}
+
+			if (debug) {
+				Serial.print("Cell 1: "); Serial.print(volts.cell1);
+				Serial.print("\tCell 2: "); Serial.print(volts.cell2);
+				Serial.print("\tCell 3: "); Serial.print(volts.cell3);
+				Serial.print("\tTotal Voltage: "); Serial.print(total_voltage);
+				Serial.println();
+			}
+		}
+
+	}
+
+private:
+	typedef struct {
+		int cell1;
+		int cell2;
+		int cell3;
+	} cellI;
+
+	cellI adc;
+	cellI pins;
+
+	float adcPerV = 73.3182;
+	uint16_t interval = 500;
+	uint32_t timer;
+};

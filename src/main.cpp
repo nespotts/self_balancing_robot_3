@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "Wire.h"
-// #include "battery_monitor.h"
+#include "battery_monitor.h"
+BatteryMonitor bm;
 #include "Helpers/reboot.h"
 // #include "Beeper/beeper_controller.h"
 // BalanceBeeper beeper;
@@ -11,7 +12,6 @@
 #include "IMU/IMU.h"
 #include "Motors/motor_controls.h"
 #include "Motors/PID_controls.h"
-
 PID_Manager pids;
 // #include "control_logic.h"
 #include "NRF_radio.h"
@@ -23,11 +23,7 @@ PID_Manager pids;
 // // can't use pin 13 because that is SCK for SPI 0
 // // auto led = JLed(13).Breathe(2000).Forever();
 
-
-
-
 Plotter p;
-
 Reset reset;
 
 
@@ -35,22 +31,15 @@ void setup() {
 	Serial.begin(115200);
 	Wire.begin();
 	Wire1.begin();
-
 	odom.setup();
-
 	imu.setup();
-
 	// servo pin, num subdivisions
 	scan_setup(2, 16);
-
 	Radio_Setup(3);
-
 	pids.setup();
-
+	bm.setup();
 	// motor.setup();
-
 	// beeper.setup();
-
 	p.Begin();
 	// p.AddXYGraph("Test", 5000, "X", odom.cent.x, "Y", odom.cent.y);
 	// p.AddTimeGraph("Test", 5000, "test", x, "test2", y);
@@ -83,15 +72,11 @@ void loop() {
 	// scan_run();
 	Receive_Data();
 	pids.run();
+	bm.run();
 	// beeper.loop();
 
 	if (millis() - print_timer >= interval) {
 		print_timer = millis();
 
-		// Serial.print(imu.Pitch());
-		// Serial.println(imu.Pitch());
-		// serial_printer("Pitch: ", String(imu.Pitch()), " \tRoll: ", String(imu.Roll()), "\tYaw: ", String(imu.Yaw()));
-		// serial_printer(String(imu.ang_vel.x), "\t", String(imu.ang_vel.y), "\t", String(imu.ang_vel.z));
-		// serial_printer("linear acceleration x: ", String(imu.lin_acc.x), "\t y: ", String(imu.lin_acc.y), "\t z: ", String(imu.lin_acc.z));
 	}
 }
