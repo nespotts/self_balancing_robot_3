@@ -67,20 +67,20 @@ uint32_t interval = 10;
 
 void loop() {
 	reset.run();
-	left_motor.exp_factor = (float)receive_data.left_knob / 50.0;
-	left_motor.interval = (float)receive_data.right_knob / 100.0;
+	// left_motor.exp_factor = (float)receive_data.left_knob / 50.0;
+	// left_motor.interval = (float)receive_data.right_knob / 100.0;
 
-	left_motor.config_motor_run();
+	// left_motor.config_motor_run();
 	odom.run();
 	imu.run();
 	// scan_run();
 	Receive_Data();
-	// pids.run();
+	pids.run();
 	bm.run();
 	// beeper.loop();
 
 	if (millis() - plot_timer >= interval) {
-		p.Plot();
+		// p.Plot();
 		// Serial.print(left_motor.motor_speed_input); 
 		// Serial.print("\t");
 		// Serial.print(left_motor.motor_speed_output);

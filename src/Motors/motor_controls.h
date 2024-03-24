@@ -52,8 +52,8 @@ public:
 
     uint32_t timer;
     uint32_t interval = 5;
-    float exp_factor = 10.36;
-    float inflection_point_x = 1000.0;
+    float exp_factor = 3.92;
+    float inflection_point_x = 1250.0;
     float inflection_point_y = 2750.0;
     float linear_slope;
     float linear_intercept;

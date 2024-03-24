@@ -144,7 +144,7 @@ public:
     bal.kp = 203;//214;// 262; //262//105; //110; //130
     bal.ki = 1118;//1119; //1067;// 1675; //2503; //2507; //2750
     bal.kd = 10.42;//11.34; //11.73;//10.6; //5.7; //6.8;  //6.5
-    bal.rate = 200;
+    bal.rate = 100;
     bal.setpoint = control.balance_angle;
 
     BalancePID.SetTunings(bal.kp, bal.ki, bal.kd);
