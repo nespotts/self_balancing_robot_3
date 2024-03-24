@@ -1,19 +1,20 @@
 #include <Arduino.h>
 #include "Wire.h"
 #include "battery_monitor.h"
-BatteryMonitor bm;
+BatteryMonitor battery;
 #include "Helpers/reboot.h"
 // #include "Beeper/beeper_controller.h"
 // BalanceBeeper beeper;
 #include "Helpers/helper_3dmath.h"
 #include "Helpers/helper_functions.h"
 #include "Lidar/Lidar_scan.h"
+#include "NRF_radio.h"
+NRF_Radio radio;
 #include "Odometry/Odometry.h"
 #include "IMU/IMU.h"
 #include "Motors/motor_controls.h"
 #include "Motors/PID_controls.h"
 PID_Manager pids;
-#include "NRF_radio.h"
 // #include "control_logic.h"
 #include "functions.h"
 #include "Plotter.h"
@@ -35,10 +36,10 @@ void setup() {
 	imu.setup();
 	// servo pin, num subdivisions
 	scan_setup(2, 16);
-	Radio_Setup(3);
+	radio.setup(3);
 	pids.setup();
 
-	bm.setup();
+	battery.setup();
 	p.Begin();
 	p.AddXYGraph("Test", 100000, "Right Motor Speed", left_motor.motor_speed_input, "Right Angular Velocity", odom.left_encoder.angular_velocity_deg);
 	p.AddXYGraph("Test", 100000, "speed input", left_motor.motor_speed_input, "speed output", left_motor.motor_speed_output);
@@ -74,12 +75,13 @@ void loop() {
 	odom.run();
 	imu.run();
 	// scan_run();
-	Receive_Data();
+	radio.run();
 	pids.run();
-	bm.run();
+	battery.run();
 	// beeper.loop();
 
 	if (millis() - plot_timer >= interval) {
+		// control plot interval to a manageable rate
 		// p.Plot();
 		// Serial.print(left_motor.motor_speed_input); 
 		// Serial.print("\t");
