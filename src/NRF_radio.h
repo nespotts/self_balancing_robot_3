@@ -29,7 +29,10 @@ public:
 	RECEIVE_DATA_STRUCTURE receive_data;
 
 	struct SEND_DATA_STRUCTURE {
-		float battery_voltage;
+		uint16_t battery_voltage;
+		uint16_t battery_cell1;
+		uint16_t battery_cell2;
+		uint16_t battery_cell3;
 		uint16_t front_dist;
 		uint16_t left_dist;
 		uint16_t right_dist;
@@ -60,7 +63,10 @@ public:
 		// TODO - change from assigning the scan values here to in the corresponding class (lidar_scan)
 
 		// delay(10);
-		send_data.battery_voltage = battery.total_voltage;
+		send_data.battery_voltage = battery.total_voltage * 100.0;
+		send_data.battery_cell1 = battery.volts.cell1 * 100.0;
+		send_data.battery_cell2 = battery.volts.cell2 * 100.0;
+		send_data.battery_cell3 = battery.volts.cell3 * 100.0;
 		send_data.front_dist = scan.ranges[16];
 		// send_data.back_dist = scan.ranges[((int)scan.subdivisions/2)];
 		// send_data.left_dist = scan.ranges[((int)scan.subdivisions/4)];

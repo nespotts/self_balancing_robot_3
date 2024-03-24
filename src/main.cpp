@@ -30,6 +30,7 @@ Reset reset;
 
 void setup() {
 	Serial.begin(115200);
+	SPI.begin();
 	Wire.begin();
 	Wire1.begin();
 	odom.setup();
@@ -63,10 +64,12 @@ void setup() {
 }
 
 uint32_t plot_timer;
-uint32_t interval = 10;
-
+uint32_t interval = 50;
+uint32_t cycles_past = 0;
+float loop_rate;
 
 void loop() {
+	cycles_past++;
 	reset.run();
 	// left_motor.exp_factor = (float)receive_data.left_knob / 50.0;
 	// left_motor.interval = (float)receive_data.right_knob / 100.0;
@@ -81,6 +84,10 @@ void loop() {
 	// beeper.loop();
 
 	if (millis() - plot_timer >= interval) {
+		loop_rate = (float)cycles_past / (((float)millis() - (float)plot_timer) / 1000.0);
+		cycles_past = 0;
+		Serial.println(loop_rate);
+
 		// control plot interval to a manageable rate
 		// p.Plot();
 		// Serial.print(left_motor.motor_speed_input); 
@@ -92,3 +99,88 @@ void loop() {
 		plot_timer = millis();
 	}
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// TEST CODE TO SHOW IMU BLOCKING ISSUE
+
+// #include <Arduino.h>
+// #include <Adafruit_BNO08x.h>
+
+// // For SPI mode, we need a CS pin
+// #define BNO08X_CS 10
+// #define BNO08X_INT 30
+// #define BNO08X_RESET 33
+
+
+// Adafruit_BNO08x  bno08x(BNO08X_RESET);
+// sh2_SensorValue_t sensorValue;
+
+
+// sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
+// long reportIntervalUs = 5000;
+
+// void setReports(sh2_SensorId_t reportType, long report_interval) {
+// 	Serial.println("Setting desired reports");
+// 	if (!bno08x.enableReport(reportType, report_interval)) {
+// 		Serial.println("Could not enable stabilized remote vector");
+// 	}
+// }
+
+// void setup(void) {
+
+// 	Serial.begin(115200);
+// 	while (!Serial) delay(10);     // will pause Zero, Leonardo, etc until serial console opens
+
+// 	Serial.println("Adafruit BNO08x test!");
+
+// 	// Try to initialize!
+// 	if (!bno08x.begin_SPI(BNO08X_CS, BNO08X_INT)) {
+// 		Serial.println("Failed to find BNO08x chip");
+// 		while (1) { delay(10); }
+// 	}
+// 	Serial.println("BNO08x Found!");
+
+// 	setReports(reportType, reportIntervalUs);
+
+// 	Serial.println("Reading events");
+// 	delay(100);
+// }
+
+
+// uint32_t timer;
+// uint32_t interval = 50;
+// uint32_t cycles_past = 0;
+// double loop_rate;
+
+// void loop() {
+// 	cycles_past++;
+
+// 	if (bno08x.wasReset()) {
+// 		Serial.print("sensor was reset ");
+// 		setReports(reportType, reportIntervalUs);
+// 	}
+
+// 	// comment this line out for inscreased loop_rate
+// 	// if it is uncommented, the loop_rate exactly matches the event rate
+// 	bno08x.getSensorEvent(&sensorValue);
+
+// 	if (micros() - timer >= interval) {
+// 		loop_rate = (double)cycles_past / (((double)micros() - (double)timer) / 1000000.0);
+// 		cycles_past = 0;
+// 		Serial.println(loop_rate);
+// 		timer = micros();
+// 	}
+// }

@@ -101,9 +101,12 @@ private:
 	}
 
 	void getSensorEvent() {
+		int start = micros();
 		if (!bno08x.getSensorEvent(&sensorValue)) {
+			Serial.println("No Event");
 			return;
 		}
+		// Serial.println(micros() - start);
 
 		if (debug) { Serial.print(sensorValue.status); Serial.print("\t"); }
 
