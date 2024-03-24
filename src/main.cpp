@@ -13,8 +13,8 @@ BatteryMonitor bm;
 #include "Motors/motor_controls.h"
 #include "Motors/PID_controls.h"
 PID_Manager pids;
-// #include "control_logic.h"
 #include "NRF_radio.h"
+// #include "control_logic.h"
 #include "functions.h"
 #include "Plotter.h"
 
@@ -37,14 +37,15 @@ void setup() {
 	scan_setup(2, 16);
 	Radio_Setup(3);
 	pids.setup();
+
 	bm.setup();
-	// motor.setup();
-	// beeper.setup();
 	p.Begin();
+	// p.AddXYGraph("Test", 100000, "Right Motor Speed", left_motor.motor_speed_input, "Right Angular Velocity", odom.left_encoder.angular_velocity_deg);
+	// p.AddXYGraph("Test", 100000, "speed input", left_motor.motor_speed_input, "speed output", left_motor.motor_speed_output);
 	// p.AddXYGraph("Test", 5000, "X", odom.cent.x, "Y", odom.cent.y);
 	// p.AddTimeGraph("Test", 5000, "test", x, "test2", y);
 	// p.AddTimeGraph("IMU", 5000, "Absolute Yaw 1", imu.absolute_yaw, "yaw", imu.ypr.yaw);
-	p.AddTimeGraph("PIDs", 5000, "left motor", pids.control.leftoutput, "right motor", pids.control.rightoutput);
+	// p.AddTimeGraph("PIDs", 5000, "left motor", pids.control.leftoutput, "right motor", pids.control.rightoutput);
 	// p.AddTimeGraph("Angular Velocity", 5000, "Velocity", odom.cent.total_distance);
 	// p.AddTimeGraph("Angular Velocity", 5000, "Velocity", odom.pose.inst_angle_rad);
 	// p.AddTimeGraph("Left Encoder Deg", 2500, "Position", odom.left_wheel.encoder->angle_deg, "Velocity", odom.left_wheel.encoder->angular_velocity_deg, "Acceleration", odom.left_wheel.encoder->angular_acceleration_deg);
@@ -60,13 +61,16 @@ void setup() {
 	// p.AddTimeGraph("IMU Rates", 5000, "Pose", imu.pose_rate, "Linear Acceleration", imu.lin_acc_rate, "Angular Velocity", imu.ang_vel_rate);
 }
 
-uint32_t print_timer;
-uint32_t interval = 20;
+uint32_t plot_timer;
+uint32_t interval = 10;
 
 
 void loop() {
 	reset.run();
-	// p.Plot();
+	// left_motor.exp_factor = (float)receive_data.left_knob / 50.0;
+	// left_motor.interval = (float)receive_data.right_knob / 100.0;
+
+	// left_motor.config_motor_run();
 	odom.run();
 	imu.run();
 	// scan_run();
@@ -75,8 +79,14 @@ void loop() {
 	bm.run();
 	// beeper.loop();
 
-	if (millis() - print_timer >= interval) {
-		print_timer = millis();
-
+	if (millis() - plot_timer >= interval) {
+		// p.Plot();
+		// Serial.print(left_motor.motor_speed_input); 
+		// Serial.print("\t");
+		// Serial.print(left_motor.motor_speed_output);
+		// Serial.print("\t");
+		// Serial.print(left_motor.exp_factor);
+		// Serial.println();
+		plot_timer = millis();
 	}
 }

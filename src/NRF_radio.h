@@ -31,7 +31,8 @@ struct SEND_DATA_STRUCTURE {
 SEND_DATA_STRUCTURE send_data;
 
 void Radio_Setup(int PA_level) {
-  radio.begin();
+  // radio.begin();
+  Serial.println(radio.begin());
   if (PA_level == 1) {
       radio.setPALevel(RF24_PA_MIN);
   } else if (PA_level == 2) {

@@ -64,6 +64,8 @@ public:
   }
 
   void setup() {
+    left_motor.config_speed_output_params();
+    right_motor.config_speed_output_params();
     control.min_power = 500;
     control.max_power = 4095;
     control.power_range = control.max_power - control.min_power;
@@ -85,11 +87,11 @@ public:
     setTunings();
     Command_Velocity(cmd_vel.lin_vel, cmd_vel.ang_vel);
 
-    // Serial.print(cmd_vel.ang_vel);
+    // Serial.print(bal.input);
     // Serial.print("\t");
-    // Serial.print(steer.setpoint);
+    // Serial.print(bal.output);
     // Serial.print("\t");
-    // Serial.print(steer.input);
+    // Serial.print(bal.setpoint);
     // Serial.print("\t");
     // Serial.println(steer.output);
     // Serial.println(control.balance_angle);
@@ -108,9 +110,9 @@ public:
 
     // Send Motor Command 
     if (fabs(imu.ypr.pitch) < control.balance_cutoff_angle && fabs(imu.ypr.roll) < control.balance_cutoff_angle) {
-      velocity_run();
+      // velocity_run();
       balance_run();
-      steer_run();
+      // steer_run();
       left_motor.command_motor(control.leftoutput);
       right_motor.command_motor(control.rightoutput);
     } else {
@@ -176,11 +178,11 @@ public:
       // for non-balancing version
       // velocity.setpoint = map(lin_vel, 0, 1023, -0.75,0.75);
 
-      Serial.print(steer.setpoint);
-      Serial.print("\t");
-      Serial.print(imu.pose.z);
-      Serial.print("\t");
-      Serial.println(ang_vel);
+      // Serial.print(steer.setpoint);
+      // Serial.print("\t");
+      // Serial.print(imu.pose.z);
+      // Serial.print("\t");
+      // Serial.println(ang_vel);
 
       if (fabs(imu.ypr.pitch) < control.balance_cutoff_angle && fabs(imu.ypr.roll) < control.balance_cutoff_angle) {
         // add deadband for ang_velocity
@@ -207,11 +209,11 @@ public:
     BalancePID.Compute();
 
     // set balance power deadband
-    if (bal.output > 0) {
-      bal.output += control.min_power;
-    } else if (bal.output < 0) {
-      bal.output -= control.min_power;
-    }
+    // if (bal.output > 0) {
+    //   bal.output += control.min_power;
+    // } else if (bal.output < 0) {
+    //   bal.output -= control.min_power;
+    // }
   }
 
   void steer_run() {
@@ -236,17 +238,17 @@ public:
       inByte[1] = '\0';
       // Serial.print(inByte);
       if (strcmp(inByte, "q") == 0) {
-        steer.kp *= 1.01;
+        bal.kp *= 1.01;
       } else if (strcmp(inByte, "a") == 0) {
-        steer.kp *= 0.99;
+        bal.kp *= 0.99;
       } else if (strcmp(inByte, "w") == 0) {
-        steer.ki *= 1.01;
+        bal.ki *= 1.01;
       } else if (strcmp(inByte, "s") == 0) {
-        steer.ki *= 0.99;
+        bal.ki *= 0.99;
       } else if (strcmp(inByte, "e") == 0) {
-        steer.kd *= 1.01;
+        bal.kd *= 1.01;
       } else if (strcmp(inByte, "d") == 0) {
-        steer.kd *= 0.99;
+        bal.kd *= 0.99;
       } else if (strcmp(inByte, "r") == 0) {
         bal.setpoint += 0.1;
       } else if (strcmp(inByte, "f") == 0) {
@@ -265,8 +267,8 @@ public:
         velocity.kd *= 1.01;
       }
 
-      Serial.print(steer.kp, 8); Serial.print("\t"); Serial.print(steer.ki, 8);
-      Serial.print("\t"); Serial.print(steer.kd, 8); Serial.print("\t"); Serial.print(bal.setpoint, 2);
+      Serial.print(bal.kp, 8); Serial.print("\t"); Serial.print(bal.ki, 8);
+      Serial.print("\t"); Serial.print(bal.kd, 8); Serial.print("\t"); Serial.print(bal.setpoint, 2);
       Serial.print("\t"); Serial.print(velocity.kp, 8); Serial.print("\t"); Serial.print(velocity.ki, 8);
       Serial.print("\t"); Serial.println(velocity.kd, 8);
 

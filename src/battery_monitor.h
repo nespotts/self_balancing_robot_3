@@ -16,7 +16,7 @@ public:
 	float total_voltage;
 	float min_cell_voltage;
 	bool warning = false;
-	bool debug = true;
+	bool debug = false;
 
 	void setup() {
 		// pin assignments & scaling
