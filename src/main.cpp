@@ -40,8 +40,8 @@ void setup() {
 
 	bm.setup();
 	p.Begin();
-	// p.AddXYGraph("Test", 100000, "Right Motor Speed", left_motor.motor_speed_input, "Right Angular Velocity", odom.left_encoder.angular_velocity_deg);
-	// p.AddXYGraph("Test", 100000, "speed input", left_motor.motor_speed_input, "speed output", left_motor.motor_speed_output);
+	p.AddXYGraph("Test", 100000, "Right Motor Speed", left_motor.motor_speed_input, "Right Angular Velocity", odom.left_encoder.angular_velocity_deg);
+	p.AddXYGraph("Test", 100000, "speed input", left_motor.motor_speed_input, "speed output", left_motor.motor_speed_output);
 	// p.AddXYGraph("Test", 5000, "X", odom.cent.x, "Y", odom.cent.y);
 	// p.AddTimeGraph("Test", 5000, "test", x, "test2", y);
 	// p.AddTimeGraph("IMU", 5000, "Absolute Yaw 1", imu.absolute_yaw, "yaw", imu.ypr.yaw);
@@ -67,20 +67,20 @@ uint32_t interval = 10;
 
 void loop() {
 	reset.run();
-	// left_motor.exp_factor = (float)receive_data.left_knob / 50.0;
-	// left_motor.interval = (float)receive_data.right_knob / 100.0;
+	left_motor.exp_factor = (float)receive_data.left_knob / 50.0;
+	left_motor.interval = (float)receive_data.right_knob / 100.0;
 
-	// left_motor.config_motor_run();
+	left_motor.config_motor_run();
 	odom.run();
 	imu.run();
 	// scan_run();
 	Receive_Data();
-	pids.run();
+	// pids.run();
 	bm.run();
 	// beeper.loop();
 
 	if (millis() - plot_timer >= interval) {
-		// p.Plot();
+		p.Plot();
 		// Serial.print(left_motor.motor_speed_input); 
 		// Serial.print("\t");
 		// Serial.print(left_motor.motor_speed_output);
