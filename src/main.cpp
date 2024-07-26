@@ -10,13 +10,16 @@ BatteryMonitor battery;
 #include "Lidar/Lidar_scan.h"
 #include "NRF_radio.h"
 NRF_Radio radio;
-#include "Odometry/Odometry.h"
 #include "IMU/IMU.h"
+IMU imu;
+#include "Odometry/Odometry.h"
+Odometry odom;
 #include "Motors/motor_controls.h"
 #include "Motors/PID_controls.h"
 PID_Manager pids;
-// #include "control_logic.h"
 #include "functions.h"
+#include "control_logic.h"
+Automation automation;
 #include "Plotter.h"
 
 // #include <jled.h>
@@ -82,11 +85,12 @@ void loop() {
 	pids.run();
 	battery.run();
 	// beeper.loop();
+	automation.run();
 
 	if (millis() - plot_timer >= interval) {
 		loop_rate = (float)cycles_past / (((float)millis() - (float)plot_timer) / 1000.0);
 		cycles_past = 0;
-		Serial.println(loop_rate);
+		// Serial.println(loop_rate);
 
 		// control plot interval to a manageable rate
 		// p.Plot();
@@ -96,6 +100,27 @@ void loop() {
 		// Serial.print("\t");
 		// Serial.print(left_motor.exp_factor);
 		// Serial.println();
+
+		Serial.print("Act X: ");
+		Serial.print(odom.cent.x); 
+		Serial.print("\tAct Y: ");
+		Serial.print(odom.cent.y);
+		Serial.print("\tOdom Theta: ");
+		Serial.print(odom.pose.angle_deg);
+		Serial.print("\tdelta X:");
+		Serial.print(automation.deltaX);
+		Serial.print("\tdelta Y:");
+		Serial.print(automation.deltaY);
+		Serial.print("\tDistance Remain:");
+		Serial.print(automation.dist_remaining);
+		Serial.print("\tTarget Theta:");
+		Serial.print(automation.target_theta);
+		Serial.print("\tDelta Theta:");
+		Serial.print(automation.delta_theta);
+		Serial.print("\tAbs Targ. Theta:");
+		Serial.print(automation.absolute_target_theta);
+		Serial.println();
+
 		plot_timer = millis();
 	}
 }

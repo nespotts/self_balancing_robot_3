@@ -5,9 +5,6 @@
 Motor left_motor(4, 5, 6);
 Motor right_motor(7, 8, 9);
 
-Odometry odom;
-IMU imu;
-
 class PID_Manager {
 
 private:
@@ -71,7 +68,7 @@ public:
 		control.max_power = 4095;
 		control.power_range = control.max_power - control.min_power;
 		control.balance_angle = 3.15;
-		control.balance_cutoff_angle = 40;
+		control.balance_cutoff_angle = 45;
 
 		cmd_vel.max_lin_vel = 450; // mm/s
 		cmd_vel.max_ang_vel = 180; // deg/s
@@ -89,11 +86,11 @@ public:
 		setTunings();
 		Command_Velocity();
 
-		if (control.pid_enable == 0) {
-			left_motor.command_motor(0);
-			right_motor.command_motor(0);
-			return;
-		}
+		// if (control.pid_enable == 0) {
+		// 	left_motor.command_motor(0);
+		// 	right_motor.command_motor(0);
+		// 	return;
+		// }
 
 		// Serial.print(bal.input);
 		// Serial.print("\t");
@@ -148,7 +145,9 @@ public:
 			steer.setpoint = steer.input;
 			velocity.input = velocity.setpoint;
 
-			// odom.pose.angle_rad = imu.absolute_yaw * DEG_TO_RAD;
+			odom.pose.angle_rad = imu.absolute_yaw * DEG_TO_RAD;
+			odom.cent.x = 0;
+			odom.cent.y = 0;
 			control.startbalancetimer = millis();
 		}
 	}
@@ -197,7 +196,7 @@ public:
 
 		VelocityPID.SetTunings(velocity.kp, velocity.ki, velocity.kd);
 		VelocityPID.SetMode(AUTOMATIC);
-		VelocityPID.SetOutputLimits(velocity.lower_output_limit, velocity.upper_output_limit); 
+		VelocityPID.SetOutputLimits(velocity.lower_output_limit, velocity.upper_output_limit);
 		VelocityPID.SetSampleTime(1000.0 / velocity.rate);
 	}
 
@@ -209,20 +208,22 @@ public:
 		control.balance_angle = map((float)radio.receive_data.left_knob, 0, 1023, -15, 15);
 		control.pid_mode = radio.receive_data.SWC;
 		control.pid_enable = radio.receive_data.SWA;
-		cmd_vel.lin_vel = radio.receive_data.elevator;
-		cmd_vel.ang_vel = radio.receive_data.aileron;
+		if (radio.receive_data.SWA == 1) {
+			cmd_vel.lin_vel = map(radio.receive_data.elevator, 0, 1023, -cmd_vel.max_lin_vel, cmd_vel.max_lin_vel);
+			cmd_vel.ang_vel = map(radio.receive_data.aileron, 0, 1023, +cmd_vel.max_ang_vel * (cmd_vel.duration / 1000000.0), -cmd_vel.max_ang_vel * (cmd_vel.duration / 1000000.0));
+		}
 
 		if (currenttime - cmd_vel.timer >= cmd_vel.duration) {
 			// balancing version
-			velocity.setpoint = map(cmd_vel.lin_vel, 0, 1023, -cmd_vel.max_lin_vel, cmd_vel.max_lin_vel);
+			velocity.setpoint = cmd_vel.lin_vel;
 
 
 			if (fabs(imu.ypr.pitch) < control.balance_cutoff_angle && fabs(imu.ypr.roll) < control.balance_cutoff_angle) {
 				// add deadband for ang_velocity
-				if (cmd_vel.ang_vel <= 525 && cmd_vel.ang_vel >= 496) {
-					steer.setpoint -= 0;
+				if (cmd_vel.ang_vel <= -5 && cmd_vel.ang_vel >= 5) {
+					steer.setpoint += 0;
 				} else {
-					steer.setpoint -= map(cmd_vel.ang_vel, 0, 1023, -cmd_vel.max_ang_vel * (cmd_vel.duration / 1000000.0), cmd_vel.max_ang_vel * (cmd_vel.duration / 1000000.0));
+					steer.setpoint += cmd_vel.ang_vel;
 				}
 			}
 

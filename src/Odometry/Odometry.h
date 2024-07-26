@@ -81,8 +81,13 @@ public:
 			cent.velocity = (left_wheel.linear_velocity + right_wheel.linear_velocity) / 2.0;
 			cent.acceleration = (left_wheel.linear_acceleration + right_wheel.linear_acceleration) / 2.0;
 
-			cent.x += cent.inst_distance * cos(pose.angle_rad + pose.inst_angle_rad / 2.0);
-			cent.y += cent.inst_distance * sin(pose.angle_rad + pose.inst_angle_rad / 2.0);
+			// using odometry angle
+			// cent.x += cent.inst_distance * cos(pose.angle_rad + pose.inst_angle_rad / 2.0);
+			// cent.y += cent.inst_distance * sin(pose.angle_rad + pose.inst_angle_rad / 2.0);
+
+			// using IMU yaw angle
+			cent.x += cent.inst_distance * cos((imu.pose.z * DEG_TO_RAD) +  pose.inst_angle_rad / 2.0);
+			cent.y += cent.inst_distance * sin((imu.pose.z * DEG_TO_RAD) +  pose.inst_angle_rad / 2.0);
 			
 			pose.angle_rad += pose.inst_angle_rad;
 			pose.angle_deg = pose.angle_rad * RAD_TO_DEG;

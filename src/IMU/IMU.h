@@ -12,6 +12,7 @@ public:
 	VectorFloat pose;  // in degrees
 
 	double absolute_yaw;
+	int16_t revs = 0;	
 
 	struct euler_t {
 		float yaw;
@@ -82,7 +83,6 @@ private:
 
 	float last_yaw;
 	bool init_absolute_yaw = false;
-	int16_t revs = 0;
 
 	Adafruit_BNO08x bno08x = Adafruit_BNO08x(RESET_pin);
 	sh2_SensorValue_t sensorValue;
