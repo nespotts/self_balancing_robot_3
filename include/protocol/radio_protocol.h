@@ -109,9 +109,9 @@ struct __attribute__((packed)) TelemetryPacket {
   uint8_t nav_index;        // waypoint currently being driven to
   uint8_t error_code;       // 0 = ok; robot-defined codes (IMU fail, encoder fail, ...)
   uint8_t loop_khz_x10;     // main loop rate / 100 Hz, for health display
-};  // 28 bytes (nRF24 max payload is 32)
+};  // 26 bytes (nRF24 max payload is 32)
 
 #if defined(__cplusplus) && __cplusplus >= 201103L
 static_assert(sizeof(ControlPacket) == 18, "ControlPacket size changed - bump RADIO_PROTOCOL_VERSION");
-static_assert(sizeof(TelemetryPacket) == 28, "TelemetryPacket size changed - bump RADIO_PROTOCOL_VERSION");
+static_assert(sizeof(TelemetryPacket) == 26, "TelemetryPacket size changed - bump RADIO_PROTOCOL_VERSION");
 #endif
