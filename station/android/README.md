@@ -55,7 +55,6 @@ The Pi serves the web UI (`station/web`), including Tilt / Pad.
   GOTO / EXPLORE, armed and upright, `set_mode BALANCE`. So a **Go to / Explore stops and the robot keeps balancing** where it
   is. It never E-stops or sets IDLE (that drops a balancing robot) and never arms: a disarmed or fallen robot is left alone.
   STATION / BALANCE / HOLD just get the zero `cmd_vel`. No setting; the page's own JS stop still runs too.
-- Buzz: E-stop (long), link lost (3 short), obstacle (2 short).
 - **Plain http only to the home network** (cleartext is on app-wide, so the code is the guard; `HostPolicy.java`):
   private IPv4 literals (10/8, 172.16/12, 192.168/16, loopback, link-local) are trusted as typed; a **name** (`orangepi.local`, `router`) only
   after it resolved to private addresses only, and it stays pinned to them (a new address later = refused until the Wi-Fi changes).
