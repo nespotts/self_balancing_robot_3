@@ -43,13 +43,29 @@
       <label><input type="checkbox" id="lay-ranges" checked> Range points <span class="sens-key"><i class="s0"></i>front <i class="s1"></i>rear</span></label>
       <label><input type="checkbox" id="lay-track" checked> Track</label>
       <label><input type="checkbox" id="lay-grid" checked> Grid</label>
+      <label class="occ-row"><input type="checkbox" id="lay-occ" checked> Map <input type="range" id="occ-opacity" min="0.15" max="1" step="0.05" value="0.8" title="Map opacity"></label>
+      <button id="map-save">Save map…</button>
+      <button id="map-load">Load map…</button>
+      <div id="map-list" class="map-list" hidden></div>
       <button id="map-clear-track">Clear track &amp; points</button>
+      <button id="map-reset" class="warn">Clear map…</button>
       <button id="map-reset-pose" class="warn">Reset robot pose to 0,0</button>
+      <details class="map-set" id="map-set">
+        <summary>Map &amp; route settings</summary>
+        <label><input type="checkbox" id="set-route" checked> Go routes around obstacles</label>
+        <label class="num">Keep off walls <input type="number" id="set-margin" min="0" max="500" step="10"> mm</label>
+        <label class="num">Robot radius <input type="number" id="set-radius" min="20" max="400" step="5"> mm</label>
+        <label class="num">Skip readings tilted over <input type="number" id="set-pitch" min="0.5" max="45" step="0.5"> °</label>
+        <label class="num">“No target” = free to <input type="number" id="set-notarget" min="0" max="4000" step="100"> mm</label>
+        <label><input type="checkbox" id="set-correct"> Correct drift (experimental)</label>
+        <p class="muted" id="map-stats"></p>
+      </details>
     </div>
     <div class="map-info" id="map-info"></div>
     <div class="wp-bar" id="wp-bar">
       <span class="wp-hint" id="wp-hint">Tap the map to add waypoints</span>
       <span class="wp-count" id="wp-count"></span>
+      <button id="wp-explore" title="Drive to unmapped places until the room is mapped">Explore</button>
       <button id="wp-undo">Undo</button>
       <button id="wp-clear">Clear</button>
       <button id="wp-go" class="primary">Go ▶</button>
