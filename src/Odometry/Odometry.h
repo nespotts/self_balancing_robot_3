@@ -32,6 +32,8 @@ public:
 		double acceleration;
 		double x;       // x position delta
 		double y;       // y position delta
+		double target_x;
+		double target_y;
 	} centroid;
 
 	centroid cent;

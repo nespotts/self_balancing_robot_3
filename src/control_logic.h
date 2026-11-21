@@ -1,7 +1,9 @@
 class Automation {
 private:
 
+
 public:
+	bool reached_position, reached_theta;
 	double deltaX, deltaY, target_theta, delta_theta, dist_remaining, absolute_target_theta;
 
 
@@ -12,12 +14,14 @@ public:
 
 	void run() {
 		if (radio.receive_data.SWA == 2) {
-			command_position(0, 0, 180);
+			command_position(odom.cent.target_x, odom.cent.target_y, 180);
 
 		} else if (radio.receive_data.SWA == 0) {
 			// reset target position
-			odom.cent.x = 0;
-			odom.cent.y = 0;
+			reached_position = false;
+			reached_theta = false;
+			odom.cent.target_x = odom.cent.x;
+			odom.cent.target_y = odom.cent.y;
 		}
 	}
 
@@ -37,24 +41,53 @@ public:
 		// 2. determine direction to rotate and move to angle - velocity proportional to error
 		// get direction to go
 		// get delta theta (error)
-		delta_theta = determine_delta_theta(target_theta);
-		float ang_vel = map(delta_theta, -180, 180, -pids.cmd_vel.max_ang_vel * (pids.cmd_vel.duration / 1000000.0), pids.cmd_vel.max_ang_vel * (pids.cmd_vel.duration / 1000000.0));
-		if (ang_vel > pids.cmd_vel.max_ang_vel) {
-			ang_vel = pids.cmd_vel.max_ang_vel;
-		} else if (ang_vel < -pids.cmd_vel.max_ang_vel) {
-			ang_vel = -pids.cmd_vel.max_ang_vel;
+		if (!reached_position) {
+			delta_theta = determine_delta_theta(target_theta);
+			float ang_vel = map(delta_theta, -180, 180, -pids.cmd_vel.max_ang_vel * (pids.cmd_vel.duration / 1000000.0), pids.cmd_vel.max_ang_vel * (pids.cmd_vel.duration / 1000000.0));
+			if (ang_vel > pids.cmd_vel.max_ang_vel) {
+				ang_vel = pids.cmd_vel.max_ang_vel;
+			} else if (ang_vel < -pids.cmd_vel.max_ang_vel) {
+				ang_vel = -pids.cmd_vel.max_ang_vel;
+			}
+			pids.cmd_vel.ang_vel = ang_vel;
 		}
-		pids.cmd_vel.ang_vel = ang_vel;
 
 		// 3. move ahead with speed proportional to remaining distance once close to target_theta
-		float lin_vel = map(fabs(dist_remaining), 0, 1000, 0, pids.cmd_vel.max_lin_vel);
-		if (lin_vel > pids.cmd_vel.max_lin_vel) {
-			lin_vel = pids.cmd_vel.max_lin_vel;
+		if (!reached_position) {
+			float lin_vel = map(fabs(dist_remaining), 0, 1500, 0, pids.cmd_vel.max_lin_vel);
+			if (lin_vel > pids.cmd_vel.max_lin_vel) {
+				lin_vel = pids.cmd_vel.max_lin_vel;
+			}
+			if (fabs(delta_theta) < 2.0) {
+				pids.cmd_vel.lin_vel = lin_vel;
+			} else {
+				pids.cmd_vel.lin_vel = 0;
+			}
 		}
-		if (fabs(delta_theta) < 10.0) {
-			pids.cmd_vel.lin_vel = lin_vel;
-		} else {
+
+		// 4. stop moving
+		if (!reached_position && fabs(dist_remaining) < 20 && fabs(odom.cent.velocity) < 2 && fabs(odom.cent.acceleration) < 25 && fabs(odom.pose.angular_velocity_deg) < 2) {
+			reached_position = true;
 			pids.cmd_vel.lin_vel = 0;
+		}
+
+		// 5. face in desired direction
+		if (reached_position && !reached_theta) {
+			// need to transalate ending_theta to nearest angle
+			delta_theta = determine_delta_theta(ending_theta);
+			float ang_vel = map(delta_theta, -180, 180, -pids.cmd_vel.max_ang_vel * (pids.cmd_vel.duration / 1000000.0), pids.cmd_vel.max_ang_vel * (pids.cmd_vel.duration / 1000000.0));
+			if (ang_vel > pids.cmd_vel.max_ang_vel) {
+				ang_vel = pids.cmd_vel.max_ang_vel;
+			} else if (ang_vel < -pids.cmd_vel.max_ang_vel) {
+				ang_vel = -pids.cmd_vel.max_ang_vel;
+			}
+			pids.cmd_vel.ang_vel = ang_vel;
+			
+			if (fabs(delta_theta) < 3 && fabs(odom.pose.angular_velocity_deg) < 10) {
+				reached_theta = true;
+				pids.cmd_vel.ang_vel = 0;
+				pids.steer.setpoint = absolute_target_theta;
+			}
 		}
 
 	}
@@ -62,6 +95,7 @@ public:
 
 	float determine_delta_theta(float target_theta) {
 		// target theta -180 to 180, 0 east
+		float output = 0;
 
 		// get target theta on same revolution as absolute theta
 		if (target_theta >= 0) {
@@ -74,10 +108,11 @@ public:
 		float clockwise_degrees = absolute_target_theta - imu.absolute_yaw;
 		float counterclockwise_degrees = (absolute_target_theta - 360.0) - imu.absolute_yaw;
 		if (fabs(clockwise_degrees) < fabs(counterclockwise_degrees)) {
-			return clockwise_degrees;
+			output = clockwise_degrees;
 		} else {
-			return counterclockwise_degrees;
+			output = counterclockwise_degrees;
 		}
+		return output;
 	}
 
 
