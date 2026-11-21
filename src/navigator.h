@@ -18,6 +18,12 @@
 //   nav.corridor_mm wide ahead / behind give front / rear distances, as a sensor range. Readings that hit
 //   lower than nav.floor_mm (sensor tipped down by the lean) are ignored. Slow down linearly from
 //   nav.slow_mm to rng.obstacle_mm. STATION commands get the same limit (main.cpp); MANUAL only the flag.
+// Side walls (#62): recent points beside the body (gap body side -> wall < nav.side_min_mm, 0 = off) steer
+//   away (nav.side_kp deg/s per mm inside it) and slow down (linear to nav.min_speed at gap 0). Turning in
+//   place: a wall close at one side and the target behind -> turn the nose away from it; something inside the
+//   corners' swing circle ahead / behind -> first step straight away from it (<= nav.stuck_backoff_mm).
+// Stuck (#62): driving / turning but < nav.stuck_mm (or 15 deg) of progress for nav.stuck_ms -> BLOCKED,
+//   log "nav: stuck ...", back off nav.stuck_backoff_mm. GOTO then goes on; EXPLORE waits for a new list.
 // No range readings for 3 s (rng.enable 0, sensor fault): no obstacle stop is possible, so EXPLORE pauses
 //   (stands still, keeps its state) and GOTO drives at most nav.blind_speed (0 = GOTO pauses too).
 // Paused too while !upright or !live (nobody supervises, see ModeManager::supervised).
@@ -67,6 +73,9 @@ class Navigator {
   float distance() const { return dist_; }
   float frontMm() const { return front_; }   // 0 = nothing in the corridor
   float rearMm() const { return rear_; }
+  float sideLeftMm() const { return gap_l_; }   // gap body side -> nearest point beside it, 0 = none
+  float sideRightMm() const { return gap_r_; }
+  bool stuck() const { return stuck_; }
   float obstacleMm() const { return obst_; } // in the direction of travel (NavStatusFrame.obstacle_mm)
   bool obstacle() const { return obst_flag_; }  // TLM_OBSTACLE: blocking the current motion
   bool active() const { return state_ == NAV_TURNING || state_ == NAV_DRIVING || state_ == NAV_BLOCKED; }
@@ -88,6 +97,10 @@ class Navigator {
   void updateHold(const NavIn& in);
   float holdSpeed(const NavIn& in, float x, float y);  // nav.hold_* position loop on the forward error
   void startBlocked(const NavIn& in);
+  void startStuck(const NavIn& in, bool turning);
+  bool stuckCheck(const NavIn& in, bool turning, bool trying);  // true: no progress for nav.stuck_ms
+  float sideTurn(float* inside) const;                           // nav.side_*: turn away from side walls
+  void sideAvoid(float vmax, float tmax);                        // driving: steer away, slow down
   bool blind(uint32_t now_ms) const;  // no RangeFrame for kBlindMs
   void logBlind(uint8_t mode);
   void setTarget(const NavIn& in, float x, float y);
@@ -106,6 +119,16 @@ class Navigator {
   uint8_t state_ = NAV_IDLE;
   float speed_ = 0, turn_ = 0, tx_ = 0, ty_ = 0, dist_ = 0;
   float front_ = 0, rear_ = 0, obst_ = 0;
+  float gap_l_ = 0, gap_r_ = 0;       // side gaps (0 = nothing beside)
+  float near_mm_ = 0, near_xr_ = 0;   // closest point ahead / behind inside the turning swing circle
+  float blk_h_ = 0;                   // heading when it blocked
+  float back_mm_ = 0;                 // backing off this far (nav.backoff_mm or nav.stuck_backoff_mm)
+  bool stuck_ = false, stuck_turn_ = false, stuck_seen_ = false;
+  uint32_t stuck_ms_ = 0;             // start of the current no-progress window (0 = none)
+  float stuck_x_ = 0, stuck_y_ = 0, stuck_h_ = 0;
+  bool away_ = false, away_done_ = false;  // turning in place: stepping away from a close wall first
+  float away_x_ = 0, away_y_ = 0;
+  uint32_t away_ms_ = 0;
   bool obst_flag_ = false;
   bool blk_fwd_ = false, blk_rev_ = false;  // limitSpeed hysteresis per direction
   uint32_t close_fwd_ms_ = 0, close_rev_ms_ = 0;  // last time something was inside the clear distance

@@ -68,7 +68,7 @@ Gains are br3ttb units: ki per second, kd seconds.
 | nav.heading_tol_deg | 3 | end heading reached |
 | nav.slow_mm | 800 | obstacle closer → slow down (linear to `rng.obstacle_mm`; 0 = off) |
 | nav.clear_mm | 100 | blocked until nothing inside `rng.obstacle_mm` + this (+ backoff) for `nav.obst_age_ms` |
-| nav.corridor_mm | 220 | width checked ahead / behind |
+| nav.corridor_mm | 220 | width checked ahead / behind (with `nav.side_min_mm` on: at most the body width + 20, the rest is the side check) |
 | nav.obst_age_ms | 1500 | range points kept this long |
 | nav.floor_mm | 50 | ignore hits lower than this (floor, when leaning) |
 | nav.backoff_mm | 0 | when blocked, back off this far (rear checked too) |
@@ -76,6 +76,11 @@ Gains are br3ttb units: ki per second, kd seconds.
 | nav.blind_speed | 150 mm/s | GOTO speed cap with no range readings for 3 s (`rng.enable 0`); 0 = GOTO pauses too. EXPLORE always pauses |
 | mot.left_dir | 1 | Left motor wiring: -1 if its wires are swapped (fixed in software) |
 | mot.right_dir | 1 | Right motor wiring: -1 if its wires are swapped |
+| nav.side_min_mm | 120 | wall closer than this to the body side (from the last ~1.5 s of range points): steer away + slow down; 0 = off (#62) |
+| nav.side_kp | 0.5 °/s per mm | how hard: turn = kp × mm inside `side_min_mm` |
+| nav.stuck_ms | 2500 | driving / turning but no progress (`stuck_mm`, or 15°) this long → BLOCKED, log `nav: stuck`, back off; 0 = off |
+| nav.stuck_mm | 40 | progress needed within `stuck_ms` |
+| nav.stuck_backoff_mm | 100 | stuck: back off this far (rear checked); also the most it steps away before turning in place next to a wall |
 
 ¹ applied between readings, only while the motors are off. ² applied only while both motors are off
 (disarm / IDLE / fallen; log line `mot: drive_mode …, pwm … Hz`). Everything else applies at once.

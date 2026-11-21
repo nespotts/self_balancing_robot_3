@@ -277,5 +277,77 @@ class TestStation(unittest.TestCase):
         self.assertTrue(n.tlm[-1]["status"] & lp.TLM_OBSTACLE)
 
 
+class TestWalls(unittest.TestCase):
+    """Issue #62: close to and parallel with a wall (the right wall, x = 4000; the sim's body is a 90 mm circle
+    that cannot slide along a wall it touches). old = side check and stuck detection off (the old firmware)."""
+
+    def wall_run(self, start, points, old=False, params=None, seconds=40.0, watch=None):
+        n = NavRun(seed=21)
+        p = dict(params or {})
+        if old:
+            p.update({"nav.side_min_mm": 0.0, "nav.stuck_ms": 0.0})
+        for k, v in p.items():
+            n.r.set_param(n.r.pidx[k], v)
+        n.frame(lp.encode_goto(points))
+        n.stand_up(lp.MODE_BALANCE)
+        r = n.r
+        x, y, th = start
+        r.ctl.heading_sp += th - r.TH
+        r.X, r.Y, r.TH = x, y, th
+        r.nav.pts = []
+        n.run(1.0)
+        n.frame(lp.encode_set_mode(lp.MODE_GOTO))
+        n.closest = 1e9
+        end = r.t + seconds
+        while r.t < end and r.nav.state != lp.NAV_ARRIVED:
+            n.run(0.25)
+            n.closest = min(n.closest, r.room.clearance(r.X, r.Y))
+            if watch:
+                watch(n)
+        return n
+
+    def test_parallel_close_old_sticks_new_keeps_clear(self):
+        start, goal = (3895.0, -1200.0, 90.0), [(3750.0, 1500.0)]      # 105 mm off the wall (body side: 29)
+        old = self.wall_run(start, goal, old=True)
+        self.assertEqual(old.r.nav.state, lp.NAV_BLOCKED)              # the wall alongside "is in the way"
+        self.assertLess(old.r.Y, 0.0)                                  # ... and it never gets going
+        new = self.wall_run(start, goal)
+        self.assertEqual(new.r.nav.state, lp.NAV_ARRIVED, new.logs[-5:])
+        x, y = new.pos()
+        self.assertLess(math.hypot(x - 3750.0, y - 1500.0), 100.0)
+        self.assertGreater(new.closest, simmod.ROBOT_RADIUS + 10.0)    # never touched it
+        self.assertFalse(any(l.startswith("nav: blocked") for l in new.logs), new.logs)
+
+    def test_start_touching_the_wall_recovers(self):
+        start, goal = (3909.0, -1200.0, 85.0), [(3800.0, 1500.0)]      # touching, 5 deg into the wall
+        old = self.wall_run(start, goal, old=True, seconds=20.0)
+        self.assertEqual(old.r.nav.state, lp.NAV_BLOCKED)
+        self.assertLess(old.r.Y, -1100.0)                              # stuck where it started
+        new = self.wall_run(start, goal)
+        self.assertEqual(new.r.nav.state, lp.NAV_ARRIVED, new.logs[-5:])
+        self.assertGreater(new.r.room.clearance(new.r.X, new.r.Y), simmod.ROBOT_RADIUS + 40.0)
+
+    def test_stuck_backs_off_and_reports(self):
+        # obstacle stop and side check off: it drives into the wall, the wheels stop, odometry shows no progress
+        seen = {}
+
+        def watch(n):
+            if n.r.nav.stuck and "x" not in seen:
+                seen["x"], seen["t"] = n.r.X, n.r.t
+            if "x" in seen and n.r.t - seen["t"] < 5.5:      # back-off gives up after 5 s
+                seen["min_x"] = min(seen.get("min_x", 1e9), n.r.X)
+                seen.setdefault("states", set()).add(n.r.nav.state)
+        n = self.wall_run((3000.0, 1500.0, 0.0), [(4100.0, 1500.0)], seconds=20.0, watch=watch,
+                          params={"rng.obstacle_mm": 0.0, "nav.side_min_mm": 0.0})
+        self.assertTrue(any(l.startswith("nav: stuck, no progress driving") for l in n.logs), n.logs)
+        self.assertIn("x", seen)
+        self.assertGreater(seen["x"], 4000.0 - simmod.ROBOT_RADIUS - 5.0)   # it was at the wall
+        self.assertIn(lp.NAV_BLOCKED, seen["states"])
+        self.assertGreater(seen["x"] - seen["min_x"], 60.0)                  # backed off (nav.stuck_backoff_mm 100)
+        self.assertLess(seen["x"] - seen["min_x"], 160.0)
+        blocked = [m for m in n.navs if m["state"] == lp.NAV_BLOCKED]
+        self.assertTrue(blocked)
+
+
 if __name__ == "__main__":
     unittest.main()

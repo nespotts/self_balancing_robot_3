@@ -16,6 +16,7 @@ import concurrent.futures
 import heapq
 import json
 import math
+import os
 import time
 
 from . import link_protocol as lp
@@ -30,22 +31,58 @@ OCC_BYTE = UNKNOWN + math.log(OCC_P / (1 - OCC_P)) / UNIT     # ~138
 FREE_BYTE = UNKNOWN + math.log(FREE_P / (1 - FREE_P)) / UNIT  # ~120
 # fine byte -> class bits: 2 = occupied, 1 = free, 0 = unknown (OR-able: occupied wins)
 CLASS_LUT = bytes(2 if v > OCC_BYTE else (1 if v < FREE_BYTE else 0) for v in range(256))
+# squeeze plans (#62): only sure walls count (~0.8). The sensor cone draws weak stray hits into a doorway
+# (just over OCC_BYTE) from beams that clip a jamb; those count as free there (seen, not a frontier).
+# Only for maps without range weighting (mapping "range_weight" off): with it, far hits are weak by design
+# (a wall seen from 1-2 m sits at ~140-155 and would vanish from a sure-walls map, letting squeeze routes and
+# frontiers through it), and close free readings already clear far stray hits out of doorways (#63).
+SURE_OCC_BYTE = 155
+SURE_LUT = bytes(2 if v > SURE_OCC_BYTE else (1 if v < FREE_BYTE or v > OCC_BYTE else 0) for v in range(256))
 FINAL_LUT = bytes([0, 1, 2, 2] + [0] * 252)
 
 DEFAULTS = {
     "robot_radius_mm": 80.0,    # footprint radius the planner keeps off obstacles
-    "margin_mm": 120.0,         # + this much (the robot sways, the map is fuzzy)
-    "soft_mm": 200.0,           # + a band that costs extra (keeps routes in the middle)
+    "margin_mm": 180.0,         # + this much (the robot sways, the map is fuzzy)
+    "soft_mm": 300.0,           # + a band that costs extra (keeps routes in the middle)
+    "squeeze_mm": 35.0,         # no route with the margin: try again keeping only radius + this (narrow gaps)
     "unknown_ok": True,         # "go here" may route through unmapped space (explore never does)
     "frontier_min_mm": 200.0,   # ignore frontier bits smaller than this
 }
-LIMITS = {"robot_radius_mm": (20, 400), "margin_mm": (0, 500), "soft_mm": (0, 1000),
+LIMITS = {"robot_radius_mm": (20, 400), "margin_mm": (0, 500), "soft_mm": (0, 1000), "squeeze_mm": (0, 200),
           "frontier_min_mm": (50, 2000)}
+STUCK_BOOST_MM = 100.0    # the robot reported "nav: stuck": plan with this much more margin ...
+STUCK_BOOST_MAX = 200.0
+BOOST_DECAY_MM = 50.0     # ... less by this after each goal reached
+SETTINGS_FILE = "planner.json"   # in the map folder (~/sbr3-maps)
+SQUEEZE_TRIES = 6         # explore: squeeze goals in a row that showed nothing new before it is done
+SQUEEZE_GROW = 160        # ... "something new" = this many more free 25 mm cells (0.1 m^2)
+SQUEEZE_CHECKS = 400      # explore, squeezing: frontier spots checked (100 mm blocks, nearest first)
+
+
+def clean_settings(s, base):
+    """Copy of base with the known keys of s applied (clamped to LIMITS, wrong types skipped)."""
+    out = dict(base)
+    for k, v in (s if isinstance(s, dict) else {}).items():
+        if k not in DEFAULTS:
+            continue
+        if isinstance(DEFAULTS[k], bool):
+            out[k] = bool(v)
+            continue
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(v):
+            lo, hi = LIMITS.get(k, (-1e9, 1e9))
+            out[k] = max(lo, min(hi, v))
+    return out
 
 
 class CostMap:
-    def __init__(self, grid, settings=None, res_mm=50.0, margin_m=1.0):
+    def __init__(self, grid, settings=None, res_mm=50.0, margin_m=1.0, sure_walls=False, specks=None):
+        """sure_walls: only sure walls count (SURE_LUT); specks: fill unknown specks (default: = sure_walls)."""
         S = dict(DEFAULTS, **(settings or {}))
+        self.lut = SURE_LUT if sure_walls else CLASS_LUT
         self.g = grid
         f = max(1, int(round(res_mm / grid.res)))
         self.f, self.res = f, grid.res * f
@@ -62,7 +99,9 @@ class CostMap:
         self.x0 = grid.x0 + self.fx0 * grid.res                    # world mm of the coarse (0, 0) corner
         self.y0 = grid.y0 + self.fy0 * grid.res
         self._classify()
-        self.inner_r = (S["robot_radius_mm"] + 30.0) / self.res
+        if sure_walls if specks is None else specks:
+            self._fill_specks()
+        self.inner_r = (S["robot_radius_mm"] + min(30.0, S["margin_mm"])) / self.res
         self._inflate(S["robot_radius_mm"] + S["margin_mm"], S["soft_mm"])
         self.unknown_ok = bool(S["unknown_ok"])
 
@@ -76,12 +115,31 @@ class CostMap:
             for k in range(f):
                 j = self.fy0 + cy * f + k
                 s = j * W + self.fx0
-                acc |= int.from_bytes(bytes(g[s:s + nb]).translate(CLASS_LUT), "big")
+                acc |= int.from_bytes(bytes(g[s:s + nb]).translate(self.lut), "big")
             for k in range(1, f):                  # OR each byte with the f-1 before it
                 acc |= acc >> (8 * k)
             row = acc.to_bytes(nb, "big")[f - 1::f]
             state += row.translate(FINAL_LUT)
         self.state = state                          # 0 unknown, 1 free, 2 occupied
+
+    def _fill_specks(self):
+        """Squeeze maps: an unknown cell with 3+ free 4-neighbours counts as free (a weakly seen speck in a
+        doorway would cut the only way through; explore never travels through unknown)."""
+        w, n, st = self.w, len(self.state), self.state
+        fill = []
+        i = st.find(0)
+        while i >= 0:
+            ix = i % w
+            k = 0
+            for o in (1, -1, w, -w):
+                j = i + o
+                if 0 <= j < n and abs(j % w - ix) <= 1 and st[j] == 1:
+                    k += 1
+            if k >= 3:
+                fill.append(i)
+            i = st.find(0, i + 1)
+        for i in fill:
+            st[i] = 1
 
     def _inflate(self, hard_mm, soft_mm):
         w, h = self.w, self.h
@@ -254,9 +312,61 @@ class CostMap:
         return all(self.clear_line(a, b, unknown_ok, allow_start_zone=(k == 0))
                    for k, (a, b) in enumerate(zip(cells, cells[1:])))
 
-    def frontiers(self, start_xy, min_mm=200.0, blacklist=(), black_r_mm=350.0, escape_mm=350.0):
+    def _opens_up(self, i, open_cm, look_mm=300.0):
+        """Squeezing: does frontier cell i lead into open space of open_cm? Either it lies there itself, or
+        straight on into the unknown beside it (up to look_mm, about the robot's radius + the normal margin)
+        there is unknown space outside open_cm's wall margin. Seen through a narrow doorway at an angle, the
+        far room shows only a strip along its own wall (all inside the margin) - the room itself is beyond."""
+        j = open_cm.cell(*self.center(i))
+        if j is None or open_cm.state[j] == 2:
+            return False                        # a weak wall hit (free here, a wall in the normal map)
+        if open_cm.cost[j] < MARGIN:
+            return True
+        w, n, st = self.w, len(self.state), self.state
+        ix, iy = i % w, i // w
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            for k in range(1, int(look_mm / self.res) + 1):
+                x, y = ix + dx * k, iy + dy * k
+                if not (0 <= x < w and 0 <= y * w + x < n) or st[y * w + x] != 0:
+                    break                       # known space or a wall ends the look (the first step must be unknown)
+                j = open_cm.cell(*self.center(y * w + x))
+                if j is None or open_cm.state[j] == 2:
+                    break                       # a wall in the normal map: not through it
+                if open_cm.cost[j] < MARGIN:
+                    return True
+        return False
+
+    def _squeeze_goal(self, front, dist, parent, blacklist, black_r_mm, open_cm):
+        """Squeezing (#62): the nearest frontier cell that leads into open space (outside the wall margin of
+        open_cm, the normal costmap; see _opens_up) - i.e. only reachable through a narrow gap. Frontier bits
+        along walls (inside the margin) are not worth squeezing for. One check per 100 mm block."""
+        w, br2 = self.w, black_r_mm ** 2
+        blocks = set()
+        for i in sorted(set(front), key=lambda i: dist[i]):
+            b = (i % w // 4, i // w // 4)
+            if b in blocks:
+                continue
+            blocks.add(b)
+            if len(blocks) > SQUEEZE_CHECKS:
+                break
+            cx, cy = self.center(i)
+            if any((cx - bx) ** 2 + (cy - by) ** 2 < br2 for bx, by in blacklist):
+                continue
+            if not self._opens_up(i, open_cm):
+                continue
+            cells = []
+            k = i
+            while k is not None:
+                cells.append(k)
+                k = parent[k]
+            cells.reverse()
+            return [(dist[i] * self.res, (cx, cy), self.simplify(cells, False), 1)]
+        return []
+
+    def frontiers(self, start_xy, min_mm=200.0, blacklist=(), black_r_mm=350.0, escape_mm=350.0, open_cm=None):
         """Reachable frontier clusters, nearest first: [(dist_mm, goal_xy, path_xy, size_cells)].
-        Frontier = free, unblocked cell with an unknown 4-neighbour. Travel only through free cells."""
+        Frontier = free, unblocked cell with an unknown 4-neighbour. Travel only through free cells.
+        open_cm (#62, squeezing): only the nearest frontier cell in open space of open_cm (see _squeeze_goal)."""
         s = self.cell(*start_xy)
         if s is None:
             return []
@@ -296,6 +406,8 @@ class CostMap:
                     dist[k] = nd
                     parent[k] = i
                     heapq.heappush(heap, (nd, k))
+        if open_cm is not None:
+            return self._squeeze_goal(front, dist, parent, blacklist, black_r_mm, open_cm)
         # cluster (8-connected) the frontier cells
         fset = set(front)
         clusters = []
@@ -342,7 +454,13 @@ class Planner:
         self.clock = clock            # sim time in offline runs
         self.sync = sync              # run jobs inline (offline runs / tests)
         self.nav_names = nav_names
-        self.settings = dict(DEFAULTS)
+        self.settings = self._load_settings()
+        self.boost = 0.0              # extra margin after the robot got stuck (#62), decays on success
+        self.replan_at = None         # stuck: replan once the robot has backed off
+        self.squeeze = False          # the current route keeps only radius + squeeze_mm (narrow gap)
+        self.squeeze_left = SQUEEZE_TRIES   # explore: squeeze goals left before "done" (see SQUEEZE_TRIES)
+        self.sq_free = None           # free cells in the squeeze map at the last squeeze plan
+        self._sq_free_now = None      # (set by the worker with each squeeze explore plan)
         self.mode = "idle"            # idle | goto | explore
         self.goals = []               # goto: user goals (map frame)
         self.path = []                # current route, map frame (first point = robot when planned)
@@ -371,8 +489,68 @@ class Planner:
         c, s = math.cos(math.radians(-dt)), math.sin(math.radians(-dt))
         return [(round(c * (x - dx) - s * (y - dy), 1), round(s * (x - dx) + c * (y - dy), 1)) for x, y in pts]
 
-    def costmap(self):
-        return CostMap(self.b.mapper.grid, self.settings)
+    def costmap(self, kind=None):
+        """kind: "boost" (margin + the stuck boost), "normal", "squeeze" (radius + squeeze_mm only);
+        None = what the current route was planned with."""
+        if kind is None:
+            kind = "squeeze" if self.squeeze else ("boost" if self.boost > 0 else "normal")
+        s = dict(self.settings)
+        g = self.b.mapper.grid
+        if kind == "boost":
+            s["margin_mm"] += self.boost
+        elif kind == "squeeze":
+            # at the map's own 25 mm cells (at 50 mm a 280 mm doorway rounds shut); sure walls only when the
+            # map is not range-weighted (see SURE_LUT)
+            s["margin_mm"] = min(s["margin_mm"], s["squeeze_mm"])
+            rw = self.b.mapper.settings.get("range_weight", False)
+            return CostMap(g, s, res_mm=g.res, sure_walls=not rw, specks=True)
+        return CostMap(g, s)
+
+    def _costmaps(self):
+        """Costmaps to try in turn: boosted (after a stuck), normal, then squeezed (narrow gaps)."""
+        kinds = (["boost"] if self.boost > 0 else []) + ["normal"]
+        if self.settings["squeeze_mm"] < self.settings["margin_mm"]:
+            kinds.append("squeeze")
+        for k in kinds:
+            yield k, self.costmap(k)
+
+    # ---------------------------------------------------------- settings (persisted, #62)
+    def _settings_path(self):
+        d = getattr(getattr(self.b, "mapper", None), "dir", None)
+        return os.path.join(d, SETTINGS_FILE) if d else None
+
+    def _load_settings(self):
+        p = self._settings_path()
+        try:
+            with open(p, encoding="utf-8") as f:
+                return clean_settings(json.load(f), DEFAULTS)
+        except (OSError, ValueError, TypeError):
+            return dict(DEFAULTS)
+
+    def _save_settings(self):
+        p = self._settings_path()
+        if not p:
+            return
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(self.settings, f, indent=1)
+        except OSError as e:
+            self.b.say("planner: settings not saved: %s" % e)
+
+    # ---------------------------------------------------------- robot log (#62)
+    def on_log(self, text):
+        """A robot log line. "nav: stuck ...": replan with a larger margin once it has backed off."""
+        if not text.startswith("nav: stuck") or self.mode == "idle":
+            return
+        self.boost = min(STUCK_BOOST_MAX, self.boost + STUCK_BOOST_MM)
+        self.squeeze = False
+        self.replan_at = self.clock() + 5.0       # its back-off ends within 5 s
+        self._set_status("robot stuck: backing off, replanning with +%d mm margin" % self.boost)
+
+    def _success(self):
+        """A goal reached: the stuck boost decays."""
+        self.boost = max(0.0, self.boost - BOOST_DECAY_MM)
 
     # ---------------------------------------------------------- messages
     def msg(self):
@@ -380,7 +558,8 @@ class Planner:
                            "dest": self.dest if self.mode == "goto" else None,
                            "path": [[round(x), round(y)] for x, y in self.to_odom(self.path)],
                            "goals": [[round(x), round(y)] for x, y in self.to_odom(self.goals)],
-                           "settings": self.settings}, separators=(",", ":"))
+                           "settings": self.settings, "boost": self.boost, "squeeze": self.squeeze},
+                          separators=(",", ":"))
 
     def _push(self):
         self.b.broadcast(self.msg())
@@ -400,18 +579,10 @@ class Planner:
            mode request carries the arm request; later ones never arm."""
         act = m.get("action")
         if act == "set":
-            s = m.get("settings")
-            for k, v in (s if isinstance(s, dict) else {}).items():
-                if k in DEFAULTS:
-                    if isinstance(DEFAULTS[k], bool):
-                        self.settings[k] = bool(v)
-                    else:
-                        try:
-                            v = float(v)
-                        except (TypeError, ValueError):
-                            continue
-                        lo, hi = LIMITS.get(k, (-1e9, 1e9))
-                        self.settings[k] = max(lo, min(hi, v)) if math.isfinite(v) else self.settings[k]
+            new = clean_settings(m.get("settings"), self.settings)
+            if new != self.settings:
+                self.settings = new
+                self._save_settings()
             self._push()
             return None
         if act == "stop":
@@ -444,6 +615,8 @@ class Planner:
             return None
         if act == "explore":
             self.mode, self.goals, self.blacklist, self.goal = "explore", [], [], None
+            self.replan_at, self.squeeze = None, False
+            self.squeeze_left, self.sq_free = SQUEEZE_TRIES, None
             self.started_at = self.clock()
             self.blocked_plans = 0
             self._set_status("exploring")
@@ -458,6 +631,7 @@ class Planner:
     def _begin_goto(self, goals, dest, arm):
         """Plan + drive to map-frame goals. dest: the saved place's name (shown on the map), or None."""
         self.mode, self.goals, self.blacklist = "goto", goals[:20], []
+        self.replan_at, self.squeeze = None, False
         self.dest = dest
         self.arm = arm
         self.started_at = self.clock()
@@ -490,6 +664,8 @@ class Planner:
         self.gen += 1
         self.pending = None
         self.arm = False
+        self.replan_at = None
+        self.squeeze = False
         self.mode, self.path, self.goals, self.goal = "idle", [], [], None
         if was != "idle" and why:
             self._set_status(why)
@@ -550,9 +726,26 @@ class Planner:
             return
         kind = res[0]
         if kind == "path":
-            _, path, status = res
+            _, path, status, cmk = res
+            squeeze = cmk == "squeeze"
+            if squeeze and not self.squeeze:
+                # no speed field in MSG_GOTO: the robot's side check (nav.side_min_mm) slows it in the gap
+                self.b.say("planner: narrow gap - squeezing through with %d mm clearance (the robot slows "
+                           "down beside the walls)" % self.settings["squeeze_mm"])
+            self.squeeze = squeeze
+            if self.mode == "explore" and squeeze:
+                now_free = self._sq_free_now
+                grew = self.sq_free is not None and now_free is not None and now_free - self.sq_free > SQUEEZE_GROW
+                self.squeeze_left = SQUEEZE_TRIES if grew else self.squeeze_left - 1
+                self.sq_free = now_free
+            elif self.mode == "explore":
+                self.squeeze_left, self.sq_free = SQUEEZE_TRIES, None
             self.path = path
             self._send(path[1:] or path[-1:], go)
+            if squeeze:
+                status += " (squeezing through a narrow gap)"
+            elif cmk == "boost":
+                status += " (+%d mm margin after a stuck)" % self.boost
             self._set_status(status, log=False)
         elif kind == "ok":
             pass
@@ -582,21 +775,45 @@ class Planner:
             self.arm = False
 
     def _plan_goto(self, pose):
-        cm = self.costmap()
         start = pose[:2]
-        route = [start]
-        for gpt in self.goals:
-            leg = cm.astar(route[-1], gpt)
-            if leg is None:
-                return ("fail", "no route to %.1f, %.1f m" % (gpt[0] / 1000, gpt[1] / 1000))
-            leg[-1] = gpt if cm.passable(cm.cell(*gpt) or 0, True) else leg[-1]
-            route += leg[1:]
-        n = len(route) - 1
-        return ("path", route, "route: %d waypoint%s" % (n, "" if n == 1 else "s"))
+        fail = None
+        for kind, cm in self._costmaps():
+            route = [start]
+            for gpt in self.goals:
+                leg = cm.astar(route[-1], gpt)
+                if leg is None:
+                    fail = fail or gpt
+                    route = None
+                    break
+                leg[-1] = gpt if cm.passable(cm.cell(*gpt) or 0, True) else leg[-1]
+                route += leg[1:]
+            if route:
+                n = len(route) - 1
+                return ("path", route, "route: %d waypoint%s" % (n, "" if n == 1 else "s"), kind)
+        return ("fail", "no route to %.1f, %.1f m" % (fail[0] / 1000, fail[1] / 1000))
 
     def _plan_explore(self, pose):
-        cm = self.costmap()
-        fr = cm.frontiers(pose[:2], self.settings["frontier_min_mm"], self.blacklist)
+        fr, kind, normal, held = None, "normal", None, None
+        for kind, cm in self._costmaps():
+            if kind == "squeeze" and self.squeeze_left <= 0:
+                break                 # tried enough narrow spots: the rest is done
+            fr = cm.frontiers(pose[:2], self.settings["frontier_min_mm"], self.blacklist,
+                              open_cm=normal if kind == "squeeze" else None)
+            if kind == "normal":
+                normal = cm
+            if fr and kind != "squeeze" and self.squeeze:
+                i = cm.cell(*pose[:2])
+                if i is None or cm.cost[i] >= MARGIN:
+                    # squeezing and still in the gap: the wide-margin map only gets out of it through its
+                    # escape zone, whose first leg may cut a jamb corner - get through on the squeeze map first
+                    held, fr = held or (fr, kind), None
+                    continue
+            if fr:
+                if kind == "squeeze":
+                    self._sq_free_now = cm.state.count(1)
+                break
+        if not fr and held:
+            fr, kind = held
         if not fr:
             if self.clock() - self.started_at < 8.0:
                 return ("wait", "exploring: looking around")
@@ -607,13 +824,14 @@ class Planner:
             return ("blacklist", goal)
         self.goal = goal
         path[0] = pose[:2]
-        return ("path", path, "exploring: frontier %.1f m away (%d left)" % (dist / 1000, len(fr)))
+        return ("path", path, "exploring: frontier %.1f m away (%d left)" % (dist / 1000, len(fr)), kind)
 
     def _check(self, pose):
         """Periodic: is the remaining route still clear? explore: is the goal still a frontier?"""
         cm = self.costmap()
         rest = self._remaining()
-        if self.mode == "explore" and self.goal is not None:
+        # (a squeeze goal may be a spot near a doorway to look from, not a frontier cell itself: drive there)
+        if self.mode == "explore" and self.goal is not None and not self.squeeze:
             i = cm.cell(*self.goal)
             still = i is not None and cm.state[i] == 1 and cm.cost[i] < MARGIN and any(
                 0 <= i + o < len(cm.state) and cm.state[i + o] == 0 for o in (1, -1, cm.w, -cm.w))
@@ -647,6 +865,12 @@ class Planner:
         nav = b.nav or {}
         fresh = now - self.sent_at > 0.6 and nav.get("waypoint_count") == getattr(self, "sent_n", -1)
         state = self.nav_names[nav["state"]] if fresh and nav.get("state", 99) < len(self.nav_names) else ""
+        if self.replan_at is not None:        # stuck (#62): let it back off, then plan with the boost
+            if now < self.replan_at:
+                return
+            self.replan_at = None
+            self._start_job(self._plan_goto if self.mode == "goto" else self._plan_explore, go=True)
+            return
         if state == "blocked" and now - self.last_plan > 2.0:
             self.blocked_plans += 1
             if self.blocked_plans > 6:
@@ -663,11 +887,13 @@ class Planner:
             if self.mode == "goto":
                 dest = self.dest
                 self.mode, self.path = "idle", []
+                self._success()
                 self._set_status("arrived" if not dest else "arrived at " + dest)
                 return
             if now - self.last_plan > 0.8:
                 if self.goal:
                     self.blacklist.append(self.goal)     # we're there; don't come back to it
+                    self._success()
                 self._start_job(self._plan_explore, go=True)
             return
         if self.mode == "explore" and not self.path and now - self.last_plan > 1.0:
