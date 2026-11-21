@@ -1,0 +1,15 @@
+[Unit]
+Description=SBR3 ground-station bridge (Teensy <-> web UI)
+After=network-online.target
+
+# systemd *user* unit: installed by install.sh into ~/.config/systemd/user/ (no sudo).
+# Runs at boot only with linger on (one-time: sudo loginctl enable-linger @USER@).
+[Service]
+WorkingDirectory=@REPO@
+ExecStart=/usr/bin/python3 -m station.bridge --port /dev/ttyACM0 --http-port 8080 --log-dir %h/sbr3-logs --release-file /tmp/sbr3-bridge.release
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
