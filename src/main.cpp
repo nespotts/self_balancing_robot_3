@@ -391,6 +391,8 @@ static void motorTestPoll(uint32_t now_us, uint32_t now_ms) {
   in.speed_r = odom.right_mms;
   in.vbatt = batt.packV();
   in.max_duty = P(P_MOT_TEST_MAX);
+  in.pwm_hz = motors_pwm_hz();  // in use (a changed param applies only with the motors off)
+  in.drive_mode = motors_drive_mode();
   mtest.step(in);
   if (mtest.driving()) {
     if (!drove || mtest.left() != last_l || mtest.right() != last_r) motors_set_raw(mtest.left(), mtest.right());
@@ -433,6 +435,14 @@ static void background() {
   uint8_t ev;
   while (modes.takeEvent(ev)) handleEvent(ev);
   motorTestPoll(now_us, now_ms);
+  // mot.pwm_hz / mot.drive_mode: applied only while both motors are off (issue #22)
+  motors_service();
+  static bool cfg_log = false;
+  if (motors_take_config_changed()) cfg_log = true;
+  if (cfg_log && link.log("mot: drive_mode %u (%s), pwm %.0f Hz", (unsigned)motors_drive_mode(),
+                          motors_drive_mode() ? "IN PWM, brake decay" : "EN PWM, coast decay",
+                          (double)motors_pwm_hz()))
+    cfg_log = false;
 
   if (imu.dataReady()) return;
   link.poll(onLinkFrame, 256);

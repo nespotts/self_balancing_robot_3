@@ -24,10 +24,13 @@ void ModeManager::onRadioPacket(const ControlPacket& p, uint32_t now_ms) {
     armed_ = a && !need_arm_edge_;
   }
 
-  // Mode requests act on change (or on the very first packet after boot), so a Pi SET_MODE is
-  // not overwritten by the remote's unchanged selection - not 50 times a second, and not when
-  // the radio reconnects after a dropout (that dropped a balancing robot to IDLE: it fell over).
-  if ((first_link || p.requested_mode != last_req_) && p.requested_mode < MODE_COUNT) {
+  // Mode requests act only on change, so a Pi SET_MODE is not overwritten by the remote's
+  // unchanged selection - not 50 times a second, and not when the radio reconnects after a
+  // dropout (that dropped a balancing robot to IDLE: it fell over).
+  // The first packet after boot only teaches last_req_: the robot stays IDLE until the remote's
+  // selection changes (or the Pi sends SET_MODE), so arming after a reboot never starts the
+  // motors in whatever mode the remote still shows (issue #21; the remote shows robot>requested).
+  if (!first_link && p.requested_mode != last_req_ && p.requested_mode < MODE_COUNT) {
     requested_ = (RobotMode)p.requested_mode;
   }
   last_req_ = p.requested_mode;

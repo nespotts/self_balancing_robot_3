@@ -195,8 +195,10 @@ void MotorTest::startTest(const MtIn& in) {
   deadline_us_ = in.now_us + limit;
   vb_min_ = vb_max_ = in.vbatt;
   max_duty_ = in.max_duty > 4095.0f ? 4095.0f : (in.max_duty < 100.0f ? 100.0f : in.max_duty);
-  emit("mt,begin,%u,max=%.0f,vb=%.2f,pitch=%.1f", test_, (double)max_duty_, (double)in.vbatt,
-       (double)in.pitch);
+  hz_ = in.pwm_hz;
+  drive_ = in.drive_mode;
+  emit("mt,begin,%u,max=%.0f,vb=%.2f,pitch=%.1f,hz=%.0f,drive=%u", test_, (double)max_duty_, (double)in.vbatt,
+       (double)in.pitch, (double)hz_, drive_);
   nextPart(in);
 }
 
@@ -204,8 +206,8 @@ void MotorTest::nextPart(const MtIn& in) {
   const uint8_t p = part_i_ < sizeof(parts_) ? parts_[part_i_] : 0;
   part_i_++;
   if (!p) {
-    emit("mt,end,%u,ok,%.1fs,vb=%.2f..%.2f", test_, (double)(in.now_us - t_start_us_) * 1e-6,
-         (double)vb_min_, (double)vb_max_);
+    emit("mt,end,%u,ok,%.1fs,vb=%.2f..%.2f,hz=%.0f,drive=%u", test_,
+         (double)(in.now_us - t_start_us_) * 1e-6, (double)vb_min_, (double)vb_max_, (double)hz_, drive_);
     stopAll(true);
     return;
   }
@@ -313,13 +315,14 @@ void MotorTest::runA(const MtIn& in, bool new_enc) {
 
 void MotorTest::finishA(const MtIn& in) {
   a_valid_ = true;
-  emit("mt,sum,a,vb=%.2f,l_fwd=%.0f/%.0f,l_rev=%.0f/%.0f,r_fwd=%.0f/%.0f,r_rev=%.0f/%.0f (start/stop duty)",
+  emit("mt,sum,a,vb=%.2f,l_fwd=%.0f/%.0f,l_rev=%.0f/%.0f,r_fwd=%.0f/%.0f,r_rev=%.0f/%.0f (start/stop duty),hz=%.0f,drive=%u",
        (double)in.vbatt, (double)a_start_[0][0], (double)a_stop_[0][0], (double)a_start_[0][1],
        (double)a_stop_[0][1], (double)a_start_[1][0], (double)a_stop_[1][0], (double)a_start_[1][1],
-       (double)a_stop_[1][1]);
-  emit("mt,sum,a,volts,l_fwd=%.2f/%.2f,l_rev=%.2f/%.2f,r_fwd=%.2f/%.2f,r_rev=%.2f/%.2f",
+       (double)a_stop_[1][1], (double)hz_, drive_);
+  emit("mt,sum,a,volts,l_fwd=%.2f/%.2f,l_rev=%.2f/%.2f,r_fwd=%.2f/%.2f,r_rev=%.2f/%.2f,hz=%.0f,drive=%u",
        (double)a_start_v_[0][0], (double)a_stop_v_[0][0], (double)a_start_v_[0][1], (double)a_stop_v_[0][1],
-       (double)a_start_v_[1][0], (double)a_stop_v_[1][0], (double)a_start_v_[1][1], (double)a_stop_v_[1][1]);
+       (double)a_start_v_[1][0], (double)a_stop_v_[1][0], (double)a_start_v_[1][1], (double)a_stop_v_[1][1],
+       (double)hz_, drive_);
   endPart(in);
 }
 
@@ -390,9 +393,10 @@ void MotorTest::runB(const MtIn& in, bool new_enc) {
 
 void MotorTest::finishB(const MtIn& in) {
   emit("mt,sum,b,vb=%.2f,top_mms l_fwd=%.0f l_rev=%.0f r_fwd=%.0f r_rev=%.0f,moves_at_V l_fwd=%.2f l_rev=%.2f "
-       "r_fwd=%.2f r_rev=%.2f",
+       "r_fwd=%.2f r_rev=%.2f,hz=%.0f,drive=%u",
        (double)in.vbatt, (double)b_top_[0][0], (double)b_top_[0][1], (double)b_top_[1][0], (double)b_top_[1][1],
-       (double)b_move_v_[0][0], (double)b_move_v_[0][1], (double)b_move_v_[1][0], (double)b_move_v_[1][1]);
+       (double)b_move_v_[0][0], (double)b_move_v_[0][1], (double)b_move_v_[1][0], (double)b_move_v_[1][1],
+       (double)hz_, drive_);
   endPart(in);
 }
 
@@ -466,8 +470,8 @@ void MotorTest::finishC(const MtIn& in) {
     m[w][2] = c_cnt_[w] ? c_sum_coast_[w] / n : -1;
   }
   emit("mt,sum,c,duty=%.0f,V=%.2f,mean left stop=%.0fms rev=%.0fms coast=%.1fdeg n=%u,right stop=%.0fms "
-       "rev=%.0fms coast=%.1fdeg n=%u",
+       "rev=%.0fms coast=%.1fdeg n=%u,hz=%.0f,drive=%u",
        (double)c_duty_, (double)volts(c_duty_, in), (double)m[0][0], (double)m[0][1], (double)m[0][2], c_cnt_[0],
-       (double)m[1][0], (double)m[1][1], (double)m[1][2], c_cnt_[1]);
+       (double)m[1][0], (double)m[1][1], (double)m[1][2], c_cnt_[1], (double)hz_, drive_);
   endPart(in);
 }
