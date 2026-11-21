@@ -109,7 +109,7 @@ export function drawPlan(ctx, sx, sy) {
 const $ = (id) => document.getElementById(id);
 let lastCmd = 0;
 function cmd(m) { lastCmd = performance.now(); if (!send(m)) toast("Not connected"); }
-on("error", (m) => { if (performance.now() - lastCmd < 3000) toast(m.text, 3500); });
+on("error", (m) => { if (performance.now() - lastCmd < 3000 && !m.code) toast(m.text, 3500); });   // (code: main.js says it)
 
 $("lay-occ").checked = occLayer.on;
 $("occ-opacity").value = occLayer.opacity;

@@ -108,6 +108,44 @@ SHOTS_TUNE = [
 ]
 
 
+# Find balance point (issue #52): python -m station.sim --http-port 8090, then
+#   python -m station.tools.screenshots --url http://localhost:8090/ --prep-balpoint balpoint
+BPV = "document.querySelector(\"#tune-sub [data-v=balance]\").click();"
+BPC = "document.getElementById(\"bp-card\").scrollIntoView();"
+BPB = "[...document.querySelectorAll(\"#bp-body button\")].find((b) => b.textContent === \"%s\").click();"
+SHOTS_BALPOINT = [
+    ("phone-balpoint-idle", PHONE, "tune", BPV + BPC, 2),
+    ("phone-balpoint-measure", PHONE, "tune", BPV + "document.getElementById(\"bp-go\").click();" + BPC, 12),
+    ("phone-balpoint-proposal", PHONE, "tune", BPV + BPC, 14),
+    ("phone-balpoint-done", PHONE, "tune", BPV + BPB % "Apply" + BPC, 30),
+]
+
+
+async def prep_balpoint(url):
+    """Sim: a deliberately wrong bal.offset_deg (the robot really balances at 3.15), balancing and standing."""
+    u = urllib.parse.urlsplit(url)
+    ws = await WsClient.connect(u.hostname, u.port or 80)
+    send = lambda **m: ws.send(json.dumps(m))
+    pid = None
+    end = time.monotonic() + 2
+    while time.monotonic() < end and pid is None:
+        try:
+            m = json.loads(await asyncio.wait_for(ws.recv(), 1))
+        except asyncio.TimeoutError:
+            continue
+        if m.get("t") == "params":
+            pid = next(p["id"] for p in m["list"] if p["name"] == "bal.offset_deg")
+    send(t="set_param", id=pid, value=1.9)
+    send(t="set_mode", mode=1)
+    end = time.monotonic() + 8
+    while time.monotonic() < end:
+        try:
+            await asyncio.wait_for(ws.recv(), 1)
+        except asyncio.TimeoutError:
+            pass
+    ws.close()
+
+
 async def prep_tune(url):
     """Sim with --remote: three balancing runs with different presets scored, a saved preset, then a full
     wheels-up motor test (about 80 s) and a second one left running for the 'running' state."""
@@ -229,7 +267,7 @@ async def shoot(url, browser, names, port=9333):
         await cdp.call("Page.enable")
         os.makedirs(OUT, exist_ok=True)
         current = None
-        for name, (w, h, dpr, mobile), view, js, wait, *action in SHOTS + SHOTS_TUNE:
+        for name, (w, h, dpr, mobile), view, js, wait, *action in SHOTS + SHOTS_TUNE + SHOTS_BALPOINT:
             if names and name not in names:
                 continue
             if current != (w, h, dpr, mobile):
@@ -267,16 +305,21 @@ def main():
     ap.add_argument("--browser", default=next((b for b in BROWSERS if os.path.exists(b)), None))
     ap.add_argument("--cdp-port", type=int, default=9333, help="headless browser debugging port")
     ap.add_argument("--prep-tune", action="store_true", help="score runs + motor test first (sim with --remote)")
-    ap.add_argument("names", nargs="*", help="only these shots (\"tune\" = the Tune tools shots)")
+    ap.add_argument("--prep-balpoint", action="store_true", help="wrong bal.offset_deg + balancing (balance point shots)")
+    ap.add_argument("names", nargs="*", help="only these shots (\"tune\" = the Tune tools shots, \"balpoint\")")
     a = ap.parse_args()
     if a.names == ["tune"]:
         a.names = [s[0] for s in SHOTS_TUNE]
+    if a.names == ["balpoint"]:
+        a.names = [s[0] for s in SHOTS_BALPOINT]
 
     async def run():
         if a.prep:
             await prep(a.url)
         if a.prep_tune:
             await prep_tune(a.url)
+        if a.prep_balpoint:
+            await prep_balpoint(a.url)
         if a.prep_map:
             await prep_map(a.url)
         await shoot(a.url, a.browser, a.names, a.cdp_port)

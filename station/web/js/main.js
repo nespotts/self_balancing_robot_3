@@ -43,12 +43,17 @@ function estopLatched() {
 }
 document.getElementById("estop-release").onclick = () => {
   if (!confirm("Release the E-stop?\n\nThe robot stays disarmed: arm it again (Arm & Balance, or the RC remote's ARMED switch off -> on) to drive.")) return;
-  if (send({ t: "estop_release" })) toast("E-stop released - arm again to drive", 3000);
-  else toast("Not connected - release not sent", 3000);
+  // the bar goes away when the bridge / robot report the latch cleared; no link -> a no_link error toast
+  if (!send({ t: "estop_release" })) toast("Not connected - release not sent", 3000);
 };
 stopBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); estop(); });   // fire on touch-down, not release
 window.addEventListener("keydown", (e) => {
   if ((e.code === "Space" || e.code === "Escape") && !e.target.closest("input, textarea")) { e.preventDefault(); estop(); }
+});
+
+// The bridge refuses robot commands while it has no link to the robot (and says so): show it once, here.
+on("error", (m) => {
+  if ((m.code === "no_link" || m.code === "estop") && m.text) toast(m.text.charAt(0).toUpperCase() + m.text.slice(1), 3500);
 });
 
 // ---------- top bar ----------

@@ -5,6 +5,7 @@ import { el, fmt, toast } from "./ui.js";
 import { Strip, S1, S2, S3, SUM } from "./chart.js";
 import "./tunetools.js";   // presets, scored runs, Balance / Motor test switch (issue #16)
 import "./motortest.js";
+import "./balpoint.js";   // Find balance point (issue #52)
 
 const GROUPS = { bal: "Balance", str: "Heading", vel: "Velocity", drv: "Driving", mot: "Motors",
   ctl: "Control loop", batt: "Battery", tlm: "Telemetry", rng: "Range sensor" };
@@ -36,8 +37,11 @@ function setUnsaved(v) {
   saveBtn.textContent = v ? "Save to robot •" : "Save to robot";
 }
 
+let prevUnsaved = false, lastApplyAt = -1e9;
 function apply(id, v, r) {
-  send({ t: "set_param", id, value: v });
+  if (performance.now() - lastApplyAt > 1500) prevUnsaved = unsaved;   // (what to go back to if the robot never got it)
+  lastApplyAt = performance.now();
+  if (!send({ t: "set_param", id, value: v })) return toast("Not connected");
   setUnsaved(true);
   if (!r) return;
   r.row.classList.add("sent");
@@ -153,6 +157,7 @@ document.getElementById("tune-defaults").onclick = () => {
   send({ t: "cfg", action: "defaults" });
   setUnsaved(true);
 };
+on("error", (m) => { if (m.code === "no_link" && performance.now() - lastApplyAt < 3000) setUnsaved(prevUnsaved); });   // not sent: not changed
 window.addEventListener("sbr3-unsaved", () => setUnsaved(true));   // presets / motor fit applied
 on("log", (m) => {
   if (m.src !== "robot" || performance.now() - saveAskedAt > 60000) return;
@@ -171,7 +176,7 @@ const pitch = new Strip({ title: "Pitch °", minSpan: 2, series: [
 const tcPlots = document.getElementById("tc-plots"), tcRate = document.getElementById("tc-rate");
 tcPlots.append(pid.box, pitch.box);
 const fullBtn = document.getElementById("tc-full"), pauseBtn = document.getElementById("tc-pause");
-let shown = false, paused = false, pausedEnd = 0, dirty = true, fullByMe = false, rowTimes = [];
+let shown = false, paused = false, pausedEnd = 0, dirty = true, rowTimes = [];
 pid.onhover = pitch.onhover = () => (dirty = true);
 
 on("tune", (m) => {
@@ -205,8 +210,8 @@ fullBtn.onclick = () => {
   const hz = param("tlm.hz"), rate = param("ctl.rate_hz");
   if (!hz) return;
   const on = !(rate && hz.value >= rate.value);
-  send({ t: "set_param", id: hz.id, value: on ? (rate ? rate.value : 400) : 100 });
-  fullByMe = on;
+  // Off = the rate the robot had before ("tlm_base"); the bridge also restores it when the Tune page closes (#46)
+  send({ t: "set_param", id: hz.id, value: on ? (rate ? rate.value : 400) : (state.status?.tlm_base ?? 100) });
 };
 pauseBtn.onclick = () => {
   paused = !paused;
@@ -220,12 +225,7 @@ pauseBtn.onclick = () => {
 export function tuneShown(v) {
   if (v === shown) return;
   shown = v;
-  send({ t: "sub", tune: v });
-  if (!v && fullByMe) {   // back to the normal rate (smaller logs) when we turned it up
-    const hz = param("tlm.hz");
-    if (hz) send({ t: "set_param", id: hz.id, value: 100 });
-    fullByMe = false;
-  }
+  send({ t: "sub", tune: v });   // (leaving Tune: the bridge puts tlm.hz back when the last subscriber is gone)
   dirty = true;
 }
 on("conn", (up) => { if (up && shown) send({ t: "sub", tune: true }); update(); });

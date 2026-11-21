@@ -1,5 +1,5 @@
 // Drive panel: readouts, mode buttons, joystick + keyboard -> cmd_vel (MODE_STATION only).
-import { state, on, send, modeName, robotAlive, flag } from "./conn.js";
+import { state, on, send, modeName, robotAlive, flag, tlmFresh, STALE_MS } from "./conn.js";
 import { el, toast } from "./ui.js";
 
 const MODE_HELP = {
@@ -23,11 +23,35 @@ function paramValue(re, dflt) {
   return p ? p.value : dflt;
 }
 
+// GOTO and EXPLORE start a drive by themselves (old waypoints, unmapped places): two taps, like Arm & Balance.
+const TWO_TAP = new Set(["GOTO", "EXPLORE"]);
+let tapBtn = null, tapTimer = 0;
+function tapReset() {
+  clearTimeout(tapTimer);
+  if (tapBtn) { tapBtn.classList.remove("confirm"); tapBtn.textContent = tapBtn.dataset.name; }
+  tapBtn = null;
+}
+function modeTap(btn, name, i) {
+  if (TWO_TAP.has(name) && tapBtn !== btn) {
+    tapReset();
+    tapBtn = btn;
+    btn.classList.add("confirm");
+    btn.textContent = "Tap again";
+    tapTimer = setTimeout(tapReset, 3000);
+    return;
+  }
+  tapReset();
+  send({ t: "set_mode", mode: i });
+}
+
 function buildModes() {
   modesEl.innerHTML = "";
+  tapReset();
   (state.hello?.modes || []).forEach((name, i) => {
-    modesEl.append(el("button", { class: name === "IDLE" ? "idle" : "", "data-mode": i, title: MODE_HELP[name] || "",
-      onclick: () => send({ t: "set_mode", mode: i }) }, name));
+    const b = el("button", { class: name === "IDLE" ? "idle" : "", "data-mode": i, "data-name": name,
+      title: MODE_HELP[name] || "" }, name);
+    b.onclick = () => modeTap(b, name, i);
+    modesEl.append(b);
   });
   const menu = document.getElementById("drive-menu");
   menu.innerHTML = "";
@@ -89,14 +113,22 @@ function updateLock() {
   updateArm();
 }
 
+// Numbers only look live while telemetry is: when the robot goes silent (flashing, unplugged, reset) they
+// grey out with a "no data" badge, and the mode tiles stop claiming a mode and can't be tapped.
+const tilesEl = document.querySelector("#view-drive .tiles");
 function updateReadouts() {
-  const t = state.tlm;
+  const t = state.tlm, fresh = tlmFresh();
+  tilesEl.classList.toggle("stale", !fresh);
+  for (const b of modesEl.children) {
+    b.disabled = !fresh;
+    b.classList.toggle("on", fresh && !!t && +b.dataset.mode === t.mode);
+  }
+  if (!fresh) tapReset();
   if (!t) return;
   document.getElementById("rd-speed").textContent = Math.round(t.speed_mms);
   document.getElementById("rd-turn").textContent = Math.round(t.turn_rate_dps);
   document.getElementById("rd-pitch").textContent = t.pitch_deg.toFixed(1);
   document.getElementById("rd-head").textContent = Math.round(((t.heading_deg % 360) + 540) % 360 - 180);
-  for (const b of modesEl.children) b.classList.toggle("on", +b.dataset.mode === t.mode);
 }
 
 take.onclick = () => send({ t: "set_mode", mode: state.hello.modes.indexOf("STATION") });
@@ -191,6 +223,8 @@ document.addEventListener("pointerdown", (e) => { if (!dmenu.hidden && !dmenu.co
 
 on("hello", buildModes);
 on("tlm", () => { updateReadouts(); updateLock(); if (!isStation() && (stick.active || keys.size)) { keys.clear(); joyEnd(); } });
-on("status", updateLock);
-on("conn", updateLock);
+on("status", () => { updateLock(); updateReadouts(); });
+on("conn", () => { updateLock(); updateReadouts(); });
+setInterval(updateReadouts, STALE_MS / 4);   // telemetry stopping is not a message: look at the clock
 updateLock();
+updateReadouts();

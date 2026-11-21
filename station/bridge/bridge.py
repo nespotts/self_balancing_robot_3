@@ -8,7 +8,7 @@ import tempfile
 import time
 
 from . import link_protocol as lp
-from .httpws import HttpServer, Response
+from .httpws import HttpServer, Response, check_origin
 from .mapping import Mapper
 from .planner import Planner
 from .session_log import SessionLog, to_csv
@@ -29,6 +29,16 @@ TILT_DEG = 10.0          # range points taken while pitched more than this are f
 SENSOR_FWD_MM = 26.0     # range-sensor servo axis, forward of the axle (CAD)
 SENSOR_RADIUS_MM = 12.9  # each VL53L0X sits this far out from the servo axis, facing outwards (CAD)
 WS_SLOW_BYTES = 256 * 1024
+WS_DROP_BYTES = 4 * 1024 * 1024   # a client whose send buffer grows beyond this is not reading: drop it (#47)
+WS_PING_S = 15.0                  # ping idle clients; a client silent (no pong either) for WS_IDLE_S is dropped
+WS_IDLE_S = 45.0
+LOG_RETRY_S = 30.0                # session log could not be opened: try again this often
+TICK_LATE_S = 0.2                 # warn in the log when the event loop was blocked this long (#45)
+TLM_HZ_GRACE_S = 10.0             # Tune closed this long ago -> put tlm.hz back (#46)
+# Commands that act on the robot: refused with an error while there is no link (#48)
+NEEDS_LINK = {"set_mode", "set_param", "cfg", "get_params", "goto", "event", "estop_release"}  # release: the robot latches too
+NEEDS_LINK_ACTION = {"preset": ("apply",), "motor": ("start", "apply"), "plan": ("goto", "explore")}
+NO_LINK_TEXT = "robot not connected"
 POLLER_TIMEOUT_S = 3.0
 # Flashing: while this file exists the bridge lets go of the serial port (checked 4x a second).
 # A file older than RELEASE_STALE_S is ignored (the flash script died without removing it);
@@ -79,7 +89,7 @@ def _round_dict(d):
 class Bridge:
     def __init__(self, port, web_dir, log_dir, http_host="0.0.0.0", http_port=8080, baud=115200,
                  release_file=None, log_max_mb=DEFAULT_LOG_MAX_MB, quiet=False, map_dir=None,
-                 preset_dir="~/sbr3-presets"):
+                 preset_dir="~/sbr3-presets", allow_any_origin=False, allow_hosts=(), allow_origins=()):
         self.port = port
         self.baud = baud
         self.web_dir = web_dir
@@ -87,8 +97,15 @@ class Bridge:
         self.release_file = release_file or DEFAULT_RELEASE_FILE
         self.release_stale_warned = False
         self.last_open_try = -10.0
+        self.last_log_try = -10.0
+        self.log_failed = False
+        self.last_tick = None
+        self.pruning = False
         self.last_prune = _now()
         self.quiet = quiet
+        self.allow_any_origin = allow_any_origin    # --allow-any-origin: no Origin / Host checks (#44)
+        self.allow_hosts = list(allow_hosts)
+        self.allow_origins = list(allow_origins)
         self.log = SessionLog(log_dir, log_max_mb)
         self.t_start = _now()
 
@@ -106,6 +123,10 @@ class Bridge:
         self.remote_seen = False        # RC remote reported live at least once since connecting
         self.tune_clients = set()
         self.tune_buf = []
+        self.hz_base = None             # tlm.hz before a Tune client raised it (None = not raised); see _hz_*
+        self.hz_restore_at = None
+        self.hz_armed = False           # a Tune subscriber has been around since the boost: restore when it leaves
+        self.hz_grace_s = TLM_HZ_GRACE_S
         self.rt_offset = None           # robot t_us (ms) -> Pi ms
         self.tlm = None
         self.tlm_seq = 0
@@ -186,33 +207,62 @@ class Bridge:
 
     async def link_task(self):
         while True:
-            if self.released():
-                if self.link:
-                    self.say("serial port released (flashing?)")
-                    self.link.close()
-                    self._on_lost(quiet=True)
-                self._set_link_state("released")
-            elif not self.link and _now() - self.last_open_try >= 1.0:
-                self.last_open_try = _now()
+            try:
+                await self._link_step()
+            except Exception as e:     # one bad moment (full disk, odd port error) must not end the bridge
+                import traceback
+                traceback.print_exc()
                 try:
-                    self.link = await open_link(self.port, self._on_data, self._on_lost, self.baud)
-                except LinkError as e:
-                    if str(e) != self.link_error:
-                        self.link_error = str(e)
-                        self.say("waiting for %s: %s" % (self.port, e))
-                    self._set_link_state("waiting")
-                else:
-                    self.link_error = ""
-                    self.parser = lp.FrameParser()
-                    self.remote_seen = False
-                    self.rt_offset = None
-                    self._set_link_state("connected")
-                    self.log.start()
-                    self.tools.on_session()
-                    self.say("connected to %s, session %s" % (self.port, self.log.name))
-                    self.send(lp.encode_get_params())
-                    self.last_get_params = _now()
+                    self.say("link task error: %s: %s (carrying on)" % (type(e).__name__, e))
+                except Exception:
+                    pass
             await asyncio.sleep(LINK_POLL_S)
+
+    async def _link_step(self):
+        if self.released():
+            if self.link:
+                self.say("serial port released (flashing?)")
+                self.link.close()
+                self._on_lost(quiet=True)
+            self._set_link_state("released")
+        elif not self.link and _now() - self.last_open_try >= 1.0:
+            self.last_open_try = _now()
+            try:
+                self.link = await open_link(self.port, self._on_data, self._on_lost, self.baud)
+            except LinkError as e:
+                if str(e) != self.link_error:
+                    self.link_error = str(e)
+                    self.say("waiting for %s: %s" % (self.port, e))
+                self._set_link_state("waiting")
+            else:
+                self.link_error = ""
+                self.parser = lp.FrameParser()
+                self.remote_seen = False
+                self.rt_offset = None
+                self._set_link_state("connected")
+                self._start_log()
+                try:
+                    self.tools.on_session()
+                except Exception as e:
+                    self.say("tuning tools: %s" % e)
+                self.say("connected to %s, session %s" % (self.port, self.log.name or "(not logging)"))
+                self.send(lp.encode_get_params())
+                self.last_get_params = _now()
+        elif self.link and not self.log.f and _now() - self.last_log_try >= LOG_RETRY_S:
+            self._start_log()          # the disk was full / read-only: try again, quietly
+
+    def _start_log(self):
+        self.last_log_try = _now()
+        if self.log.start():
+            if self.log_failed:
+                self.log_failed = False
+                self.say("session log back: %s" % self.log.name)
+            return True
+        if not self.log_failed:       # say it once; the retry stays quiet
+            self.log_failed = True
+            self.say("WARNING: cannot write the session log in %s (%s) - running without logging, retrying every %d s"
+                     % (self.log.dir, self.log.error, LOG_RETRY_S))
+        return False
 
     def _set_link_state(self, s):
         if s != self.link_state:
@@ -225,6 +275,7 @@ class Bridge:
         self.link = None
         self.log.stop()
         self.tlm_time = -10.0
+        self.tools.on_lost()
         if not quiet:
             self.say("lost %s (Teensy reset/unplugged?) - reconnecting" % self.port)
         self._set_link_state("released" if self.released() else "waiting")
@@ -238,7 +289,7 @@ class Bridge:
         for t, payload in self.parser.feed(data):
             try:
                 self._on_frame(t, payload)
-            except ValueError as e:  # short payload etc.
+            except Exception as e:  # short payload etc.: drop the frame, keep the link
                 self.parser.crc_errors += 1
                 if not self.quiet:
                     print("[bridge] bad frame", lp.MSG_NAMES.get(t, t), e)
@@ -254,6 +305,7 @@ class Bridge:
             if d["radio_ok"] and not self.remote_seen:
                 self.remote_seen = True
                 self.push_status()
+            self.tools.on_tlm(d, self.tlm_time)           # find balance point (#52)
             if self.tune_clients:
                 self._add_tune(d)
             last = self.track[-1] if self.track else None
@@ -277,6 +329,8 @@ class Bridge:
             for k in ("value", "min", "max"):
                 d[k] = _sig(d[k])
             self.tools.param_changed(d["name"], self.params.get(d["id"], {}).get("value"), d["value"])
+            if d["name"] == "tlm.hz" and self.hz_base is not None and abs(d["value"] - self.hz_base) < 1e-6:
+                self.hz_base = None          # the robot is back at its own rate (reset / restored)
             self.params[d["id"]] = d
             self.params_dirty = True
             self.log.record("param", d["id"], d["name"], d["value"], d["min"], d["max"])
@@ -356,6 +410,10 @@ class Bridge:
         while True:
             await asyncio.sleep(TICK_S)
             now = _now()
+            late = now - self.last_tick - TICK_S if self.last_tick is not None else 0.0
+            self.last_tick = now
+            if late > TICK_LATE_S:      # something blocked the loop: the robot drops the link after 500 ms of this
+                self.say("WARNING: event loop stalled for %d ms" % round(late * 1000))
             try:
                 self._tick(now)
             except Exception:
@@ -391,9 +449,10 @@ class Bridge:
                     self.tune_clients.discard(c)
                 elif c.buffered() < WS_SLOW_BYTES:
                     c.send(text)
-        if now - self.last_prune >= PRUNE_EVERY_S:
+        if now - self.last_prune >= PRUNE_EVERY_S and not self.pruning:
             self.last_prune = now
-            self.log.prune()
+            self._prune_async()
+        self._tlm_hz_tick(now)
         # browsers: latest telemetry, new range points, params
         if self.tlm_seq != self.tlm_sent_seq and self.tlm:
             self.tlm_sent_seq = self.tlm_seq
@@ -409,10 +468,12 @@ class Bridge:
         for text in self.mapper.poll(now):                # occupancy grid tiles, ~2 Hz (#12)
             self.broadcast(text)
         self.planner.tick(now)
+        self.tools.tick(now)
         if self.params_dirty:
             self.params_dirty = False
             self.broadcast(self.params_msg())
         if now - self.last_status >= 1.0:
+            self._reap_clients(now)
             dt = now - self.last_rate
             self.tlm_hz = self.tlm_count / dt if dt > 0 else 0.0
             self.tlm_count = 0
@@ -421,6 +482,75 @@ class Bridge:
             self.last_rate = now
             self.push_status()
             self.log.flush()
+
+    def _prune_async(self):
+        """Delete old sessions in a worker thread (stat / remove of big files must not stall the loop)."""
+        def work():
+            try:
+                self.log.prune()
+            except Exception:
+                pass
+            finally:
+                self.pruning = False
+        self.pruning = True
+        try:
+            asyncio.get_running_loop().run_in_executor(None, work)
+        except RuntimeError:            # no loop (unit tests calling _tick directly)
+            work()
+
+    def _reap_clients(self, now):
+        """Half-open phones (left the Wi-Fi without a FIN) must not pile up buffered data forever (#47)."""
+        for c in list(self.clients):
+            if c.closed:
+                self.clients.discard(c)
+            elif c.buffered() > WS_DROP_BYTES:
+                self.say("dropping client %s: not reading (%d KB queued)" % (c.peer[0] if c.peer else "?", c.buffered() // 1024))
+                c.abort()
+            elif now - c.last_rx > WS_IDLE_S:
+                self.say("dropping client %s: no answer for %d s" % (c.peer[0] if c.peer else "?", WS_IDLE_S))
+                c.abort()
+            elif now - c.last_ping >= WS_PING_S:
+                c.ping()
+
+    # ---- tlm.hz: the Tune page raises it to full rate; the bridge puts it back (#46)
+    def _tlm_hz_param(self):
+        return next((p for p in self.params.values() if p["name"] == "tlm.hz"), None)
+
+    def _hz_note_set(self, p, v, who):
+        """A client set tlm.hz. Raising it from a browser is temporary (Tune open); lowering back or any
+        other source (tune.py on the Pi, the planner) is final."""
+        if who.startswith("http@") or who == "planner":
+            self.hz_base = None
+        elif self.hz_base is None:
+            if v > p["value"]:
+                self.hz_base = p["value"]      # remembered; restored when the last Tune subscriber leaves
+                self.hz_armed = bool(self.tune_clients)
+        elif v <= self.hz_base:
+            self.hz_base = None
+        if self.hz_base is None:
+            self.hz_restore_at = None
+            self.hz_armed = False
+
+    def _tlm_hz_tick(self, now):
+        if self.hz_base is None:
+            return
+        if self.tune_clients:
+            self.hz_armed = True
+        if self.tune_clients or not self.hz_armed or not self.link:
+            self.hz_restore_at = None
+            return
+        if self.hz_restore_at is None:
+            self.hz_restore_at = now + self.hz_grace_s
+        elif now >= self.hz_restore_at:
+            p, base = self._tlm_hz_param(), self.hz_base
+            self.hz_base = self.hz_restore_at = None
+            self.hz_armed = False
+            if p and p["value"] != base:
+                self.send(lp.encode_set_param(p["id"], base))
+                p["value"] = base
+                self.params_dirty = True
+                self.say("tlm.hz back to %g Hz (Tune closed)" % base)
+                self.push_status()
 
     def status(self):
         now = _now()
@@ -433,6 +563,9 @@ class Bridge:
             "estop": self.estop, "robot_estop": self.robot_estop,
             "cmd_active": self.cmd_active, "remote_seen": self.remote_seen,
             "uptime_s": int(now - self.t_start), "release_file": self.release_file,
+            "tlm_boost": self.hz_base is not None,         # tlm.hz raised by the Tune page, restored when it closes
+            "tlm_base": self.hz_base,                      # ... and what it goes back to
+            "log_error": self.log.error,                   # why the session log is off ("" = fine)
         }
 
     def push_status(self):
@@ -455,6 +588,9 @@ class Bridge:
     def handle_command(self, m, who="?"):
         """One client command (dict). Returns an optional reply dict."""
         t = m.get("t")
+        if not self.link and self._needs_link(t, m.get("action")):
+            # nothing would reach the robot: say so instead of pretending (no optimistic state either)
+            return {"t": "error", "code": "no_link", "text": NO_LINK_TEXT + " - %s not sent" % t}
         if t == "cmd_vel":
             self.cmd = (_num(m.get("speed"), 0, -3000, 3000), _num(m.get("turn"), 0, -1000, 1000))
             self.cmd_time = _now()
@@ -465,6 +601,8 @@ class Bridge:
             return None
         if t == "estop":
             self.do_estop(who)
+            if not self.link:        # the flags are set, but the robot cannot have heard it
+                return {"t": "error", "code": "no_link", "text": "robot link down - STOP may not have reached the robot"}
             return None
         self.log.record("cmd", dict(m, who=who))
         if t == "estop_release":
@@ -474,7 +612,7 @@ class Bridge:
             if not 0 <= mode < lp.MODE_COUNT:
                 return {"t": "error", "text": "bad mode"}
             if mode != lp.MODE_IDLE and self.estop:
-                return {"t": "error", "text": "E-stop is on: release it first"}
+                return {"t": "error", "code": "estop", "text": "E-stop is on: release it first"}
             self.send_mode(mode, _flag(m.get("arm")))
             if who != "planner" and mode not in (lp.MODE_GOTO, lp.MODE_EXPLORE):
                 self.planner.stop("stopped: mode %s from %s" % (lp.MODE_NAMES[mode], who))
@@ -490,6 +628,8 @@ class Bridge:
             v = _num(m.get("value"), p["value"], p["min"], p["max"])
             self.send(lp.encode_set_param(pid, v))
             self.tools.param_changed(p["name"], p["value"], v)
+            if p["name"] == "tlm.hz":
+                self._hz_note_set(p, v, who)
             p["value"] = v  # optimistic; a ParamInfo echo from the robot overrides it
             self.params_dirty = True
         elif t == "cfg":
@@ -500,6 +640,9 @@ class Bridge:
             if pid is None:
                 return {"t": "error", "text": "robot has no %s param" % (name or m.get("action"))}
             self.send(lp.encode_set_param(pid, 1.0))
+            if name == "cfg.save":
+                self.hz_base = self.hz_restore_at = None      # saved on purpose: that rate is now the default
+                self.hz_armed = False
             if name == "cfg.defaults":
                 self.get_params_at = _now() + 0.5   # the robot re-streams; ask again in case frames were lost
             self.say("%s: %s" % (who, "save params to EEPROM" if name == "cfg.save" else "restore default params"))
@@ -517,7 +660,7 @@ class Bridge:
             self.broadcast(json.dumps({"t": "waypoints", "points": self.waypoints}))
             if m.get("go"):
                 if self.estop:
-                    return {"t": "error", "text": "waypoints sent; E-stop is on: release it first"}
+                    return {"t": "error", "code": "estop", "text": "waypoints sent; E-stop is on: release it first"}
                 self.send_mode(lp.MODE_GOTO, _flag(m.get("arm")))
             if who != "planner":                       # (the planner re-sends routes often)
                 self.say("%s: %d waypoint(s)%s" % (who, len(pts), " -> GOTO" if m.get("go") else ""))
@@ -539,13 +682,13 @@ class Bridge:
                 self.waypoints = []
                 self.broadcast(json.dumps({"t": "reset"}))
             self.say("%s: event %s" % (who, lp.EVENT_NAMES[ev]))
-        elif t in ("preset", "score", "motor"):
+        elif t in ("preset", "score", "motor", "balpoint"):
             return self.tools.handle(m, who)
         elif t == "map":       # occupancy grid: reset / save / load / list / delete / set (#12)
             return self.mapper.command(m, who)
         elif t == "plan":      # route planning / explore: goto / explore / stop / set
             if self.estop and m.get("action") in ("goto", "explore"):
-                return {"t": "error", "text": "E-stop is on: release it first"}
+                return {"t": "error", "code": "estop", "text": "E-stop is on: release it first"}
             return self.planner.command(m, who)
         elif t == "ping":
             return {"t": "pong", "id": m.get("id")}
@@ -559,6 +702,13 @@ class Bridge:
         if arm and mode != lp.MODE_IDLE:
             self.send(lp.encode_event(lp.EVT_LINK_ARM))
         self.send(lp.encode_set_mode(mode))
+
+    @staticmethod
+    def _needs_link(t, action):
+        try:
+            return t in NEEDS_LINK or action in NEEDS_LINK_ACTION.get(t, ())
+        except TypeError:        # unhashable junk in "t" / "action"
+            return False
 
     def do_estop(self, who):
         """Station E-stop: latched in the robot (EVT_LINK_ESTOP, v4) and here; SET_MODE IDLE for older firmware.
@@ -626,21 +776,27 @@ class Bridge:
                     break
                 try:
                     m = json.loads(text)
-                    if isinstance(m, dict):
-                        if m.get("t") == "hi" and m.get("name"):
-                            who = "%s@%s" % (str(m["name"])[:20], ws.peer[0] if ws.peer else "?")
-                            continue
-                        if m.get("t") == "sub":   # {"t": "sub", "tune": true} -> full-rate "tune" batches
-                            if m.get("tune"):
-                                self.tune_clients.add(ws)
-                            else:
-                                self.tune_clients.discard(ws)
-                            continue
-                        reply = self.handle_command(m, who)
-                        if reply:
-                            ws.send(json.dumps(reply))
-                except (ValueError, TypeError, KeyError) as e:
-                    ws.send(json.dumps({"t": "error", "text": "bad message: %s" % e}))
+                    if not isinstance(m, dict):
+                        ws.send(json.dumps({"t": "error", "text": "bad message: expected a JSON object"}))
+                        continue
+                    if m.get("t") == "hi" and m.get("name"):
+                        who = "%s@%s" % (str(m["name"])[:20], ws.peer[0] if ws.peer else "?")
+                        continue
+                    if m.get("t") == "sub":   # {"t": "sub", "tune": true} -> full-rate "tune" batches
+                        if m.get("tune"):
+                            self.tune_clients.add(ws)
+                            if self.hz_base is not None:
+                                self.hz_armed = True
+                        else:
+                            self.tune_clients.discard(ws)
+                        continue
+                    reply = self.run_command(m, who)
+                    if reply:
+                        ws.send(json.dumps(reply))
+                        if reply.get("code") == "no_link":      # the page may have shown the new value already
+                            ws.send(self.params_msg())
+                except Exception as e:     # whatever a client sends, its socket (and the bridge) stays up
+                    ws.send(json.dumps({"t": "error", "text": "bad message: %s: %s" % (type(e).__name__, e)}))
         finally:
             self.clients.discard(ws)
             self.tune_clients.discard(ws)
@@ -649,6 +805,19 @@ class Bridge:
                 self.cmd_active = False
                 self.send(lp.encode_cmd_vel(0.0, 0.0))
             self.say("%s disconnected (%d clients)" % (who, len(self.clients)))
+
+    def run_command(self, m, who="?"):
+        """handle_command for untrusted input (browsers, HTTP): a bug or odd value becomes an error reply."""
+        try:
+            return self.handle_command(m, who)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                self.say("command %r from %s failed: %s: %s" % (str(m.get("t"))[:30], who, type(e).__name__, e))
+            except Exception:
+                pass
+            return {"t": "error", "text": "command failed: %s" % e}
 
     # ------------------------------------------------------------------ HTTP API
     def api_state(self, req):
@@ -670,9 +839,12 @@ class Bridge:
     def api_cmd(self, req):
         """POST /api/cmd with a JSON command, or GET /api/cmd?t=set_mode&mode=0 (old browsers)."""
         if req.method == "POST" and req.body:
+            # JSON only: a text/plain or form POST from another site is a CORS "simple request" (no preflight)
+            if not req.headers.get("content-type", "").lower().startswith("application/json"):
+                return Response.json({"t": "error", "text": "POST /api/cmd needs Content-Type: application/json"}, 415)
             try:
                 m = req.json()
-            except ValueError:
+            except (ValueError, RecursionError):
                 return Response.json({"t": "error", "text": "bad json"}, 400)
         else:
             m = dict(req.query)
@@ -680,10 +852,10 @@ class Bridge:
                 m["points"] = [p.split(",") for p in m["points"].split(";") if "," in p]
         who = "http@%s" % (req.peer[0] if req.peer else "?")
         self.pollers[req.peer[0] if req.peer else "?"] = _now()
-        reply = self.handle_command(m, who) if isinstance(m, dict) else {"t": "error"}
+        reply = self.run_command(m, who) if isinstance(m, dict) else {"t": "error", "text": "expected a JSON object"}
         return Response.json(reply or {"t": "ok"})
 
-    def api_logs(self, req):
+    async def api_logs(self, req):
         name = req.path[len("/api/logs/"):] if req.path.startswith("/api/logs/") else ""
         if not name:
             return Response.json({"sessions": self.log.list(), "dir": self.log.dir})
@@ -693,7 +865,10 @@ class Bridge:
         if req.method == "DELETE":
             if self.log.f and name == self.log.name:
                 return Response.text("session is active", 400)
-            os.remove(path)
+            try:       # removing a big file takes a while on an SD card: not on the event loop
+                await asyncio.get_running_loop().run_in_executor(None, os.remove, path)
+            except OSError as e:
+                return Response.text("could not delete: %s" % (e.strerror or e), 500)
             return Response.json({"t": "ok"})
         kind = req.query.get("csv")
         if kind in ("tlm", "rng"):
@@ -737,7 +912,11 @@ class Bridge:
         return Response.json(self.status())
 
     # ------------------------------------------------------------------ run
-    async def run(self):
+    def build_http(self):
+        """The HTTP + WebSocket server (not started). Origin / Host checks on /ws and /api/* unless
+        allow_any_origin (--allow-any-origin)."""
+        guard = None if self.allow_any_origin else \
+            (lambda req: check_origin(req, self.allow_hosts, self.allow_origins))
         routes = [
             ("GET", "/api/state", self.api_state),
             ("*", "/api/cmd", self.api_cmd),
@@ -748,7 +927,10 @@ class Bridge:
             ("GET", "/api/map", self.api_map),
             ("GET", "/api/map/", self.api_map),
         ]
-        http = HttpServer(self.web_dir, routes, "/ws", self.ws_handler)
+        return HttpServer(self.web_dir, routes, "/ws", self.ws_handler, guard=guard)
+
+    async def run(self):
+        http = self.build_http()
         await http.start(self.http_host, self.http_port)
         self.say("web UI on http://%s:%d/  (robot link: %s)" % (
             "localhost" if self.http_host in ("0.0.0.0", "") else self.http_host, self.http_port, self.port))

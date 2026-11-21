@@ -397,7 +397,8 @@ class Planner:
            mode request carries the arm request; later ones never arm."""
         act = m.get("action")
         if act == "set":
-            for k, v in (m.get("settings") or {}).items():
+            s = m.get("settings")
+            for k, v in (s if isinstance(s, dict) else {}).items():
                 if k in DEFAULTS:
                     if isinstance(DEFAULTS[k], bool):
                         self.settings[k] = bool(v)
