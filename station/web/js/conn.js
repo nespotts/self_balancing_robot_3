@@ -5,7 +5,7 @@ function emit(type, m) { for (const fn of listeners[type] || []) { try { fn(m); 
 
 export const state = {
   connected: false,
-  hello: null, robot: null, status: null, tlm: null, tlmAt: 0, nav: null,
+  hello: null, robot: null, status: null, health: null, healthAt: 0, tlm: null, tlmAt: 0, nav: null,
   params: [], paramsFirst: {},     // id -> first value seen this page load (for "revert")
   waypoints: [],                   // sent to the robot (from the bridge)
   ranges: [],                      // [i, hx, hy, rx, ry, valid, tilt, t_ms, sensor_id, sensor_angle_deg, range_mm]
@@ -44,6 +44,7 @@ function handle(m) {
       break;
     case "robot": state.robot = m.robot; break;
     case "status": state.status = m; break;
+    case "health": state.health = m; state.healthAt = performance.now(); break;
     case "tlm": {
       state.tlm = m; state.tlmAt = performance.now();
       const tr = state.track, last = tr[tr.length - 1];

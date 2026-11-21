@@ -9,8 +9,9 @@ import { plotsShown } from "./plots.js";
 import { sensorsShown } from "./sensors.js";
 import { tuneShown } from "./tune.js";
 import { loadSessions } from "./logs.js";
+import { healthShown } from "./health.js";
 
-const VIEWS = ["map", "drive", "sensors", "plots", "tune", "logs"];
+const VIEWS = ["map", "drive", "sensors", "plots", "tune", "health", "logs"];
 const tabs = document.getElementById("tabs");
 
 function show(view) {
@@ -22,6 +23,7 @@ function show(view) {
   if (view === "plots") plotsShown();
   sensorsShown(view === "sensors");
   tuneShown(view === "tune");
+  healthShown(view === "health");
   if (view === "logs") loadSessions();
 }
 tabs.addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) show(b.dataset.view); });
@@ -90,10 +92,16 @@ function updateTop() {
   else if (t && alive && (t.remote_flags & 1)) setPill(pArmed, "RC E-STOP", "estop");   // link v3: LINK_RF_ESTOP
   else if (t && alive) setPill(pArmed, flag("armed") ? (flag("upright") ? "ARMED" : "ARMED·DOWN") : "SAFE", flag("armed") ? "armed" : "");
   else setPill(pArmed, "—");
-  if (t && alive) setPill(pBatt, t.battery_v.toFixed(1) + " V", flag("low_batt") ? "lowbatt" : "");
+  if (t && alive) {       // + "~18m" once the bridge has learned the discharge trend (Health page)
+    const bm = state.health?.battery;
+    const mins = t.battery_v >= 3 && bm && bm.minutes != null ? " ~" + bm.minutes + "m" : "";
+    setPill(pBatt, t.battery_v < 3 ? "bench" : t.battery_v.toFixed(1) + " V" + mins, flag("low_batt") ? "lowbatt" : "");
+  }
   else setPill(pBatt, "— V");
 }
 pLink.onclick = () => show("logs");
+pBatt.onclick = () => show("health");
+on("health", updateTop);
 pMode.onclick = () => show(window.matchMedia("(min-width: 900px)").matches ? "map" : "drive");
 let lastTop = 0;
 on("tlm", () => { const n = performance.now(); if (n - lastTop > 200) { lastTop = n; updateTop(); } });

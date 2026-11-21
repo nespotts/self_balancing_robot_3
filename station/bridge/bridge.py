@@ -10,6 +10,7 @@ import time
 
 from . import link_protocol as lp
 from . import falls as falls_mod
+from . import health as health_mod
 from .httpws import HttpServer, Response, check_origin
 from .mapping import Mapper
 from .planner import Planner
@@ -153,6 +154,9 @@ class Bridge:
         self.track = collections.deque(maxlen=5000)         # robot path [x, y] (every 20 mm)
         self.waypoints = []                                 # what the station last sent (x, y)
         self.range_listeners = []                           # callables(range dict) e.g. mapping (#12)
+        self.health = health_mod.Health(self.log.dir)       # Health page: preflight, battery minutes (#51)
+        self.health_cache = None                            # last `health` message (JSON text), sent to new clients
+        self.last_health = -10.0
         self.tools = TuningTools(self, preset_dir)          # Tune page: presets, scored runs, motor test (#16)
         self.mapper = Mapper(map_dir or os.path.join(self.log.dir, "maps"), say=self.say)   # main: ~/sbr3-maps
         self.range_listeners.append(self.mapper.on_range)
@@ -288,6 +292,7 @@ class Bridge:
             self.falls.on_link_lost()
         self.log.stop()
         self.tlm_time = -10.0
+        self.health.on_lost()
         self.tools.on_lost()
         if not quiet:
             self.say("lost %s (Teensy reset/unplugged?) - reconnecting" % self.port)
@@ -316,6 +321,7 @@ class Bridge:
             self.tlm_time = _now()
             self.log.tlm(d)
             self.falls.on_tlm(d, self.tlm_time)
+            self.health.on_tlm(d, self.tlm_time)
             if d["radio_ok"] and not self.remote_seen:
                 self.remote_seen = True
                 self.push_status()
@@ -339,6 +345,7 @@ class Bridge:
             self.log.record("log", text)
             self._add_log("robot", text)
             self.tools.on_log(text)
+            self.health.on_log(text, _now())
             if text.startswith("pose reset"):     # remote or station: the default Home is where it happened
                 self.mapper.on_pose_reset()
             m = GO_HOME_RE.match(text)
@@ -507,6 +514,9 @@ class Bridge:
             self.last_rate = now
             self.push_status()
             self.log.flush()
+        if now - self.last_health >= 1.0:
+            self.last_health = now
+            self._push_health(now)
 
     def _prune_async(self):
         """Delete old sessions in a worker thread (stat / remove of big files must not stall the loop)."""
@@ -592,6 +602,24 @@ class Bridge:
             "tlm_base": self.hz_base,                      # ... and what it goes back to
             "log_error": self.log.error,                   # why the session log is off ("" = fine)
         }
+
+    def health_ctx(self):
+        """What the Health rules look at (plain values; see station/bridge/health.py)."""
+        return {"link": self.link_state, "robot_alive": _now() - self.tlm_time < ROBOT_SILENT_S, "tlm": self.tlm,
+                "tlm_hz": self.tlm_hz, "rng_hz": self.rng_hz, "crc_errors": self.parser.crc_errors,
+                "params": {p["name"]: p["value"] for p in self.params.values()}, "hello": self.hello,
+                "estop": self.estop, "robot_estop": self.robot_estop, "remote_seen": self.remote_seen,
+                "clients": self.client_count(), "log_error": self.log.error}
+
+    def _push_health(self, now):
+        """Once a second: the Health page + battery minutes (a few hundred bytes; reads /proc and /sys only)."""
+        try:
+            text = json.dumps(self.health.tick(now, self.health_ctx()), separators=(",", ":"))
+        except Exception as e:      # never let the Health page disturb the link
+            self.say("health failed: %s: %s" % (type(e).__name__, e))
+            return
+        self.health_cache = text
+        self.broadcast(text, droppable=True)
 
     def push_status(self):
         self.last_status = _now()
@@ -784,6 +812,8 @@ class Bridge:
         who = "client%d@%s" % (self.client_ids, ws.peer[0] if ws.peer else "?")
         ws.send(self.hello_msg())
         ws.send(json.dumps(self.status()))
+        if self.health_cache:
+            ws.send(self.health_cache)
         ws.send(self.params_msg())
         if self.nav:
             ws.send(json.dumps(dict(t="nav", **self.nav)))
@@ -863,7 +893,7 @@ class Bridge:
                "robot": self.hello, "waypoints": self.waypoints,
                "ranges": self.ranges_since(r, int(_num(req.query.get("max"), 300, 0, 2000))),
                "r": self.range_next, "logs": [x for x in self.logs if x["i"] >= li][-20:], "l": self.log_next,
-               "modes": lp.MODE_NAMES}
+               "modes": lp.MODE_NAMES, "health": json.loads(self.health_cache) if self.health_cache else None}
         if req.query.get("params"):
             out["params"] = sorted(self.params.values(), key=lambda d: d["id"])
         return Response.json(out)
@@ -944,6 +974,9 @@ class Bridge:
         # reads / parses record files: in a worker thread, never on the event loop
         return await asyncio.get_running_loop().run_in_executor(None, falls_mod.handle_http, self.falls, req)
 
+    def api_health(self, req):
+        return Response.json(json.loads(self.health_cache) if self.health_cache else {"t": "health", "tiles": []})
+
     def api_status(self, req):
         return Response.json(self.status())
 
@@ -957,6 +990,7 @@ class Bridge:
             ("GET", "/api/state", self.api_state),
             ("*", "/api/cmd", self.api_cmd),
             ("GET", "/api/status", self.api_status),
+            ("GET", "/api/health", self.api_health),
             ("*", "/api/serial", self.api_serial),
             ("GET", "/api/logs", self.api_logs),
             ("*", "/api/logs/", self.api_logs),
