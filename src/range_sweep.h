@@ -6,7 +6,9 @@
 // goes low (fallback: polling its interrupt status register).
 //
 // Angles: head angle a (deg, + = CCW, 0 = robot forward) is where sensor 0 points; sensor 1 points
-// at a + 180. Servo command = 90 + rng.servo_dir * a + rng.servo_trim_deg (0..180, 90 = centre).
+// at a + 180. Servo command = 90 + rng.servo_trim_deg + rng.servo_dir * a / rng.servo_deg_per_cmd,
+// clamped to rng.servo_min_deg..rng.servo_max_deg (off the end stops); reported angles use the
+// clamped command, so they stay true.
 // See docs/firmware.md "Range sweep".
 #pragma once
 #include <stdint.h>
@@ -60,7 +62,7 @@ class RangeSweep {
   uint32_t t_state_us_ = 0, settle_us_ = 0, t_start_us_ = 0, last_poll_us_ = 0;
   // sweep position
   int k_ = 0, dir_ = 1;
-  float head_deg_ = 0, cmd_head_deg_ = 1e9f, cmd_trim_ = 0, cmd_dir_ = 0;
+  float last_cmd_ = -1e9f;   // servo command last written, deg
   float cur_head_deg_ = 0;   // head angle the current measurement is taken at
   bool pending_[2] = {false, false}, ready_[2] = {false, false};
   bool int_ok_[2] = {true, true};

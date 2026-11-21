@@ -123,13 +123,14 @@ float RangeSweep::positionAngle(int k) const {
 void RangeSweep::commandServo(float head_deg, uint32_t now_us) {
   const float trim = P(P_RNG_SERVO_TRIM);
   const int dir = servoDir();
-  float cmd = 90.0f + dir * head_deg + trim;
-  if (cmd < 0.0f) cmd = 0.0f;
-  if (cmd > 180.0f) cmd = 180.0f;
-  cur_head_deg_ = dir * (cmd - 90.0f - trim);  // what the head really does if the command clipped
+  const float scale = P(P_RNG_SERVO_SCALE);  // real head degrees per commanded degree
+  const float lo = P(P_RNG_SERVO_MIN), hi = P(P_RNG_SERVO_MAX);
+  float cmd = 90.0f + trim + dir * head_deg / scale;
+  if (cmd < lo) cmd = lo;  // stay off the servo's end stops
+  if (cmd > hi) cmd = hi;
+  cur_head_deg_ = dir * scale * (cmd - 90.0f - trim);  // where the head really points if it clipped
 
-  const float old_cmd = cmd_head_deg_ > 1e8f ? -1e9f : 90.0f + cmd_dir_ * cmd_head_deg_ + cmd_trim_;
-  const float moved = fabsf(cmd - old_cmd);
+  const float moved = fabsf(cmd - last_cmd_);  // last_cmd_ = -1e9 after start / off
   const float step = P(P_RNG_SERVO_HOLD) >= 0.0f ? 11.25f : stepDeg();
   if (moved < 0.01f) {
     settle_us_ = 0;
@@ -141,9 +142,7 @@ void RangeSweep::commandServo(float head_deg, uint32_t now_us) {
     const float pulse = SERVO_MIN_US + (SERVO_MAX_US - SERVO_MIN_US) * cmd / 180.0f;
     analogWrite(pins::RNG_SERVO, (int)lroundf(pulse / SERVO_PERIOD_US * 4096.0f));
   }
-  cmd_head_deg_ = head_deg;
-  cmd_trim_ = trim;
-  cmd_dir_ = (float)dir;
+  last_cmd_ = cmd;
   t_state_us_ = now_us;
 }
 
@@ -280,7 +279,9 @@ void RangeSweep::service(uint32_t now_us, uint32_t budget_us, const RangePose& p
     switch (state_) {
       case MOVE: {
         const float hold = P(P_RNG_SERVO_HOLD);
-        const float head = hold >= 0.0f ? servoDir() * (hold - 90.0f) : (any ? positionAngle(k_) : 0.0f);
+        // hold: servo command hold + trim (head = dir * scale * (hold - 90))
+        const float head = hold >= 0.0f ? servoDir() * P(P_RNG_SERVO_SCALE) * (hold - 90.0f)
+                                        : (any ? positionAngle(k_) : 0.0f);
         commandServo(head, now_us);
         state_ = SETTLE;
         break;
@@ -372,7 +373,7 @@ const char* RangeSweep::serviceSlow(uint32_t now_ms, bool motors_off) {
     op_n_ = 0;
     pending_[0] = pending_[1] = false;
     analogWrite(pins::RNG_SERVO, 0);  // no pulses: servo goes limp
-    cmd_head_deg_ = 1e9f;
+    last_cmd_ = -1e9f;
     return "rng: off";
   }
   if (want && state_ == OFF) {
