@@ -303,11 +303,8 @@ void Navigator::updateGoto(const NavIn& in) {
   }
   float v = P(P_NAV_SPEED_KP) * dist_ * fmaxf(0.0f, cosf(e * kDeg));
   v = fminf(fmaxf(v, P(P_NAV_MIN_SPEED)), vmax);
-  float vl = latched_ ? 0.0f : limitSpeed(v, vmax, true);
-  if (latched_) {  // EXPLORE: stays blocked until a new list
-    obst_ = front_;
-    obst_flag_ = true;
-  }
+  float vl = limitSpeed(v, vmax, true);
+  if (latched_) obst_flag_ = true;  // EXPLORE: stays blocked until a new list
   if (obst_flag_) {
     if (!blocked_) startBlocked(in);
     const float obst = obst_;

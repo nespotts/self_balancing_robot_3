@@ -462,9 +462,8 @@ class Navigator:
             return
         v = P("nav.speed_kp") * self.dist * max(0.0, math.cos(math.radians(e)))
         v = min(max(v, P("nav.min_speed")), vmax)
-        vl = 0.0 if self.latched else self.limit_speed(v, vmax, True)
-        if self.latched:
-            self.obst = self.front
+        vl = self.limit_speed(v, vmax, True)
+        if self.latched:                      # EXPLORE: stays blocked until a new list
             self.obst_flag = True
         if self.obst_flag:
             if not self.blocked:
