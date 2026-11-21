@@ -3,7 +3,8 @@
 //   Gamepad: left stick drives (STATION mode); B = STOP, X = IDLE, Y = BALANCE (twice to arm), A = STATION,
 //            L1 / R1 = speed limit.
 //   Haptics: E-stop, link loss, obstacle. Keeps the screen on while connected. Screen orientation in the Drive ⋯ menu.
-// Native -> page events: window.__sbr3.emit(name, json): tilt, gamepad, gamepadButton, gamepads, pause, resume.
+// Native -> page events: window.__sbr3.emit(name, json): tilt, rotation, net, gamepad, gamepadButton, gamepads, pause, resume.
+// Page -> native besides the inputs: SBR3Native.gestureRects(json) keeps the pad clear of the system Back swipe.
 import { state, on, send, robotAlive, flag } from "./conn.js";
 import { addInput, driveNow, isStation, disarmedNoRemote } from "./drive.js";
 import { el, toast } from "./ui.js";
@@ -67,10 +68,15 @@ function init() {
 
   // ---------- tilt + dead-man ----------
   let tilt = null, hold = null;
+  // every sample carries the display rotation (0..3) its pitch / roll are drawn in. The hold is zeroed in one frame:
+  // a sample from another one (phone turned landscape <-> reverse landscape) would drive the wrong way round -> let go.
   onNative("tilt", (d) => {
-    tilt = { pitch: d.pitch, roll: d.roll, at: performance.now() };
+    tilt = { pitch: d.pitch, roll: d.roll, rot: (d.rot | 0) & 3, at: performance.now() };
+    if (hold && tilt.rot !== hold.rot) { turned(); return; }
     if (hold) { const v = tiltVec(); setKnob(v.x, v.y); }
   });
+  onNative("rotation", (d) => { if (hold && ((d.rot | 0) & 3) !== hold.rot) turned(); });
+  function turned() { release(); toast("Screen turned - hold the pad again"); }
   function tiltVec() {
     return { x: shape(wrap180(tilt.roll - hold.r0), TILT.dead, TILT.rollFull),
              y: shape(wrap180(tilt.pitch - hold.p0), TILT.dead, TILT.pitchFull) };
@@ -94,7 +100,7 @@ function init() {
     if (hold) return;
     if (!tiltFresh()) { toast("Tilt sensor not ready"); return; }
     try { joy.setPointerCapture(e.pointerId); } catch {}
-    hold = { id: e.pointerId, p0: tilt.pitch, r0: tilt.roll };
+    hold = { id: e.pointerId, p0: tilt.pitch, r0: tilt.roll, rot: tilt.rot };
     joy.classList.add("active", "held");
     buzz([0, 18]);
     driveNow();
@@ -106,8 +112,34 @@ function init() {
   document.addEventListener("visibilitychange", () => { if (document.hidden) release(); });
   window.addEventListener("pagehide", release);   // leaving the page: the zero goes out before the socket closes
   onNative("pause", () => { release(); pad = null; driveNow(); });
+  // Wi-Fi gone or changed (the app watches it): nothing will reach the robot, so let go and say so
+  onNative("net", (d) => { if (!d.up) { release(); toast("Wi-Fi lost", 3000); } });
   // watchdog: tilt samples stopped while held (sensor / app trouble) -> let go
   setInterval(() => { if (hold && !tiltFresh()) { release(); toast("Tilt sensor stopped - released"); } }, 100);
+
+  // ---------- keep the pad clear of the Back swipe (gesture navigation) ----------
+  // The pad sits near the screen edges; a touch that starts at an edge is the system Back gesture, which would pop the
+  // "Leave the robot?" dialog mid-drive. Tell the app where the pad is (edge strips are covered whole).
+  let lastRects = "";
+  function reportRects() {
+    let s = "[]";
+    try {
+      if (joy.getClientRects().length) {
+        const r = joy.getBoundingClientRect(), W = window.innerWidth, E = 56;
+        if (r.width > 0 && r.height > 0) {
+          s = JSON.stringify([[Math.round(r.left < E ? 0 : r.left), Math.round(r.top), Math.round(W - r.right < E ? W : r.right), Math.round(r.bottom)]]);
+        }
+      }
+    } catch {}
+    if (s === lastRects) return;
+    lastRects = s;
+    try { N.gestureRects(s); } catch {}
+  }
+  if (typeof ResizeObserver === "function") new ResizeObserver(reportRects).observe(joy);
+  window.addEventListener("resize", reportRects);
+  window.addEventListener("hashchange", () => setTimeout(reportRects, 50));
+  setInterval(reportRects, 1000);   // layout shifts the observers do not see (menus, tab switches)
+  reportRects();
 
   // ---------- gamepad ----------
   let pad = null, padHint = false, armAsk = 0;
