@@ -101,6 +101,8 @@ class CostMap:
         self._classify()
         if sure_walls if specks is None else specks:
             self._fill_specks()
+        self.centre = False          # squeeze maps (set by the Planner): shortcuts keep to the gap centre line (#68)
+        self.hard_mm = S["robot_radius_mm"] + S["margin_mm"]
         self.inner_r = (S["robot_radius_mm"] + min(30.0, S["margin_mm"])) / self.res
         self._inflate(S["robot_radius_mm"] + S["margin_mm"], S["soft_mm"])
         self.unknown_ok = bool(S["unknown_ok"])
@@ -289,20 +291,67 @@ class CostMap:
                 return False
         return True
 
+    def _clearance(self, i, cache, R):
+        """Distance (cells, capped at R) from cell i to the nearest occupied cell."""
+        v = cache.get(i)
+        if v is None:
+            w, st = self.w, self.state
+            cx, cy = i % w, i // w
+            best = R * R
+            for y in range(max(0, cy - int(R)), min(self.h, cy + int(R) + 1)):
+                row = y * w
+                for x in range(max(0, cx - int(R)), min(w, cx + int(R) + 1)):
+                    if st[row + x] == 2:
+                        d = (x - cx) ** 2 + (y - cy) ** 2
+                        if d < best:
+                            best = d
+            v = cache[i] = math.sqrt(best)
+        return v
+
+    def _centred_line(self, a, b, floor, cache, R):
+        """Squeeze maps: the straight segment a-b never gets closer to a wall than `floor` cells."""
+        w = self.w
+        ax, ay, bx, by = a % w, a // w, b % w, b // w
+        dx, dy = bx - ax, by - ay
+        n = max(abs(dx), abs(dy))
+        for k in range(n + 1):
+            if self._clearance((ay + round(k * dy / n)) * w + ax + round(k * dx / n), cache, R) < floor:
+                return False
+        return True
+
     def simplify(self, cells, unknown_ok):
-        """Line-of-sight pruning: keep a cell only when the next one can't be seen from the last kept."""
+        """Line-of-sight pruning: keep a cell only when the next one can't be seen from the last kept.
+        Squeeze maps (#68): a shortcut may not pass closer to a wall than the route itself does between its
+        ends (less half a cell), so legs stay on the gap's centre line instead of cutting the jamb."""
         if len(cells) <= 2:
             return [self.center(i) for i in cells]
+        cache, R = {}, (self.hard_mm + 80.0) / self.res
+        must = set()
+        if self.centre:                  # per narrow stretch: its centre cell + a lead-in / lead-out stay waypoints
+            lead = int(round(150.0 / self.res))
+            tight = (self.hard_mm + 40.0) / self.res
+            run = []
+            for k, c in enumerate(cells + [None]):
+                if c is not None and self._clearance(c, cache, R) < tight:
+                    run.append(k)
+                elif run:
+                    must.update((max(0, run[0] - lead), run[len(run) // 2], min(len(cells) - 1, run[-1] + lead)))
+                    run = []
         out = [cells[0]]
         i = 0
         while i < len(cells) - 1:
-            j = len(cells) - 1
-            while j > i + 1 and not self.clear_line(cells[i], cells[j], unknown_ok, allow_start_zone=(i == 0)):
+            j = min([m for m in must if m > i] + [len(cells) - 1])    # never skip over a must-keep cell
+            while j > i + 1:
+                if self.clear_line(cells[i], cells[j], unknown_ok, allow_start_zone=(i == 0)):
+                    if not self.centre:
+                        break
+                    floor = min(self._clearance(c, cache, R) for c in cells[i:j + 1]) - 0.5
+                    if self._centred_line(cells[i], cells[j], floor, cache, R):
+                        break
                 j -= 1
             out.append(cells[j])
             i = j
         return [self.center(i) for i in out]
-
     def path_clear(self, pts, unknown_ok=True):
         """Is a world polyline still free of obstacles (inflated)? The first point (the robot) may be
         in the inflated zone."""
@@ -503,7 +552,9 @@ class Planner:
             # map is not range-weighted (see SURE_LUT)
             s["margin_mm"] = min(s["margin_mm"], s["squeeze_mm"])
             rw = self.b.mapper.settings.get("range_weight", False)
-            return CostMap(g, s, res_mm=g.res, sure_walls=not rw, specks=True)
+            cm = CostMap(g, s, res_mm=g.res, sure_walls=not rw, specks=True)
+            cm.centre = True
+            return cm
         return CostMap(g, s)
 
     def _costmaps(self):

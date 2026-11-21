@@ -339,6 +339,23 @@ class TestSimMapping(unittest.TestCase):
                        if m.grid.value(x, y) < UNKNOWN)
             self.assertGreater(free / (12 * 19), 0.9, width)          # the far room is mapped
 
+    def test_squeeze_stays_centred_in_doorway(self):
+        # issue #68: route simplification used to cut the jamb corner at the squeeze limit (sim runs touched a
+        # jamb: clearance == body radius). These (width, seed) runs all did; squeeze legs now stay on the centre line.
+        for width, seed in ((260, 4), (260, 7), (280, 1), (280, 6), (280, 7), (300, 2), (300, 8)):
+            r = SimRobot(seed=seed)
+            c = 600.0
+            r.room.segs = _box(750, 0, 3500, 2000) + [(1000, -1000, 1000, c - width / 2.0), (1000, c + width / 2.0, 1000, 1000)]
+            m = Mapper(tempfile.mkdtemp())
+            seen = {"x": -1e9, "close": 1e9}
+
+            def watch(robot, b):
+                seen["x"] = max(seen["x"], robot.X)
+                seen["close"] = min(seen["close"], robot.room.clearance(robot.X, robot.Y))
+            s, b = plan_offline(r, m, {"t": "plan", "action": "explore"}, max_s=400, on_step=watch)
+            self.assertGreater(seen["x"], 1000 + ROBOT_RADIUS + 20, (width, seed))
+            self.assertGreater(seen["close"], ROBOT_RADIUS + 1.0, (width, seed))
+
 
 class TestPlannerSettings(unittest.TestCase):
     def setUp(self):
