@@ -44,6 +44,7 @@
       <button id="map-more" title="More">⋯</button>
     </div>
     <div class="menu" id="map-menu" hidden>
+      <button id="map-home" class="primary">Go home</button>
       <label><input type="checkbox" id="lay-ranges" checked> Range points <span class="sens-key"><i class="s0"></i>front <i class="s1"></i>rear</span></label>
       <label><input type="checkbox" id="lay-track" checked> Track</label>
       <label><input type="checkbox" id="lay-grid" checked> Grid</label>
@@ -65,9 +66,18 @@
         <p class="muted" id="map-stats"></p>
       </details>
     </div>
+    <div class="menu" id="place-menu" hidden>
+      <button id="pm-save">Save place here…</button>
+      <button id="pm-home">Set Home here</button>
+    </div>
+    <div class="place-sheet" id="place-sheet" hidden>
+      <div class="ps-head"><b id="ps-name"></b><small id="ps-dist"></small><button id="ps-close" class="ghost small" title="Close">✕</button></div>
+      <div class="ps-row"><button id="ps-go" class="primary">Go here ▶</button><button id="ps-more" title="More">⋯</button></div>
+      <div class="ps-extra" id="ps-extra" hidden><button id="ps-rename">Rename…</button><button id="ps-del" class="warn">Delete…</button></div>
+    </div>
     <div class="map-info" id="map-info"></div>
     <div class="wp-bar" id="wp-bar">
-      <span class="wp-hint" id="wp-hint">Tap the map to add waypoints</span>
+      <span class="wp-hint" id="wp-hint">Tap to add waypoints · hold to save a place</span>
       <span class="wp-count" id="wp-count"></span>
       <button id="wp-explore" title="Drive to unmapped places until the room is mapped">Explore</button>
       <button id="wp-undo">Undo</button>

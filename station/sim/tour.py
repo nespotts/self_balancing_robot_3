@@ -156,7 +156,7 @@ class OfflineBridge:
         from station.bridge.bridge import NAV_STATE_NAMES
         from station.bridge.planner import Planner
         self.robot, self.mapper, self.quiet = robot, mapper, quiet
-        self.link, self.estop, self.estop_time = True, False, -1.0
+        self.link, self.estop, self.estop_time, self.robot_estop = True, False, -1.0, False
         self.tlm = self.nav = None
         self.tlm_time = 0.0
         self.waypoints = []
@@ -184,14 +184,15 @@ class OfflineBridge:
     def update(self):
         r = self.robot
         x, y, th = r.odom()
-        self.tlm = {"x_mm": x, "y_mm": y, "heading_deg": th, "mode": r.mode}
+        self.tlm = {"x_mm": x, "y_mm": y, "heading_deg": th, "mode": r.mode,
+                    "status": lp.TLM_ARMED if r.armed else 0}
         self.tlm_time = r.t
         self.nav = r.nav.status()
 
 
 def plan_offline(robot, mapper, command, max_s=300.0, on_step=None):
-    """Arm, then run a planner command ({"t": "plan", "action": "explore"} or a goto) in sim time until
-    the planner is idle again. Returns (sim seconds, bridge) - bridge.lines has the planner's log."""
+    """Arm, then run a planner command ({"t": "plan", "action": "explore"} or a goto), or a function
+    command(bridge), in sim time until the planner is idle again. Returns (sim seconds, bridge) - bridge.lines has the planner's log."""
     parser = lp.FrameParser()
     b = OfflineBridge(robot, mapper)
 
@@ -210,7 +211,7 @@ def plan_offline(robot, mapper, command, max_s=300.0, on_step=None):
     pump()
     b.update()
 
-    err = b.planner.command(command, "test")
+    err = command(b) if callable(command) else b.planner.command(command, "test")
     if err:
         raise RuntimeError(err)
     start = robot.t

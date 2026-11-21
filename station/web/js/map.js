@@ -3,6 +3,7 @@ import { state, on, send, modeName, flag } from "./conn.js";
 import { toast } from "./ui.js";
 import { SENS_RGB, SENS_NEW } from "./chart.js";
 import { drawOccMap, drawPlan, planActive, plan, onChange, routeOn, hasMap } from "./occmap.js";
+import { drawPlaces, hitPlace, openSheet, openPlaceMenu, onPlacesChange } from "./places.js";
 
 const C = {
   bg: "#151514", grid: "#262624", grid2: "#30302d", axis: "#45453f",
@@ -182,6 +183,7 @@ function draw() {
   drawPlan(ctx, sx, sy);
   if (layers.ranges) drawRanges();
   drawWaypoints();
+  drawPlaces(ctx, sx, sy);
   drawRobot();
 }
 requestAnimationFrame(draw);
@@ -213,7 +215,7 @@ function updateBar() {
   wpHint.hidden = !!hasAny;
   wpCount.hidden = !hasAny;
   wpCount.textContent = pending.length ? `${pending.length} new point${pending.length > 1 ? "s" : ""}`
-    : planning ? (plan.status || (exploring ? "Exploring" : "Route"))
+    : planning ? (plan.dest ? "To " + plan.dest : plan.status || (exploring ? "Exploring" : "Route"))
     : `${sent} waypoint${sent > 1 ? "s" : ""}`;
   bUndo.hidden = !pending.length;
   bClear.hidden = !hasAny || exploring;
@@ -262,6 +264,7 @@ bExplore.onclick = () => {
   send({ t: "plan", action: "explore", arm: !!(disarmed && !t.radio_ok) });   // confirmed above
 };
 onChange(() => { dirty = true; updateBar(); });
+onPlacesChange(() => { dirty = true; });
 
 // ---------- pan / zoom / tap ----------
 const ptrs = new Map();
@@ -274,12 +277,23 @@ function zoomAt(px, py, f) {
 }
 function setFollow(v) { view.follow = v; document.getElementById("map-follow").classList.toggle("on", v); dirty = true; }
 
+const LONG_MS = 550;
+let pressTimer = 0;
+// long-press (or right-click): save a place here (places.js)
+function placeMenuAt(px, py) { openPlaceMenu(px, py, wx(px), wy(py), W, H); }
 canvas.addEventListener("pointerdown", (e) => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;   // right-click: contextmenu below
   canvas.setPointerCapture(e.pointerId);
   ptrs.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
-  if (ptrs.size === 1) gesture = { x: e.offsetX, y: e.offsetY, t: performance.now(), moved: 0, multi: false };
-  else if (gesture) gesture.multi = true;
+  clearTimeout(pressTimer);
+  if (ptrs.size === 1) {
+    const g = gesture = { x: e.offsetX, y: e.offsetY, t: performance.now(), moved: 0, multi: false, long: false };
+    pressTimer = setTimeout(() => {
+      if (gesture === g && !g.multi && g.moved <= 8) { g.long = true; placeMenuAt(g.x, g.y); }
+    }, LONG_MS);
+  } else if (gesture) gesture.multi = true;
 });
+canvas.addEventListener("contextmenu", (e) => { e.preventDefault(); placeMenuAt(e.offsetX, e.offsetY); });
 canvas.addEventListener("pointermove", (e) => {
   const p = ptrs.get(e.pointerId);
   if (!p) return;
@@ -305,9 +319,11 @@ function endPtr(e) {
   if (!ptrs.has(e.pointerId)) return;
   ptrs.delete(e.pointerId);
   if (ptrs.size === 0 && gesture) {
-    if (!gesture.multi && gesture.moved <= 8 && performance.now() - gesture.t < 600 && e.type === "pointerup") {
-      pending.push([wx(e.offsetX), wy(e.offsetY)]);
-      updateBar(); dirty = true;
+    clearTimeout(pressTimer);
+    if (!gesture.multi && !gesture.long && gesture.moved <= 8 && performance.now() - gesture.t < 600 && e.type === "pointerup") {
+      const pin = hitPlace(e.offsetX, e.offsetY, sx, sy);
+      if (pin) openSheet(pin);                       // tap a pin: Go here / more
+      else { pending.push([wx(e.offsetX), wy(e.offsetY)]); updateBar(); dirty = true; }
     }
     gesture = null;
   }
