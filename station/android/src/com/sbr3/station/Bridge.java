@@ -25,7 +25,10 @@ final class Bridge {
             return new JSONObject().put("app", "Balance Bot").put("version", act.versionName()).put("code", act.versionCode())
                 .put("debug", act.isDebug()).put("sdk", Build.VERSION.SDK_INT).put("model", Build.MODEL)
                 .put("tilt", act.tilt.available()).put("orientation", act.orientation())
-                .put("addr", act.lastAddress() == null ? JSONObject.NULL : act.lastAddress()).toString();
+                .put("addr", act.lastAddress() == null ? JSONObject.NULL : act.lastAddress())
+                .put("robot", act.robotAddr() == null ? JSONObject.NULL : new JSONObject().put("addr", act.robotAddr())
+                    .put("kind", act.robotKind() == null ? JSONObject.NULL : act.robotKind()).put("label", act.robotLabel()))
+                .toString();
         } catch (Exception e) {
             return "{}";
         }

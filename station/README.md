@@ -26,9 +26,10 @@ flowchart LR
 ```
 python -m station.sim
 ```
-Open http://localhost:8080/ . The fake Teensy runs the firmware's balance controller on a simulated robot
-(CAD mass/inertia, 400 Hz), so gains behave like the real thing.
-Options: `--remote` (RC remote on: its ARMED switch rules), `--remote-disarmed`, `--http-port 8090`,
+Open http://localhost:8080/ . The sim listens on this PC only (127.0.0.1); `--host 0.0.0.0` exposes it on the
+LAN (phones, the Android app: its finder lists it as "Simulator", the real robot first). The fake Teensy runs the
+firmware's balance controller on a simulated robot (CAD mass/inertia, 400 Hz), so gains behave like the real thing.
+Options: `--host 0.0.0.0`, `--remote` (RC remote on: its ARMED switch rules), `--remote-disarmed`, `--http-port 8090`,
 `--head-error 8` (range head mounted 8° off: practise the trim). The range sweep follows the firmware
 (`rng.*` params: sweep / park / trim / limits / timing).
 

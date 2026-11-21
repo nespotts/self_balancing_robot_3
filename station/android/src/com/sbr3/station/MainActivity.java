@@ -12,7 +12,10 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.graphics.drawable.GradientDrawable;
+import android.util.TypedValue;
 import android.view.Display;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -30,6 +33,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.RenderProcessGoneDetail;
 import android.widget.FrameLayout;
+import android.widget.TextView;
 import java.io.ByteArrayInputStream;
 import java.net.InetAddress;
 import java.net.URLEncoder;
@@ -51,7 +55,10 @@ public class MainActivity extends Activity {
     Tilt tilt;
     Gamepads pads;
     volatile boolean trusted;           // the shown page may use SBR3Native
-    private String robotAddr;           // host:port of the robot page being shown, or null
+    private volatile String robotAddr;  // host:port of the robot page being shown, or null
+    private volatile String robotKind;         // Lan.ROBOT / Lan.SIM / null (unknown) for robotAddr
+    private boolean labelShown;         // the "Robot · addr" label was flashed for this robot page
+    private TextView label;
     private final ConcurrentHashMap<String, Boolean> hostOk = new ConcurrentHashMap<>();
 
     private SharedPreferences prefs() { return getSharedPreferences("sbr3", MODE_PRIVATE); }
@@ -142,6 +149,8 @@ public class MainActivity extends Activity {
         tilt.stop();
         keepScreenOn(false);
         robotAddr = null;
+        robotKind = null;
+        hideRobotLabel();
         trusted = true;
         String h = hash == null ? "" : hash.startsWith("?") ? "#" + hash.substring(1) : hash;
         web.loadUrl(FINDER + h);
@@ -149,9 +158,62 @@ public class MainActivity extends Activity {
 
     void openRobot(String addr) {
         finder.stop();
-        prefs().edit().putString("addr", addr).apply();
+        String k = finder.kindOf(addr);
+        if (k == null && addr.equals(lastAddress())) k = prefs().getString("kind", null);
+        prefs().edit().putString("addr", addr).putString("kind", k).apply();
         robotAddr = addr;
+        robotKind = k;
+        labelShown = false;
         web.loadUrl("http://" + addr + "/");
+    }
+
+    String robotAddr() { return robotAddr; }
+
+    String robotKind() { return robotKind; }
+
+    /** "Robot · 192.168.0.209" / "Simulator · 192.168.0.149" for the robot page shown, or null. */
+    String robotLabel() {
+        String a = robotAddr;
+        if (a == null) return null;
+        String host = a.endsWith(":" + Lan.PORT) ? Lan.hostOf(a) : a;
+        return robotKind == null ? host : Lan.kindLabel(robotKind) + " · " + host;
+    }
+
+    /** Small label at the top for a few seconds after the robot page opens: which robot this is. Never takes touches. */
+    private void flashRobotLabel() {
+        String text = robotLabel();
+        if (text == null) return;
+        if (label == null) {
+            label = new TextView(this);
+            float dp = getResources().getDisplayMetrics().density;
+            label.setTextColor(0xFFF0EFEC);
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            int ph = Math.round(12 * dp), pv = Math.round(5 * dp);
+            label.setPadding(ph, pv, ph, pv);
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(0xE6242422);
+            bg.setStroke(Math.max(1, Math.round(dp)), 0xFF3A3A37);
+            bg.setCornerRadius(14 * dp);
+            label.setBackground(bg);
+            label.setClickable(false);
+            label.setFocusable(false);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            lp.topMargin = Math.round(64 * dp);   // below the web app's 56-60 px top bar
+            root.addView(label, lp);
+        }
+        label.setText(text);
+        label.animate().cancel();
+        label.setAlpha(1f);
+        label.setVisibility(View.VISIBLE);
+        label.animate().alpha(0f).setStartDelay(4000).setDuration(600)
+            .withEndAction(() -> label.setVisibility(View.GONE)).start();
+    }
+
+    private void hideRobotLabel() {
+        if (label == null) return;
+        label.animate().cancel();
+        label.setVisibility(View.GONE);
     }
 
     static boolean isTrusted(String url) {
@@ -306,6 +368,13 @@ public class MainActivity extends Activity {
 
         @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap icon) {
             trusted = isTrusted(url);
+        }
+
+        @Override public void onPageFinished(WebView v, String url) {
+            if (robotAddr != null && !labelShown && url != null && url.startsWith("http://" + robotAddr + "/")) {
+                labelShown = true;
+                flashRobotLabel();
+            }
         }
 
         @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError err) {

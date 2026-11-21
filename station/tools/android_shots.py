@@ -3,7 +3,7 @@
   python -m station.sim --http-port 8090            (in another terminal)
   python -m station.tools.android_shots --url http://localhost:8090/
 
-android-find (searching), android-notfound, android-drive-tilt (dead-man held, tilted), android-landscape.
+android-find (searching), android-notfound, android-pick (several bridges answered: robots first, then sims), android-drive-tilt (dead-man held, tilted), android-landscape.
 """
 import argparse
 import asyncio
@@ -34,7 +34,9 @@ window.SBR3Native = {
       d += 24;
       __sbr3.emit("find", JSON.stringify({ phase: "scan", subnet: "192.168.0.x", total: 253, done: Math.min(d, 253), wifi: true }));
       if (sc === "search" && d >= 120) return;
-      if (d >= 253) { __sbr3.emit("findDone", "{}"); return; }
+      if (d >= 253) { __sbr3.emit("findDone", sc !== "pick" ? "{}" : JSON.stringify({ auto: null, hits: [
+        { addr: "192.168.0.209:8080", kind: "robot", alive: true }, { addr: "192.168.0.61:8080", kind: "robot", alive: false },
+        { addr: "192.168.0.149:8080", kind: "sim", alive: true }] })); return; }
       setTimeout(tick, 30);
     };
     setTimeout(tick, 50);
@@ -100,6 +102,10 @@ async def main_async(url, browser, names):
             await cdp.call("Page.addScriptToEvaluateOnNewDocument", source="window.__scenario='none'")
             await nav(find_url, 1.5)
             await save("android-notfound")
+        if want("android-pick"):
+            await cdp.call("Page.addScriptToEvaluateOnNewDocument", source="window.__scenario='pick'")
+            await nav(find_url, 1.5)
+            await save("android-pick")
         if want("android-drive-tilt") or want("android-landscape"):
             await nav(url + "#drive", 5)
             await ev("document.querySelector('#input-seg [data-v=tilt]').click();"
@@ -128,8 +134,9 @@ async def main_async(url, browser, names):
             await metrics(870, 412)              # cutout side letterboxed: the phone (tabs) layout
             await asyncio.sleep(1.0)
             await save("android-landscape-narrow")
-        await ev("sbr3.send({t:'set_mode', mode: 0})")
-        await asyncio.sleep(0.3)
+        if any(want(n) for n in ("android-drive-tilt", "android-drive-hold", "android-landscape")):
+            await ev("sbr3.send({t:'set_mode', mode: 0})")
+            await asyncio.sleep(0.3)
         cdp.ws.close()
     finally:
         proc.terminate()

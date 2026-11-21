@@ -53,7 +53,10 @@ window.SBR3Native = {
   findStart: () => {
     __calls.push(["findStart"]);
     setTimeout(() => {
-      if (__scenario === "found") __sbr3.emit("found", JSON.stringify({ addr: "192.168.0.209:8080", status: {} }));
+      const R = { addr: "192.168.0.209:8080", kind: "robot", alive: true }, S = { addr: "192.168.0.149:8080", kind: "sim", alive: true };
+      if (__scenario === "found") __sbr3.emit("findDone", JSON.stringify({ hits: [R, S], auto: R.addr }));
+      else if (__scenario === "two") __sbr3.emit("findDone", JSON.stringify({ hits: [R, { ...R, addr: "192.168.0.50:8080" }, S], auto: null }));
+      else if (__scenario === "sim") __sbr3.emit("findDone", JSON.stringify({ hits: [S], auto: null }));
       else { __sbr3.emit("find", '{"wifi":true,"subnet":"192.168.0.x","total":3,"done":3}'); __sbr3.emit("findDone", "{}"); }
     }, 100);
   },
@@ -132,6 +135,23 @@ class TestNativeDrive(unittest.TestCase):
         title = "document.getElementById('title').textContent"
         await open_with("found")
         await self.until("__calls.some(c => c[0] === 'connect' && c[1] === '192.168.0.209:8080')", what="auto-connect")
+        self.assertIn("Robot", await self.ev(title))
+
+        # issue #27: two robots (+ a sim) -> a list, robots first, nothing opened until tapped
+        hits = "[...document.querySelectorAll('#hits button')].map(b => b.textContent)"
+        await open_with("two")
+        await self.until(title + " === 'Pick a robot'")
+        self.assertEqual(await self.ev(hits), ["Robot · 192.168.0.209last used", "Robot · 192.168.0.50", "Simulator · 192.168.0.149"])
+        await asyncio.sleep(0.5)
+        self.assertFalse(await self.ev("__calls.some(c => c[0] === 'connect')"), "no auto-connect with two robots")
+        await self.ev("document.querySelectorAll('#hits button')[2].click()")
+        await self.until("__calls.some(c => c[0] === 'connect' && c[1] === '192.168.0.149:8080')", what="tap the sim")
+
+        # only a simulator answered: ask, don't open it
+        await open_with("sim")
+        await self.until(title + " === 'Only a simulator found'")
+        self.assertEqual(await self.ev(hits), ["Simulator · 192.168.0.149"])
+        self.assertFalse(await self.ev("__calls.some(c => c[0] === 'connect')"), "a lone sim is not opened by itself")
 
         await open_with("none")
         await self.until(title + " === 'Robot not found'")

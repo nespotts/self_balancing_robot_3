@@ -12,13 +12,17 @@ Full-screen ground station for the Pixel / Android tablets: finds the robot, ope
 
 ```mermaid
 flowchart LR
-  A[App start] --> L{last address<br>answers?}
-  L -- yes --> W[Robot web UI<br>http://pi:8080]
-  L -- no --> S[scan Wi-Fi /24<br>+ NSD, :8080/api/status]
-  S -- found --> W
+  A[App start] --> S[scan all of the Wi-Fi /24<br>+ last address + NSD<br>:8080/api/status, ~2 s]
+  S -- "exactly 1 Robot<br>(port /dev/...)" --> W[Robot web UI<br>http://pi:8080]
+  S -- "2+ robots, or only<br>simulators (tcp://...)" --> P[Pick a robot<br>Robot · .209 / Simulator · .149]
+  P --> W
   S -- nothing --> N[Robot not found<br>Search again · type address]
   N --> W
 ```
+<img src="../docs/screenshots/android-pick.png" width="23%">
+
+A simulator on the same Wi-Fi never wins over the real robot (it's only listed). On opening, a small label
+"Robot · 192.168.0.209" / "Simulator · …" shows for 4 s (also in the Drive ⋯ menu once the Pi has this branch).
 
 ## Install
 
