@@ -2,6 +2,7 @@
 import { state, on, send, modeName, flag } from "./conn.js";
 import { toast } from "./ui.js";
 import { SENS_RGB, SENS_NEW } from "./chart.js";
+import { drawOccMap, drawPlan, planActive, plan, onChange, routeOn, hasMap } from "./occmap.js";
 
 const C = {
   bg: "#151514", grid: "#262624", grid2: "#30302d", axis: "#45453f",
@@ -61,26 +62,6 @@ function drawGrid() {
   ctx.beginPath(); ctx.moveTo(bx, by - 5); ctx.lineTo(bx, by); ctx.lineTo(bx + len, by); ctx.lineTo(bx + len, by - 5); ctx.stroke();
   ctx.fillStyle = C.text; ctx.font = "12px system-ui, sans-serif"; ctx.textBaseline = "bottom";
   ctx.fillText(st >= 1000 ? st / 1000 + " m" : st + " mm", bx + len + 6, by + 2);
-}
-
-// Occupancy grid (issue #12): state.grid = {x0_mm, y0_mm, res_mm, w, h, cells: Uint8Array|array (0 free..255 occupied, 127 unknown)}
-let gridCanvas = null, gridVersion = -1;
-function drawOccupancy() {
-  const g = state.grid;
-  if (!g) return;
-  if (g.version !== gridVersion) {
-    gridCanvas = gridCanvas || document.createElement("canvas");
-    gridCanvas.width = g.w; gridCanvas.height = g.h;
-    const gctx = gridCanvas.getContext("2d"), img = gctx.createImageData(g.w, g.h);
-    for (let i = 0; i < g.w * g.h; i++) {
-      const v = g.cells[i], row = g.h - 1 - Math.floor(i / g.w), o = (row * g.w + (i % g.w)) * 4;
-      img.data[o] = img.data[o + 1] = img.data[o + 2] = 255 - v; img.data[o + 3] = v === 127 ? 0 : 110;
-    }
-    gctx.putImageData(img, 0, 0);
-    gridVersion = g.version;
-  }
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(gridCanvas, sx(g.x0_mm), sy(g.y0_mm + g.h * g.res_mm), g.w * g.res_mm * view.s, g.h * g.res_mm * view.s);
 }
 
 function drawTrack() {
@@ -145,6 +126,9 @@ function drawWaypoints() {
   if (state.tlm && navIdx >= 0 && navIdx < sent.length && modeName(state.tlm.mode) === "GOTO") {
     path([[state.tlm.x_mm, state.tlm.y_mm], sent[navIdx]], C.target, [6, 6]);
   }
+  if (planActive()) {   // planned route: the robot's waypoints are just the route's corners (drawPlan)
+    ctx.textAlign = "start"; ctx.textBaseline = "alphabetic";
+  } else {
   path(sent, C.wp, []);
   sent.forEach((p, i) => {
     const x = sx(p[0]), y = sy(p[1]), done = navIdx >= 0 && i < navIdx;
@@ -153,6 +137,7 @@ function drawWaypoints() {
     if (i === navIdx) { ctx.strokeStyle = C.target; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, r + 4, 0, 7); ctx.stroke(); }
     ctx.fillStyle = "#fff"; ctx.fillText(String(i + 1), x, y + 0.5);
   });
+  }
   if (pending.length) {
     path(pending, C.wpPending, [5, 5]);
     pending.forEach((p, i) => {
@@ -192,8 +177,9 @@ function draw() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
   if (layers.grid) drawGrid();
-  drawOccupancy();
+  drawOccMap(ctx, sx, sy, view.s);
   if (layers.track) drawTrack();
+  drawPlan(ctx, sx, sy);
   if (layers.ranges) drawRanges();
   drawWaypoints();
   drawRobot();
@@ -219,21 +205,29 @@ function updateInfo() {
 
 const wpHint = document.getElementById("wp-hint"), wpCount = document.getElementById("wp-count");
 const bUndo = document.getElementById("wp-undo"), bClear = document.getElementById("wp-clear"), bGo = document.getElementById("wp-go");
+const bExplore = document.getElementById("wp-explore");
 function updateBar() {
   const sent = state.waypoints?.length || 0;
-  const hasAny = pending.length || sent;
+  const planning = plan.mode !== "idle", exploring = plan.mode === "explore";
+  const hasAny = pending.length || sent || planning;
   wpHint.hidden = !!hasAny;
   wpCount.hidden = !hasAny;
-  wpCount.textContent = pending.length ? `${pending.length} new point${pending.length > 1 ? "s" : ""}` : `${sent} waypoint${sent > 1 ? "s" : ""}`;
+  wpCount.textContent = pending.length ? `${pending.length} new point${pending.length > 1 ? "s" : ""}`
+    : planning ? (plan.status || (exploring ? "Exploring" : "Route"))
+    : `${sent} waypoint${sent > 1 ? "s" : ""}`;
   bUndo.hidden = !pending.length;
-  bClear.hidden = !hasAny;
+  bClear.hidden = !hasAny || exploring;
   const inGoto = state.tlm && modeName(state.tlm.mode) === "GOTO";
-  bGo.hidden = !(pending.length || (sent && !inGoto));
+  bGo.hidden = exploring || !(pending.length || (sent && !inGoto && !planning));
+  bExplore.hidden = !!pending.length || (planning && !exploring);
+  bExplore.textContent = exploring ? "Stop exploring" : "Explore";
+  bExplore.classList.toggle("on", exploring);
 }
 
 bUndo.onclick = () => { pending.pop(); updateBar(); dirty = true; };
 bClear.onclick = () => {
   if (pending.length) pending = [];
+  else if (plan.mode !== "idle") send({ t: "plan", action: "stop" });
   else send({ t: "event", event: state.hello.events.indexOf("CLEAR_WAYPOINTS") });
   updateBar(); dirty = true;
 };
@@ -244,13 +238,28 @@ bGo.onclick = () => {
     if (!confirm("The robot is disarmed.\nArm it and drive to the waypoints?")) return;
   } else if (disarmed) toast("Waypoints sent - arm with the RC remote to go", 3500);
   if (pending.length) {
-    send({ t: "goto", points: pending.map((p) => [Math.round(p[0]), Math.round(p[1])]), replace: true, go: true });
+    const pts = pending.map((p) => [Math.round(p[0]), Math.round(p[1])]);
+    // with a map: the bridge plans a route around obstacles through the tapped points (#12)
+    if (routeOn.get() && hasMap()) send({ t: "plan", action: "goto", points: pts });
+    else send({ t: "goto", points: pts, replace: true, go: true });
     pending = [];
   } else {
     send({ t: "set_mode", mode: state.hello.modes.indexOf("GOTO") });
   }
   updateBar(); dirty = true;
 };
+
+bExplore.onclick = () => {
+  if (!state.connected) return toast("Not connected");
+  if (plan.mode === "explore") { send({ t: "plan", action: "stop" }); send({ t: "set_mode", mode: state.hello.modes.indexOf("BALANCE") }); return; }
+  const t = state.tlm, disarmed = t && !flag("armed");
+  if (!confirm(disarmed && !t.radio_ok
+    ? "Explore: the robot arms and drives by itself to unmapped places until the room is mapped.\nSTOP ends it. Start?"
+    : "Explore: the robot drives by itself to unmapped places until the room is mapped.\nSTOP ends it. Start?")) return;
+  if (disarmed && t.radio_ok) toast("Arm with the RC remote to go", 3500);
+  send({ t: "plan", action: "explore" });
+};
+onChange(() => { dirty = true; updateBar(); });
 
 // ---------- pan / zoom / tap ----------
 const ptrs = new Map();
@@ -322,7 +331,7 @@ document.getElementById("map-reset-pose").onclick = () => {
 };
 
 on("tlm", (m) => { piNowBase = m.pt; piNowAt = performance.now(); dirty = true; updateInfo(); updateBar(); });
-for (const t of ["ranges", "waypoints", "nav", "reset", "hello", "track"]) on(t, () => { dirty = true; updateBar(); updateInfo(); });
+for (const t of ["ranges", "waypoints", "nav", "reset", "hello", "track", "plan"]) on(t, () => { dirty = true; updateBar(); updateInfo(); });
 on("conn", updateInfo);
 setInterval(() => { dirty = true; }, 500);   // keep fading even when the robot is silent
 updateBar(); updateInfo();

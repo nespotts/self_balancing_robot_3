@@ -43,13 +43,29 @@
       <label><input type="checkbox" id="lay-ranges" checked> Range points <span class="sens-key"><i class="s0"></i>front <i class="s1"></i>rear</span></label>
       <label><input type="checkbox" id="lay-track" checked> Track</label>
       <label><input type="checkbox" id="lay-grid" checked> Grid</label>
+      <label class="occ-row"><input type="checkbox" id="lay-occ" checked> Map <input type="range" id="occ-opacity" min="0.15" max="1" step="0.05" value="0.8" title="Map opacity"></label>
+      <button id="map-save">Save map…</button>
+      <button id="map-load">Load map…</button>
+      <div id="map-list" class="map-list" hidden></div>
       <button id="map-clear-track">Clear track &amp; points</button>
+      <button id="map-reset" class="warn">Clear map…</button>
       <button id="map-reset-pose" class="warn">Reset robot pose to 0,0</button>
+      <details class="map-set" id="map-set">
+        <summary>Map &amp; route settings</summary>
+        <label><input type="checkbox" id="set-route" checked> Go routes around obstacles</label>
+        <label class="num">Keep off walls <input type="number" id="set-margin" min="0" max="500" step="10"> mm</label>
+        <label class="num">Robot radius <input type="number" id="set-radius" min="20" max="400" step="5"> mm</label>
+        <label class="num">Skip readings tilted over <input type="number" id="set-pitch" min="0.5" max="45" step="0.5"> °</label>
+        <label class="num">“No target” = free to <input type="number" id="set-notarget" min="0" max="4000" step="100"> mm</label>
+        <label><input type="checkbox" id="set-correct"> Correct drift (experimental)</label>
+        <p class="muted" id="map-stats"></p>
+      </details>
     </div>
     <div class="map-info" id="map-info"></div>
     <div class="wp-bar" id="wp-bar">
       <span class="wp-hint" id="wp-hint">Tap the map to add waypoints</span>
       <span class="wp-count" id="wp-count"></span>
+      <button id="wp-explore" title="Drive to unmapped places until the room is mapped">Explore</button>
       <button id="wp-undo">Undo</button>
       <button id="wp-clear">Clear</button>
       <button id="wp-go" class="primary">Go ▶</button>
@@ -129,8 +145,9 @@
   </section>
 
   <!-- Tune -->
-  <section id="view-tune" class="view">
+  <section id="view-tune" class="view" data-sub="balance">
     <div class="tune-head">
+      <div class="seg tune-sub" id="tune-sub"><button data-v="balance" class="on">Balance</button><button data-v="motor">Motor test</button></div>
       <span id="tune-info" class="muted">Waiting for parameters…</span>
       <button id="tune-save" class="primary" title="Write the current values to the robot's EEPROM">Save to robot</button>
       <button id="tune-more" class="ghost" title="More">⋯</button>
@@ -139,7 +156,41 @@
         <button id="tune-defaults" class="warn">Restore firmware defaults…</button>
       </div>
     </div>
-    <div class="card tune-chart">
+    <!-- presets + scored runs (issue #16): station/web/js/tunetools.js -->
+    <div class="preset-bar tb-only">
+      <select id="preset-sel" title="Tuning presets (saved on the Pi)"></select>
+      <button id="preset-apply" title="Set the robot to this preset">Apply</button>
+      <button id="preset-more" class="ghost" title="Presets">⋯</button>
+      <div class="menu" id="preset-menu" hidden>
+        <button id="preset-save">Save current values as…</button>
+        <button id="preset-compare">Compare presets…</button>
+        <button id="preset-delete" class="warn">Delete this preset…</button>
+      </div>
+    </div>
+    <div class="card preset-cmp tb-only" id="preset-cmp" hidden>
+      <div class="pc-bar"><h3>Compare</h3><button id="cmp-close" class="ghost small" title="Close">✕</button></div>
+      <div class="pc-bar"><select id="cmp-a"></select><span class="muted">vs</span><select id="cmp-b"></select></div>
+      <div id="cmp-table" class="cmp-table"></div>
+      <label class="cmp-all"><input type="checkbox" id="cmp-all"> show equal values too</label>
+    </div>
+    <div class="card score-card tb-only" id="score-card">
+      <div class="sc-bar"><h3>Score</h3>
+        <span id="score-status" class="muted"></span>
+        <button id="score-last" class="small" title="Score the last seconds of balancing now">Last 20 s</button>
+        <button id="score-run" class="small primary" title="Mark a run: Start, balance / push it, Stop">Start</button>
+        <button id="score-more" class="ghost small" title="Score options">⋯</button>
+        <div class="menu" id="score-menu" hidden>
+          <div class="mrow"><span>Last</span><div class="seg" id="score-win"><button data-v="10">10 s</button><button data-v="20" class="on">20 s</button><button data-v="30">30 s</button><button data-v="60">60 s</button></div></div>
+          <button id="score-clear" class="warn">Clear run history</button>
+        </div>
+      </div>
+      <div id="score-hint" class="muted score-hint"></div>
+      <div id="score-tiles" class="score-tiles"></div>
+      <div id="score-hist" class="score-hist"></div>
+    </div>
+    <!-- wheels-up motor test (issue #16): station/web/js/motortest.js -->
+    <div class="tm-only" id="motor-view"></div>
+    <div class="card tune-chart tb-only">
       <div class="tc-bar">
         <h3>Balance loop</h3>
         <span id="tc-rate" class="muted"></span>
@@ -148,7 +199,7 @@
       </div>
       <div class="tc-plots" id="tc-plots"></div>
     </div>
-    <div id="tune-groups" class="tune-groups"></div>
+    <div id="tune-groups" class="tune-groups tb-only"></div>
   </section>
 
   <!-- Logs -->

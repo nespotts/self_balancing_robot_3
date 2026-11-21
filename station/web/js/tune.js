@@ -3,6 +3,8 @@
 import { state, on, send } from "./conn.js";
 import { el, fmt, toast } from "./ui.js";
 import { Strip, S1, S2, S3, SUM } from "./chart.js";
+import "./tunetools.js";   // presets, scored runs, Balance / Motor test switch (issue #16)
+import "./motortest.js";
 
 const GROUPS = { bal: "Balance", str: "Heading", vel: "Velocity", drv: "Driving", mot: "Motors",
   ctl: "Control loop", batt: "Battery", tlm: "Telemetry", rng: "Range sensor" };
@@ -13,7 +15,8 @@ const DISCRETE = {   // small integer params shown as segmented buttons
   "rng.enable": ["Off", "On"],
   "rng.long_range": ["Normal", "Long range"],
 };
-const HIDDEN = (name) => name.startsWith("cfg.");   // actions, not settings
+// cfg.* are actions; mot.test runs from the Motor test view; mot.drive_mode is locked to 0 (issue #23)
+const HIDDEN = (name) => name.startsWith("cfg.") || name === "mot.test" || name === "mot.drive_mode";
 
 const groupsEl = document.getElementById("tune-groups"), info = document.getElementById("tune-info");
 const saveBtn = document.getElementById("tune-save");
@@ -150,6 +153,7 @@ document.getElementById("tune-defaults").onclick = () => {
   send({ t: "cfg", action: "defaults" });
   setUnsaved(true);
 };
+window.addEventListener("sbr3-unsaved", () => setUnsaved(true));   // presets / motor fit applied
 on("log", (m) => {
   if (m.src !== "robot" || performance.now() - saveAskedAt > 60000) return;
   if (m.text === "params: saved") { toast("Saved to the robot"); setUnsaved(false); saveAskedAt = -1e9; }

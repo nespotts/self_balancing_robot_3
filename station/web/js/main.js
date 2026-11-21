@@ -62,6 +62,7 @@ function updateTop() {
   const alive = robotAlive();
   setPill(pMode, t && alive ? modeName(t.mode) : "—", t && alive && t.mode !== 0 ? "mode-on" : "");
   if (s?.estop) setPill(pArmed, "E-STOP", "estop");
+  else if (t && alive && (t.remote_flags & 1)) setPill(pArmed, "RC E-STOP", "estop");   // link v3: LINK_RF_ESTOP
   else if (t && alive) setPill(pArmed, flag("armed") ? (flag("upright") ? "ARMED" : "ARMED·DOWN") : "SAFE", flag("armed") ? "armed" : "");
   else setPill(pArmed, "—");
   if (t && alive) setPill(pBatt, t.battery_v.toFixed(1) + " V", flag("low_batt") ? "lowbatt" : "");

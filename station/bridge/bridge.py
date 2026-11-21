@@ -9,13 +9,15 @@ import time
 
 from . import link_protocol as lp
 from .httpws import HttpServer, Response
+from .mapping import Mapper
+from .planner import Planner
 from .session_log import SessionLog, to_csv
 from .transport import LinkError, open_link
+from .tuning_api import TuningTools
 
 BRIDGE_VERSION = "sbr3-bridge 3"   # 3: ranges carry sensor_id / angle / raw mm, status rng_hz
-# NavStatusFrame.state is robot-defined; these are the names the simulator uses (and a
-# suggestion for the firmware). Unknown values show as "state N" in the UI.
-NAV_STATE_NAMES = ["idle", "turning", "driving", "blocked", "arrived"]
+# NavStatusFrame.state: NavState in link_protocol.h (idle, turning, driving, blocked, arrived, holding)
+NAV_STATE_NAMES = lp.NAV_STATE_NAMES
 TICK_S = 0.04            # 25 Hz: browser telemetry rate and cmd_vel resend rate
 HEARTBEAT_S = 0.1        # 10 Hz MSG_HEARTBEAT
 CMD_TIMEOUT_S = lp.LINK_CMD_VEL_TIMEOUT_MS / 1000.0
@@ -69,7 +71,8 @@ def _round_dict(d):
 
 class Bridge:
     def __init__(self, port, web_dir, log_dir, http_host="0.0.0.0", http_port=8080, baud=115200,
-                 release_file=None, log_max_mb=DEFAULT_LOG_MAX_MB, quiet=False):
+                 release_file=None, log_max_mb=DEFAULT_LOG_MAX_MB, quiet=False, map_dir=None,
+                 preset_dir="~/sbr3-presets"):
         self.port = port
         self.baud = baud
         self.web_dir = web_dir
@@ -115,6 +118,10 @@ class Bridge:
         self.track = collections.deque(maxlen=5000)         # robot path [x, y] (every 20 mm)
         self.waypoints = []                                 # what the station last sent (x, y)
         self.range_listeners = []                           # callables(range dict) e.g. mapping (#12)
+        self.tools = TuningTools(self, preset_dir)          # Tune page: presets, scored runs, motor test (#16)
+        self.mapper = Mapper(map_dir or os.path.join(self.log.dir, "maps"), say=self.say)   # main: ~/sbr3-maps
+        self.range_listeners.append(self.mapper.on_range)
+        self.planner = Planner(self, NAV_STATE_NAMES)           # route planning + explore on the map
 
         self.cmd = (0.0, 0.0)
         self.cmd_time = -10.0
@@ -193,6 +200,7 @@ class Bridge:
                     self.rt_offset = None
                     self._set_link_state("connected")
                     self.log.start()
+                    self.tools.on_session()
                     self.say("connected to %s, session %s" % (self.port, self.log.name))
                     self.send(lp.encode_get_params())
                     self.last_get_params = _now()
@@ -254,10 +262,12 @@ class Bridge:
             text = lp.decode_log(p)
             self.log.record("log", text)
             self._add_log("robot", text)
+            self.tools.on_log(text)
         elif t == lp.MSG_PARAM_INFO:
             d = lp.decode_param_info(p)
             for k in ("value", "min", "max"):
                 d[k] = _sig(d[k])
+            self.tools.param_changed(d["name"], self.params.get(d["id"], {}).get("value"), d["value"])
             self.params[d["id"]] = d
             self.params_dirty = True
             self.log.record("param", d["id"], d["name"], d["value"], d["min"], d["max"])
@@ -384,6 +394,9 @@ class Bridge:
             self.range_sent = self.range_next
             if pts:
                 self.broadcast(json.dumps({"t": "ranges", "pts": pts}, separators=(",", ":")), droppable=True)
+        for text in self.mapper.poll(now):                # occupancy grid tiles, ~2 Hz (#12)
+            self.broadcast(text)
+        self.planner.tick(now)
         if self.params_dirty:
             self.params_dirty = False
             self.broadcast(self.params_msg())
@@ -446,6 +459,8 @@ class Bridge:
             if not 0 <= mode < lp.MODE_COUNT:
                 return {"t": "error", "text": "bad mode"}
             self.send(lp.encode_set_mode(mode))
+            if who != "planner" and mode not in (lp.MODE_GOTO, lp.MODE_EXPLORE):
+                self.planner.stop("stopped: mode %s from %s" % (lp.MODE_NAMES[mode], who))
             if mode != lp.MODE_IDLE:
                 self.estop = False
             self.say("%s: mode -> %s" % (who, lp.MODE_NAMES[mode]))
@@ -459,6 +474,7 @@ class Bridge:
                     if _num(m.get("value")) >= 0.5 else None
             v = _num(m.get("value"), p["value"], p["min"], p["max"])
             self.send(lp.encode_set_param(pid, v))
+            self.tools.param_changed(p["name"], p["value"], v)
             p["value"] = v  # optimistic; a ParamInfo echo from the robot overrides it
             self.params_dirty = True
         elif t == "cfg":
@@ -479,6 +495,7 @@ class Bridge:
             pts = [(_num(p[0]), _num(p[1])) for p in (m.get("points") or [])
                    if isinstance(p, (list, tuple)) and len(p) >= 2][:255]
             replace = bool(m.get("replace", True))
+            self.planner.cancel_if_user_goto(who)
             for f in lp.goto_frames(pts, replace):
                 self.send(f)
             self.waypoints = (pts if replace else self.waypoints + pts)
@@ -486,13 +503,15 @@ class Bridge:
             if m.get("go"):
                 self.send(lp.encode_set_mode(lp.MODE_GOTO))
                 self.estop = False
-            self.say("%s: %d waypoint(s)%s" % (who, len(pts), " -> GOTO" if m.get("go") else ""))
+            if who != "planner":                       # (the planner re-sends routes often)
+                self.say("%s: %d waypoint(s)%s" % (who, len(pts), " -> GOTO" if m.get("go") else ""))
         elif t == "event":
             ev = int(_num(m.get("event"), -1))
             if not 0 < ev < lp.EVT_COUNT:
                 return {"t": "error", "text": "bad event"}
             self.send(lp.encode_event(ev))
             if ev == lp.EVT_CLEAR_WAYPOINTS:
+                self.planner.cancel_if_user_goto(who)
                 self.waypoints = []
                 self.broadcast(json.dumps({"t": "waypoints", "points": []}))
             elif ev == lp.EVT_MARK_WAYPOINT and self.tlm:
@@ -504,6 +523,12 @@ class Bridge:
                 self.waypoints = []
                 self.broadcast(json.dumps({"t": "reset"}))
             self.say("%s: event %s" % (who, lp.EVENT_NAMES[ev]))
+        elif t in ("preset", "score", "motor"):
+            return self.tools.handle(m, who)
+        elif t == "map":       # occupancy grid: reset / save / load / list / delete / set (#12)
+            return self.mapper.command(m, who)
+        elif t == "plan":      # route planning / explore: goto / explore / stop / set
+            return self.planner.command(m, who)
         elif t == "ping":
             return {"t": "pong", "id": m.get("id")}
         else:
@@ -517,6 +542,7 @@ class Bridge:
         self.send(lp.encode_cmd_vel(0.0, 0.0))
         now = _now()
         self.estop_repeats = [now + 0.1, now + 0.25]  # belt and braces
+        self.planner.stop("stopped: E-stop")
         self.estop = True
         self.estop_time = now
         self.log.record("cmd", {"t": "estop", "who": who})
@@ -545,6 +571,10 @@ class Bridge:
         pts = self.ranges_since(0, RANGE_ON_CONNECT)
         if pts:
             ws.send(json.dumps({"t": "ranges", "pts": pts}, separators=(",", ":")))
+        for text in self.tools.hello_msgs():
+            ws.send(json.dumps(text, separators=(",", ":")))
+        ws.send(self.mapper.full_msg())
+        ws.send(self.planner.msg())
         for item in list(self.logs)[-60:]:
             ws.send(json.dumps(dict(t="log", **{k: v for k, v in item.items() if k != "t"}, ts=item["t"])))
         self.clients.add(ws)
@@ -650,6 +680,19 @@ class Bridge:
         return Response.json({"link": self.link_state, "released": self.released(),
                               "release_file": self.release_file})
 
+    def api_map(self, req):
+        """GET /api/map -> saved maps + stats; /api/map/current.png or /api/map/<name>.png -> image."""
+        name = req.path[len("/api/map/"):] if req.path.startswith("/api/map/") else ""
+        if not name:
+            return Response.json({"maps": self.mapper.list(), "dir": self.mapper.dir, "name": self.mapper.name,
+                                  "stats": self.mapper.stats(), "settings": self.mapper.settings})
+        if name == "current.png":
+            return Response(200, body=self.mapper.grid.png(2), ctype="image/png")
+        p = self.mapper.path(name[:-4]) if name.endswith(".png") else None
+        if not p or not os.path.exists(p[:-5] + ".png"):
+            return Response.text("no such map", 404)
+        return Response(200, ctype="image/png", file=p[:-5] + ".png")
+
     def api_status(self, req):
         return Response.json(self.status())
 
@@ -662,6 +705,8 @@ class Bridge:
             ("*", "/api/serial", self.api_serial),
             ("GET", "/api/logs", self.api_logs),
             ("*", "/api/logs/", self.api_logs),
+            ("GET", "/api/map", self.api_map),
+            ("GET", "/api/map/", self.api_map),
         ]
         http = HttpServer(self.web_dir, routes, "/ws", self.ws_handler)
         await http.start(self.http_host, self.http_port)

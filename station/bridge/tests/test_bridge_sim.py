@@ -43,7 +43,8 @@ class TestBridgeWithSim(unittest.TestCase):
         sim_port = srv.sockets[0].getsockname()[1]
         phys = asyncio.ensure_future(sim.physics())
         b = Bridge("tcp://127.0.0.1:%d" % sim_port, WEB, self.tmp, "127.0.0.1", 0,
-                   release_file=os.path.join(self.tmp, "release"), quiet=True)
+                   release_file=os.path.join(self.tmp, "release"), quiet=True,
+                   preset_dir=os.path.join(self.tmp, "presets"))
         from station.bridge.httpws import HttpServer
         routes = [("GET", "/api/state", b.api_state), ("*", "/api/cmd", b.api_cmd),
                   ("GET", "/api/logs", b.api_logs), ("*", "/api/logs/", b.api_logs),
@@ -62,7 +63,7 @@ class TestBridgeWithSim(unittest.TestCase):
             ws = await WsClient.connect("127.0.0.1", port)
             hello = await wait_for(ws, lambda m: m["t"] == "hello")
             self.assertEqual(hello["modes"][3], "STATION")
-            params = await wait_for(ws, lambda m: m["t"] == "params" and len(m["list"]) >= 11)
+            params = await wait_for(ws, lambda m: m["t"] == "params" and len(m["list"]) >= 72)
             names = {p["name"]: p for p in params["list"]}
             self.assertEqual(names["bal.kp"]["value"], 250.0)
             self.assertEqual(names["vel.kd"]["value"], 0.00007)
