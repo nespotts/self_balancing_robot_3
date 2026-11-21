@@ -316,7 +316,7 @@ class SimRobot:
             target = self.bal_target
             wn = 14.0 * math.sqrt(max(kp, 1.0) / 250.0)
             zeta = max(0.05, min(1.2, 0.35 * math.sqrt(max(kd, 0.01) / 4.63)))
-        noise = rng.gauss(0, 260.0 if self.mode != lp.MODE_IDLE else 0.0)
+        noise = rng.gauss(0, 150.0 if self.mode != lp.MODE_IDLE else 0.0)
         pacc = wn * wn * (target - self.pitch) - 2 * zeta * wn * self.pitch_rate + noise
         self.pitch_rate += pacc * dt
         self.pitch += self.pitch_rate * dt

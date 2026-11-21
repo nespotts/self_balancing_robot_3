@@ -84,6 +84,7 @@ class Bridge:
         self.range_sent = 0
         self.logs = collections.deque(maxlen=200)          # {"i","t","src","text"}
         self.log_next = 0
+        self.track = collections.deque(maxlen=5000)         # robot path [x, y] (every 20 mm)
         self.waypoints = []                                 # what the station last sent (x, y)
         self.range_listeners = []                           # callables(range dict) e.g. mapping (#12)
 
@@ -190,6 +191,9 @@ class Bridge:
             self.tlm_count += 1
             self.tlm_time = _now()
             self.log.tlm(d)
+            last = self.track[-1] if self.track else None
+            if last is None or abs(d["x_mm"] - last[0]) + abs(d["y_mm"] - last[1]) > 20:
+                self.track.append([int(d["x_mm"]), int(d["y_mm"])])
             if self.estop and d["mode"] != lp.MODE_IDLE and _now() - self.estop_time > 0.5:
                 self.estop = False
                 self.push_status()
@@ -394,6 +398,7 @@ class Bridge:
                 self.broadcast(json.dumps({"t": "waypoints", "points": self.waypoints}))
             elif ev == lp.EVT_RESET_POSE:
                 self.ranges.clear()
+                self.track.clear()
                 self.waypoints = []
                 self.broadcast(json.dumps({"t": "reset"}))
             self.say("%s: event %s" % (who, lp.EVENT_NAMES[ev]))
@@ -432,6 +437,8 @@ class Bridge:
         ws.send(self.params_msg())
         if self.nav:
             ws.send(json.dumps(dict(t="nav", **self.nav)))
+        if self.track:
+            ws.send(json.dumps({"t": "track", "pts": list(self.track)}, separators=(",", ":")))
         pts = self.ranges_since(0, RANGE_ON_CONNECT)
         if pts:
             ws.send(json.dumps({"t": "ranges", "pts": pts}, separators=(",", ":")))

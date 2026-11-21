@@ -1,1 +1,129 @@
-<!doctype html><html><body>placeholder</body></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#121212">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>SBR3 Station</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body data-view="map">
+<header class="topbar">
+  <button class="pill" id="pill-link" title="Connection"><span class="dot"></span><span class="txt">…</span></button>
+  <button class="pill" id="pill-mode" title="Mode"><span class="txt">—</span></button>
+  <span class="pill" id="pill-armed"><span class="txt">—</span></span>
+  <span class="pill" id="pill-batt"><span class="txt">— V</span></span>
+  <nav class="tabs" id="tabs">
+    <button data-view="drive" class="tab-drive"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" class="fill"/></svg><span>Drive</span></button>
+    <button data-view="map"><svg viewBox="0 0 24 24"><path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/></svg><span>Map</span></button>
+    <button data-view="plots"><svg viewBox="0 0 24 24"><path d="M3 17l5-6 4 3 4-7 5 5"/><path d="M3 21h18"/></svg><span>Plots</span></button>
+    <button data-view="tune"><svg viewBox="0 0 24 24"><path d="M6 3v18M12 3v18M18 3v18"/><circle cx="6" cy="14" r="2.2" class="fill"/><circle cx="12" cy="8" r="2.2" class="fill"/><circle cx="18" cy="16" r="2.2" class="fill"/></svg><span>Tune</span></button>
+    <button data-view="logs"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><span>Logs</span></button>
+  </nav>
+  <button id="stop" class="stop" title="E-stop: motors off (Space / Esc)">STOP</button>
+</header>
+
+<main>
+  <!-- Map (main view) -->
+  <section id="view-map" class="view">
+    <canvas id="map"></canvas>
+    <div class="map-tools">
+      <button id="map-zin" title="Zoom in">+</button>
+      <button id="map-zout" title="Zoom out">−</button>
+      <button id="map-follow" title="Follow robot" class="on"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" class="fill"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></button>
+      <button id="map-more" title="More">⋯</button>
+    </div>
+    <div class="menu" id="map-menu" hidden>
+      <label><input type="checkbox" id="lay-ranges" checked> Range points</label>
+      <label><input type="checkbox" id="lay-track" checked> Track</label>
+      <label><input type="checkbox" id="lay-grid" checked> Grid</label>
+      <button id="map-clear-track">Clear track &amp; points</button>
+      <button id="map-reset-pose" class="warn">Reset robot pose to 0,0</button>
+    </div>
+    <div class="map-info" id="map-info"></div>
+    <div class="wp-bar" id="wp-bar">
+      <span class="wp-hint" id="wp-hint">Tap the map to add waypoints</span>
+      <span class="wp-count" id="wp-count"></span>
+      <button id="wp-undo">Undo</button>
+      <button id="wp-clear">Clear</button>
+      <button id="wp-go" class="primary">Go ▶</button>
+    </div>
+  </section>
+
+  <!-- Drive (side panel on desktop) -->
+  <section id="view-drive" class="view">
+    <div class="tiles">
+      <div class="tile"><b id="rd-speed">0</b><span>mm/s</span></div>
+      <div class="tile"><b id="rd-turn">0</b><span>°/s turn</span></div>
+      <div class="tile"><b id="rd-pitch">0.0</b><span>° pitch</span></div>
+      <div class="tile"><b id="rd-head">0</b><span>° heading</span></div>
+    </div>
+    <div class="modes" id="modes"></div>
+    <div class="joy-wrap">
+      <div class="joy" id="joy">
+        <div class="joy-ring"></div>
+        <div class="joy-knob" id="joy-knob"></div>
+        <div class="joy-lock" id="joy-lock">
+          <p id="joy-lock-text">Joystick drives in STATION mode</p>
+          <button id="joy-take" class="primary">Drive from here</button>
+        </div>
+      </div>
+      <div class="drive-opts">
+        <div class="seg" id="speed-seg" title="Speed limit">
+          <button data-v="0.33">Slow</button><button data-v="0.66" class="on">Med</button><button data-v="1">Fast</button>
+        </div>
+        <button id="drive-more" class="ghost" title="Robot events">⋯</button>
+      </div>
+      <div class="menu up" id="drive-menu" hidden></div>
+      <p class="keys-hint">Keys: W A S D / arrows · Space = STOP</p>
+    </div>
+  </section>
+
+  <!-- Plots -->
+  <section id="view-plots" class="view">
+    <div class="plot-bar">
+      <div class="chips" id="plot-chips"></div>
+      <div class="seg" id="plot-win"><button data-v="10" class="on">10 s</button><button data-v="30">30 s</button><button data-v="60">60 s</button></div>
+      <button id="plot-pause" class="primary">Pause</button>
+    </div>
+    <div class="plots" id="plots"></div>
+  </section>
+
+  <!-- Tune -->
+  <section id="view-tune" class="view">
+    <div class="tune-head">
+      <span id="tune-info" class="muted">Waiting for parameters…</span>
+      <button id="tune-reload" class="ghost">Reload</button>
+    </div>
+    <div id="tune-groups" class="tune-groups"></div>
+  </section>
+
+  <!-- Logs -->
+  <section id="view-logs" class="view">
+    <div class="logs-grid">
+      <div class="card">
+        <h3>Messages</h3>
+        <div class="msgs" id="msgs"></div>
+      </div>
+      <div class="card">
+        <h3>Sessions <button id="logs-refresh" class="ghost small">Refresh</button></h3>
+        <div id="sessions" class="sessions"></div>
+      </div>
+      <div class="card">
+        <h3>Link</h3>
+        <dl id="link-info" class="kv"></dl>
+        <button id="serial-release" class="ghost">Release serial port (for flashing)</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
