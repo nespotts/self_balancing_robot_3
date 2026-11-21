@@ -7,6 +7,7 @@ static float clampf(float v, float lim) { return v > lim ? lim : (v < -lim ? -li
 void ModeManager::onRadioPacket(const ControlPacket& p, uint32_t now_ms) {
   // first packet, or first after the link was lost: the remote's current state counts as new
   const bool fresh_link = !radioPresent(now_ms);
+  const bool first_link = !have_radio_;
   have_radio_ = true;
   radio_ms_ = now_ms;
   pkt_ = p;
@@ -23,9 +24,10 @@ void ModeManager::onRadioPacket(const ControlPacket& p, uint32_t now_ms) {
     armed_ = a && !need_arm_edge_;
   }
 
-  // Mode requests act on change (or on (re)connect), so a Pi SET_MODE is not
-  // overwritten 50 times a second by the remote's unchanged selection.
-  if ((fresh_link || p.requested_mode != last_req_) && p.requested_mode < MODE_COUNT) {
+  // Mode requests act on change (or on the very first packet after boot), so a Pi SET_MODE is
+  // not overwritten by the remote's unchanged selection - not 50 times a second, and not when
+  // the radio reconnects after a dropout (that dropped a balancing robot to IDLE: it fell over).
+  if ((first_link || p.requested_mode != last_req_) && p.requested_mode < MODE_COUNT) {
     requested_ = (RobotMode)p.requested_mode;
   }
   last_req_ = p.requested_mode;
