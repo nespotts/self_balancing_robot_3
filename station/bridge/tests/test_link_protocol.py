@@ -119,9 +119,11 @@ class TestMatchesHeader(unittest.TestCase):
     def test_constants(self):
         d = parse_defines(LINK_TXT)
         for k, v in d.items():
-            if k.startswith(("LINK_", "MSG_")):
+            if k.startswith(("LINK_", "MSG_", "NAV_")):
                 self.assertEqual(getattr(lp, k), v, k)
         self.assertEqual(len([k for k in d if k.startswith("MSG_")]), len(lp.MSG_NAMES))
+        self.assertEqual(len(lp.NAV_STATE_NAMES), lp.NAV_STATE_COUNT)
+        self.assertEqual(len([k for k in d if k.startswith("NAV_")]), lp.NAV_STATE_COUNT)
 
     @unittest.skipUnless(RADIO_TXT, "radio header not found")
     def test_radio_enums(self):
@@ -134,11 +136,11 @@ class TestMatchesHeader(unittest.TestCase):
 
 class TestSizes(unittest.TestCase):
     def test_known_sizes(self):
-        self.assertEqual(lp.TELEMETRY_SIZE, 104)
+        self.assertEqual(lp.TELEMETRY_SIZE, 108)
         self.assertEqual(lp.RANGE_SIZE, 28)
         self.assertEqual(lp.PARAM_INFO_SIZE, 38)
         self.assertEqual(lp.HELLO_SIZE, 28)
-        self.assertEqual(lp.NAV_STATUS_SIZE, 16)
+        self.assertEqual(lp.NAV_STATUS_SIZE, 20)
         for name, (fmt, fields) in lp.STRUCTS.items():
             self.assertLessEqual(struct.calcsize(fmt), lp.LINK_MAX_PAYLOAD)
         self.assertLessEqual(2 + 16 * 8, lp.LINK_MAX_PAYLOAD)
@@ -160,6 +162,7 @@ class TestCrc(unittest.TestCase):
 
 def sample_tlm(**kw):
     d = {f: 0.0 for f in lp.TELEMETRY_FIELDS}
+    d.update(remote_flags=lp.LINK_RF_ESTOP | lp.LINK_RF_PRESENT, nav_state=lp.NAV_BLOCKED, nav_index=2, reserved2=0)
     d.update(t_us=123456, mode=3, status=lp.TLM_ARMED | lp.TLM_UPRIGHT, error_code=0, radio_ok=1)
     d.update(pitch_deg=1.5, heading_deg=-370.25, x_mm=1000.0, battery_v=12.25, loop_hz=1000.0)
     d.update(bal_p=-812.5, bal_i=40.25, bal_d=3.5, step=4000000000)
@@ -194,6 +197,11 @@ class TestRoundTrip(unittest.TestCase):
         n = self.parse_one(lp.encode_nav_status(dict(state=2, waypoint_count=3, nav_index=1,
                                                      target_x_mm=1.0, target_y_mm=2.0, distance_mm=3.0)))
         self.assertEqual((n["state"], n["waypoint_count"], n["nav_index"]), (2, 3, 1))
+        self.assertEqual(n["obstacle_mm"], 0.0)
+        n = self.parse_one(lp.encode_nav_status(dict(state=lp.NAV_BLOCKED, waypoint_count=3, nav_index=1,
+                                                     target_x_mm=1.0, target_y_mm=2.0, distance_mm=3.0,
+                                                     obstacle_mm=287.5)))
+        self.assertEqual((n["state"], n["obstacle_mm"]), (lp.NAV_BLOCKED, 287.5))
         self.assertEqual(self.parse_one(lp.encode_log("hello °")), "hello °")
 
     def test_pi_to_teensy(self):
@@ -250,6 +258,20 @@ class TestResync(unittest.TestCase):
         d = lp.decode_telemetry(full[:lp.TELEMETRY_V1_SIZE])
         self.assertEqual(d["battery_v"], 12.25)
         self.assertEqual((d["bal_p"], d["step"]), (0.0, 0))
+
+    def test_v2_telemetry_and_nav_status_still_decode(self):
+        full = lp._pack("TelemetryFrame", sample_tlm(step=9))
+        d = lp.decode_telemetry(full[:lp.TELEMETRY_V2_SIZE])
+        self.assertEqual((d["step"], d["remote_flags"], d["nav_state"]), (9, 0, 0))
+        nav = lp._pack("NavStatusFrame", dict(state=4, waypoint_count=2, nav_index=2, reserved=0,
+                                              target_x_mm=5.0, target_y_mm=6.0, distance_mm=7.0, obstacle_mm=8.0))
+        n = lp.decode_nav_status(nav[:lp.NAV_STATUS_V2_SIZE])
+        self.assertEqual((n["state"], n["distance_mm"], n["obstacle_mm"]), (4, 7.0, 0.0))
+
+    def test_v3_fields_round_trip(self):
+        d = lp.decode_telemetry(lp._pack("TelemetryFrame", sample_tlm()))
+        self.assertEqual((d["remote_flags"], d["nav_state"], d["nav_index"]),
+                         (lp.LINK_RF_ESTOP | lp.LINK_RF_PRESENT, lp.NAV_BLOCKED, 2))
 
     def test_byte_by_byte(self):
         stream = lp.encode_telemetry(sample_tlm()) + lp.encode_log("abc") + lp.encode_event(1)

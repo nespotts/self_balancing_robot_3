@@ -22,7 +22,7 @@ import time
 
 SYNC = b"\xa5\x5a"
 MAX_PAYLOAD = 200
-LINK_VERSION = 2
+LINK_VERSION = 3   # v3 appends remote_flags, nav_state, nav_index to TelemetryFrame (read as v2 here)
 MSG_TELEMETRY, MSG_RANGE, MSG_LOG, MSG_PARAM_INFO, MSG_NAV_STATUS, MSG_HELLO = 1, 2, 3, 4, 5, 6
 MSG_GET_PARAMS = 0x84
 NAMES = {1: "TELEMETRY", 2: "RANGE", 3: "LOG", 4: "PARAM_INFO", 5: "NAV_STATUS", 6: "HELLO"}

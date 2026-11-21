@@ -39,6 +39,8 @@ class RangeSweep {
   // Frames for the Pi link, oldest first.
   bool peekFrame(RangeFrame& f) const;
   void popFrame();
+  // Same readings again for the navigator (separate queue, so it gets them with no Pi connected).
+  bool takeNavReading(RangeFrame& f);
 
   // Latest reading nearest straight ahead / behind (0 = none in the last 2 s or no target).
   uint16_t frontMm(uint32_t now_ms) const;
@@ -85,6 +87,8 @@ class RangeSweep {
   // out frames
   RangeFrame out_[24];
   uint8_t out_head_ = 0, out_n_ = 0;
+  RangeFrame nav_[8];
+  uint8_t nav_head_ = 0, nav_n_ = 0;
   // front/back
   uint16_t front_mm_ = 0, rear_mm_ = 0;
   uint32_t front_ms_ = 0, rear_ms_ = 0;

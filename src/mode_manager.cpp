@@ -68,12 +68,33 @@ void ModeManager::onPiCmdVel(float speed_mms, float turn_dps, uint32_t now_ms) {
   cmd_valid_ = true;
 }
 
+void ModeManager::setAutoCmd(float speed_mms, float turn_dps, uint32_t now_ms) {
+  if (isnan(speed_mms) || isnan(turn_dps) || isinf(speed_mms) || isinf(turn_dps)) {
+    auto_valid_ = false;
+    return;
+  }
+  auto_speed_ = speed_mms;
+  auto_turn_ = turn_dps;
+  auto_ms_ = now_ms;
+  auto_valid_ = true;
+}
+
+void ModeManager::requestMode(uint8_t m) {
+  if (m < MODE_COUNT) requested_ = (RobotMode)m;
+}
+
+float ModeManager::speedScale(uint32_t now_ms) const {
+  if (!radioPresent(now_ms)) return 1.0f;
+  return (pkt_.speed_limit > 100 ? 100 : pkt_.speed_limit) / 100.0f;
+}
+
 void ModeManager::update(uint32_t now_ms, bool imu_ok, const ModeLimits& lim) {
   const RobotMode eff = (estop_ || !armed_ || !imu_ok) ? MODE_IDLE : requested_;
   if (eff != mode_) {
     mode_ = eff;
     mode_changed_ = true;
     cmd_valid_ = false;  // a mode change never inherits an old command
+    auto_valid_ = false;
   }
 
   float s = 0, t = 0;
@@ -87,6 +108,10 @@ void ModeManager::update(uint32_t now_ms, bool imu_ok, const ModeLimits& lim) {
              now_ms - cmd_ms_ <= LINK_CMD_VEL_TIMEOUT_MS) {
     s = clampf(cmd_speed_, lim.max_speed);
     t = clampf(cmd_turn_, lim.max_turn);
+  } else if ((mode_ == MODE_GOTO || mode_ == MODE_EXPLORE || mode_ == MODE_HOLD) && auto_valid_ &&
+             now_ms - auto_ms_ <= 100 && supervised(now_ms)) {
+    s = clampf(auto_speed_, lim.max_speed * speedScale(now_ms));
+    t = clampf(auto_turn_, lim.max_turn);
   }
   if (fabsf(t) < lim.turn_deadband) t = 0;
   speed_ = s;
