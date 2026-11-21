@@ -4,10 +4,11 @@ import { toast } from "./ui.js";
 import { invalidate as mapInvalidate } from "./map.js";
 import "./drive.js";
 import { plotsShown } from "./plots.js";
+import { sensorsShown } from "./sensors.js";
 import { tuneShown } from "./tune.js";
 import { loadSessions } from "./logs.js";
 
-const VIEWS = ["map", "drive", "plots", "tune", "logs"];
+const VIEWS = ["map", "drive", "sensors", "plots", "tune", "logs"];
 const tabs = document.getElementById("tabs");
 
 function show(view) {
@@ -17,6 +18,7 @@ function show(view) {
   if (location.hash.slice(1) !== view) history.replaceState(null, "", "#" + view);
   if (view === "map" || view === "drive") mapInvalidate();
   if (view === "plots") plotsShown();
+  sensorsShown(view === "sensors");
   tuneShown(view === "tune");
   if (view === "logs") loadSessions();
 }

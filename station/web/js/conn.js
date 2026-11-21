@@ -8,7 +8,7 @@ export const state = {
   hello: null, robot: null, status: null, tlm: null, nav: null,
   params: [], paramsFirst: {},     // id -> first value seen this page load (for "revert")
   waypoints: [],                   // sent to the robot (from the bridge)
-  ranges: [],                      // [i, hx, hy, rx, ry, valid, tilt, t_ms]
+  ranges: [],                      // [i, hx, hy, rx, ry, valid, tilt, t_ms, sensor_id, sensor_angle_deg, range_mm]
   track: [],                       // [x, y]
   logs: [],
   grid: null,                      // occupancy grid layer (issue #12), filled by a future "grid" message

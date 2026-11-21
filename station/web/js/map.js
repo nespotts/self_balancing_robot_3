@@ -1,10 +1,11 @@
 // Map view: robot pose, track, range points (fading with age), waypoints. Pan / zoom / tap to add.
 import { state, on, send, modeName, flag } from "./conn.js";
 import { toast } from "./ui.js";
+import { SENS_RGB, SENS_NEW } from "./chart.js";
 
 const C = {
   bg: "#151514", grid: "#262624", grid2: "#30302d", axis: "#45453f",
-  track: "#3987e5", range: [240, 180, 41], rangeNew: "#ffd27a",
+  track: "#3987e5",
   robot: "#f0efec", heading: "#3987e5", wp: "#9085e9", wpPending: "#c3c2b7", target: "#d95926", text: "#f0efec",
 };
 const ROBOT = { l: 90, w: 152, track: 126.8, wheel: 66 };  // mm, from the CAD
@@ -96,31 +97,36 @@ function drawTrack() {
 function drawRanges() {
   const pts = state.ranges, now = piNow();
   const size = Math.max(2.5, Math.min(6, 25 * view.s));
-  const buckets = [[], [], [], [], [], []], fresh = [];
+  // per sensor (p[8]: 0 front, 1 rear; older bridges send no id -> front colour)
+  const buckets = [0, 1].map(() => [[], [], [], [], [], []]), fresh = [[], []];
   for (const p of pts) {
     if (!p[5] || p[6]) continue;   // invalid or taken while tilted
-    const age = now - p[7];
-    if (age < 1200) { fresh.push(p); continue; }
+    const s = p[8] ? 1 : 0, age = now - p[7];
+    if (age < 1200) { fresh[s].push(p); continue; }
     const a = Math.max(0, Math.min(5, Math.floor((1 - age / FADE_MS) * 6)));
-    buckets[a].push(p);
+    buckets[s][a].push(p);
   }
-  const [r, g, b] = C.range;
   const hs = size / 2;
-  buckets.forEach((list, k) => {
-    if (!list.length) return;
-    ctx.fillStyle = `rgba(${r},${g},${b},${0.16 + k * 0.13})`;
-    for (const p of list) ctx.fillRect(sx(p[1]) - hs, sy(p[2]) - hs, size, size);
+  buckets.forEach((bs, s) => {
+    const [r, g, b] = SENS_RGB[s];
+    bs.forEach((list, k) => {
+      if (!list.length) return;
+      ctx.fillStyle = `rgba(${r},${g},${b},${0.16 + k * 0.13})`;
+      for (const p of list) ctx.fillRect(sx(p[1]) - hs, sy(p[2]) - hs, size, size);
+    });
   });
   // the current sweep: rays + bright points
-  if (fresh.length) {
-    ctx.strokeStyle = "rgba(255,210,122,0.18)"; ctx.lineWidth = 1;
+  fresh.forEach((list, s) => {
+    if (!list.length) return;
+    const [r, g, b] = SENS_RGB[s];
+    ctx.strokeStyle = `rgba(${r},${g},${b},0.25)`; ctx.lineWidth = 1;
     ctx.beginPath();
-    for (const p of fresh) { ctx.moveTo(sx(p[3]), sy(p[4])); ctx.lineTo(sx(p[1]), sy(p[2])); }
+    for (const p of list) { ctx.moveTo(sx(p[3]), sy(p[4])); ctx.lineTo(sx(p[1]), sy(p[2])); }
     ctx.stroke();
-    ctx.fillStyle = C.rangeNew;
+    ctx.fillStyle = SENS_NEW[s];
     const fs = size + 1.5;
-    for (const p of fresh) ctx.fillRect(sx(p[1]) - fs / 2, sy(p[2]) - fs / 2, fs, fs);
-  }
+    for (const p of list) ctx.fillRect(sx(p[1]) - fs / 2, sy(p[2]) - fs / 2, fs, fs);
+  });
 }
 
 function drawWaypoints() {

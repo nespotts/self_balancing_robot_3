@@ -12,7 +12,7 @@ from .httpws import HttpServer, Response
 from .session_log import SessionLog, to_csv
 from .transport import LinkError, open_link
 
-BRIDGE_VERSION = "sbr3-bridge 2"
+BRIDGE_VERSION = "sbr3-bridge 3"   # 3: ranges carry sensor_id / angle / raw mm, status rng_hz
 # NavStatusFrame.state is robot-defined; these are the names the simulator uses (and a
 # suggestion for the firmware). Unknown values show as "state N" in the UI.
 NAV_STATE_NAMES = ["idle", "turning", "driving", "blocked", "arrived"]
@@ -104,9 +104,12 @@ class Bridge:
         self.tlm_count = 0
         self.tlm_hz = 0.0
         self.nav = None
-        self.ranges = collections.deque(maxlen=RANGE_RING)  # [i, hx, hy, rx, ry, valid, tilt, t_ms]
+        # [i, hx, hy, rx, ry, valid, tilt, t_ms, sensor_id, sensor_angle_deg, range_mm]: see _add_range
+        self.ranges = collections.deque(maxlen=RANGE_RING)
         self.range_next = 0
         self.range_sent = 0
+        self.rng_count = [0, 0]                             # readings per sensor since the last status
+        self.rng_hz = [0.0, 0.0]
         self.logs = collections.deque(maxlen=200)          # {"i","t","src","text"}
         self.log_next = 0
         self.track = collections.deque(maxlen=5000)         # robot path [x, y] (every 20 mm)
@@ -295,6 +298,10 @@ class Bridge:
             del self.tune_buf[:len(self.tune_buf) - TUNE_BUF_MAX]
 
     def _add_range(self, d):
+        """One RangeFrame -> ring entry (what browsers get in "ranges" messages):
+        [i, hit x, hit y, sensor x, sensor y (servo axis), valid, tilt, Pi ms,
+         sensor_id (0 front / 1 rear), sensor_angle_deg (robot frame, + = CCW), range_mm (raw)]
+        Invalid readings get a hit point 2 m out (map rays); the raw range_mm is kept as sent."""
         r = d["range_mm"]
         h = math.radians(d["heading_deg"])
         ox = d["x_mm"] + SENSOR_FWD_MM * math.cos(h)    # sensor position (servo axis)
@@ -304,9 +311,12 @@ class Bridge:
         hx = ox + rr * math.cos(a)
         hy = oy + rr * math.sin(a)
         tilt = 1 if abs(d["pitch_deg"]) > TILT_DEG else 0
+        sid = d["sensor_id"] & 1
         self.ranges.append([self.range_next, int(hx), int(hy), int(ox), int(oy),
-                            int(d["valid"]), tilt, self.pi_ms()])
+                            int(d["valid"]), tilt, self.pi_ms(),
+                            sid, round(d["sensor_angle_deg"], 1), int(r)])
         self.range_next += 1
+        self.rng_count[sid] += 1
         for f in self.range_listeners:
             try:
                 f(d)
@@ -381,6 +391,8 @@ class Bridge:
             dt = now - self.last_rate
             self.tlm_hz = self.tlm_count / dt if dt > 0 else 0.0
             self.tlm_count = 0
+            self.rng_hz = [c / dt if dt > 0 else 0.0 for c in self.rng_count]
+            self.rng_count = [0, 0]
             self.last_rate = now
             self.push_status()
             self.log.flush()
@@ -390,6 +402,7 @@ class Bridge:
         return {
             "t": "status", "link": self.link_state, "port": self.port, "link_error": self.link_error,
             "robot_alive": now - self.tlm_time < ROBOT_SILENT_S, "tlm_hz": round(self.tlm_hz, 1),
+            "rng_hz": [round(h, 1) for h in self.rng_hz],     # range readings/s, sensor 0 and 1
             "crc_errors": self.parser.crc_errors, "frames": self.parser.frames_ok,
             "clients": self.client_count(), "session": self.log.name if self.log.f else None,
             "estop": self.estop, "cmd_active": self.cmd_active, "remote_seen": self.remote_seen,
@@ -516,6 +529,7 @@ class Bridge:
             "t": "hello", "bridge": BRIDGE_VERSION, "modes": lp.MODE_NAMES, "events": lp.EVENT_NAMES,
             "nav_states": NAV_STATE_NAMES, "tlm_bits": lp.TLM_BITS, "robot": self.hello,
             "cmd_vel_timeout_ms": lp.LINK_CMD_VEL_TIMEOUT_MS, "waypoints": self.waypoints,
+            "range_geom": {"fwd_mm": SENSOR_FWD_MM, "radius_mm": SENSOR_RADIUS_MM},
         })
 
     async def ws_handler(self, ws):

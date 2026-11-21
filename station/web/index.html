@@ -19,11 +19,12 @@
   <span class="pill" id="pill-armed"><span class="txt">—</span></span>
   <span class="pill" id="pill-batt"><span class="txt">— V</span></span>
   <nav class="tabs" id="tabs">
-    <button data-view="drive" class="tab-drive"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" class="fill"/></svg><span>Drive</span></button>
-    <button data-view="map"><svg viewBox="0 0 24 24"><path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/></svg><span>Map</span></button>
-    <button data-view="plots"><svg viewBox="0 0 24 24"><path d="M3 17l5-6 4 3 4-7 5 5"/><path d="M3 21h18"/></svg><span>Plots</span></button>
-    <button data-view="tune"><svg viewBox="0 0 24 24"><path d="M6 3v18M12 3v18M18 3v18"/><circle cx="6" cy="14" r="2.2" class="fill"/><circle cx="12" cy="8" r="2.2" class="fill"/><circle cx="18" cy="16" r="2.2" class="fill"/></svg><span>Tune</span></button>
-    <button data-view="logs"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><span>Logs</span></button>
+    <button data-view="drive" title="Drive" class="tab-drive"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" class="fill"/></svg><span>Drive</span></button>
+    <button data-view="map" title="Map"><svg viewBox="0 0 24 24"><path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/></svg><span>Map</span></button>
+    <button data-view="sensors" title="Sensors"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.2" class="fill"/><path d="M8.2 8.2a5.4 5.4 0 0 0 0 7.6M15.8 8.2a5.4 5.4 0 0 1 0 7.6M5.1 5.1a9.8 9.8 0 0 0 0 13.8M18.9 5.1a9.8 9.8 0 0 1 0 13.8"/></svg><span>Sensors</span></button>
+    <button data-view="plots" title="Plots"><svg viewBox="0 0 24 24"><path d="M3 17l5-6 4 3 4-7 5 5"/><path d="M3 21h18"/></svg><span>Plots</span></button>
+    <button data-view="tune" title="Tune"><svg viewBox="0 0 24 24"><path d="M6 3v18M12 3v18M18 3v18"/><circle cx="6" cy="14" r="2.2" class="fill"/><circle cx="12" cy="8" r="2.2" class="fill"/><circle cx="18" cy="16" r="2.2" class="fill"/></svg><span>Tune</span></button>
+    <button data-view="logs" title="Logs"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><span>Logs</span></button>
   </nav>
   <button id="stop" class="stop" title="E-stop: motors off (Space / Esc)">STOP</button>
 </header>
@@ -39,7 +40,7 @@
       <button id="map-more" title="More">⋯</button>
     </div>
     <div class="menu" id="map-menu" hidden>
-      <label><input type="checkbox" id="lay-ranges" checked> Range points</label>
+      <label><input type="checkbox" id="lay-ranges" checked> Range points <span class="sens-key"><i class="s0"></i>front <i class="s1"></i>rear</span></label>
       <label><input type="checkbox" id="lay-track" checked> Track</label>
       <label><input type="checkbox" id="lay-grid" checked> Grid</label>
       <button id="map-clear-track">Clear track &amp; points</button>
@@ -85,6 +86,35 @@
       </div>
       <div class="menu up" id="drive-menu" hidden></div>
       <p class="keys-hint">Keys: W A S D / arrows · Space = STOP</p>
+    </div>
+  </section>
+
+  <!-- Sensors: live range readings (issue #19); setup behind the ⋯ -->
+  <section id="view-sensors" class="view">
+    <div class="sens">
+      <div class="sens-bar">
+        <span id="sens-status" class="sens-status muted">…</span>
+        <button id="sens-on" class="primary small" hidden>Turn on</button>
+        <button id="sens-pause" class="small">Pause</button>
+        <button id="sens-more" class="ghost" title="Sensor setup">⋯</button>
+        <div class="menu sens-menu" id="sens-menu" hidden></div>
+      </div>
+      <div class="sens-hand" id="sens-hand" hidden>
+        <span>Hold a hand ~5 cm in front of one sensor: <b>its card lights up</b>.</span>
+        <button id="sens-hand-done" class="small">Done</button>
+      </div>
+      <div class="sens-cards" id="sens-cards"></div>
+      <div class="card sens-polar">
+        <div class="sp-bar"><h3 id="sens-polar-title">Last sweep</h3>
+          <div class="seg sp-scale" id="sens-scale"><button data-v="500">0.5</button><button data-v="1000">1</button><button data-v="2000">2</button><button data-v="4000">4 m</button></div>
+        </div>
+        <canvas id="sens-polar"></canvas>
+      </div>
+      <div class="card sens-time">
+        <div class="sp-bar"><h3>Range vs time</h3><span class="muted sp-note">last 10 s · ticks = no target</span></div>
+        <canvas id="sens-t0"></canvas>
+        <canvas id="sens-t1"></canvas>
+      </div>
     </div>
   </section>
 

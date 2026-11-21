@@ -6,6 +6,10 @@ Drive, map, plot and tune the robot from any browser (phone, PC, Kindle). Python
 <img src="docs/screenshots/desktop-map.png" width="64%">
 <img src="docs/screenshots/phone-tune.png" width="25%">
 </p>
+<p>
+<img src="docs/screenshots/desktop-sensors.png" width="64%">
+<img src="docs/screenshots/phone-sensors.png" width="25%">
+</p>
 
 ```mermaid
 flowchart LR
@@ -24,7 +28,9 @@ python -m station.sim
 ```
 Open http://localhost:8080/ . The fake Teensy runs the firmware's balance controller on a simulated robot
 (CAD mass/inertia, 400 Hz), so gains behave like the real thing.
-Options: `--remote` (RC remote on: its ARMED switch rules), `--remote-disarmed`, `--http-port 8090`.
+Options: `--remote` (RC remote on: its ARMED switch rules), `--remote-disarmed`, `--http-port 8090`,
+`--head-error 8` (range head mounted 8° off: practise the trim). The range sweep follows the firmware
+(`rng.*` params: sweep / park / trim / limits / timing).
 
 Tests: `python -m unittest discover -s station -t .` (protocol vs the C header, plus a full sim + bridge + browser-API run).
 Screenshots: `python -m station.tools.screenshots --url http://localhost:8080/ --prep`
@@ -37,6 +43,7 @@ Screenshots: `python -m station.tools.screenshots --url http://localhost:8080/ -
 | **Arm & Balance** | two taps. With no RC remote, the station arms the robot; with the remote, its switch does |
 | **Map** | tap to add waypoints, **Go** (asks before it arms the robot) |
 | **Drive** | joystick / WASD in STATION mode |
+| **Sensors** | both range sensors live: mm, valid, angle, readings/s; last sweep around the robot; range vs time. ⋯ → park / trim / sweep width / direction, **hand test** (cover one sensor: its card lights up). Colours: front amber, rear magenta (map too) |
 | **Tune** | live P / I / D at the loop rate (**Full rate**), sliders apply at once, **Save to robot** writes EEPROM (when the motors are off); ⋯ → Restore defaults |
 | **Logs** | messages, session downloads (CSV / JSONL), link details |
 
@@ -80,4 +87,6 @@ rm /tmp/sbr3-bridge.release                   # bridge reconnects
 | `{"t":"sub","tune":true}` | receive every telemetry frame as `{"t":"tune","cols":[...],"rows":[...]}` |
 
 Receive: `hello`, `status`, `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`.
+`ranges.pts` rows (every reading, batched at 25 Hz): `[i, hit_x, hit_y, sensor_x, sensor_y, valid, tilt, pi_ms, sensor_id, sensor_angle_deg, range_mm]`
+(sensor 0 = front / XSHUT 34, 1 = rear / XSHUT 28; angle in the robot frame, + = CCW; raw mm as sent). `status.rng_hz` = readings/s per sensor.
 No WebSocket (old Kindle): `GET /api/state`, `GET|POST /api/cmd`.

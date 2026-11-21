@@ -20,10 +20,11 @@ from station.bridge import link_protocol as lp
 TRACK_MM = 126.8          # wheel separation (firmware odometry param says 123)
 ROBOT_RADIUS = 90.0       # collision radius: footprint ~152 x 90 mm
 SENSOR_FWD_MM = 26.0      # range-sensor servo axis is this far forward of the axle
-RANGE_MAX = 2000.0
-SERVO_STEPS = 16
-SERVO_STEP_DEG = 180.0 / SERVO_STEPS   # 11.25 deg: 16 steps x 2 sensors = 32 directions
-SERVO_STEP_S = 0.060
+SENSOR_RADIUS_MM = 12.9   # each VL53L0X sits this far out from the servo axis, facing outwards
+RANGE_MAX = 2000.0        # VL53L0X reach in long-range mode (1200 without)
+RANGE_MAX_SHORT = 1200.0
+RANGE_IO_S = 0.007        # I2C + start per reading (firmware: ~80 ms per sweep position at settle 40, budget 33)
+RANGE_DROPOUT = 0.03      # chance of a reading with no valid return
 ARRIVE_MM = 80.0          # sim-only navigation constants
 OBSTACLE_MM = 300.0
 
@@ -59,8 +60,16 @@ PARAMS = [
     ("mot.curve_exp", 3.92, 1.0, 10.0), ("mot.knee_in", 1250.0, 1.0, 4000.0), ("mot.knee_out", 2750.0, 0.0, 4095.0),
     ("ctl.rate_hz", 400.0, 100.0, 1000.0), ("ctl.loops", 3.0, 0.0, 3.0), ("ctl.settle_ms", 500.0, 0.0, 5000.0),
     ("batt.low_cell", 3.4, 2.5, 4.2), ("batt.adc_per_v", 73.3182, 10.0, 200.0),
-    ("tlm.hz", 100.0, 1.0, 1000.0), ("cfg.save", 0.0, 0.0, 1.0), ("cfg.defaults", 0.0, 0.0, 1.0),
-]
+    # rng.enable: firmware default 0; the sim starts with the sweep on so the map has points
+    ("tlm.hz", 100.0, 1.0, 1000.0), ("rng.enable", 1.0, 0.0, 1.0),
+    ("cfg.save", 0.0, 0.0, 1.0), ("cfg.defaults", 0.0, 0.0, 1.0),
+    ("rng.servo_trim_deg", 0.0, -45.0, 45.0), ("rng.sweep_deg", 170.0, 0.0, 180.0), ("rng.steps", 16.0, 1.0, 64.0),
+    ("rng.settle_ms", 40.0, 0.0, 500.0), ("rng.timing_budget_ms", 33.0, 20.0, 200.0),
+    ("rng.long_range", 1.0, 0.0, 1.0), ("rng.max_mm", 2000.0, 50.0, 8190.0),
+    ("rng.servo_hold_deg", -1.0, -1.0, 180.0), ("rng.obstacle_mm", 300.0, 0.0, 2000.0),
+    ("rng.servo_dir", 1.0, -1.0, 1.0), ("rng.servo_min_deg", 5.0, 0.0, 90.0),
+    ("rng.servo_max_deg", 175.0, 90.0, 180.0), ("rng.servo_deg_per_cmd", 1.0, 0.5, 1.5),
+]   # (the firmware's mot.test ... mot.dz_band params come after these; not simulated)
 CELLS = 3
 
 NAV_IDLE, NAV_TURNING, NAV_DRIVING, NAV_BLOCKED, NAV_ARRIVED = range(5)
@@ -110,7 +119,13 @@ class Room:
 
 
 def _wrap180(a):
-    return (a + 180.0) % 360.0 - 180.0
+    """(-180, 180], like the firmware's wrap180 (straight back = +180)."""
+    a = math.fmod(a, 360.0)
+    if a > 180.0:
+        a -= 360.0
+    if a <= -180.0:
+        a += 360.0
+    return a
 
 
 def _clamp(v, lim):
@@ -235,8 +250,10 @@ class Controller:
 
 
 class SimRobot:
-    def __init__(self, remote=False, remote_armed=True, seed=None):
+    def __init__(self, remote=False, remote_armed=True, seed=None, head_error_deg=0.0):
         self.rng = random.Random(seed)
+        # sim-only: the head is mounted this far CCW of where the firmware thinks (what rng.servo_trim_deg fixes)
+        self.head_error_deg = head_error_deg
         self.room = Room()
         self.t = 0.0                  # simulated time, s (advanced by step())
         self.params = [[n, v, lo, hi] for n, v, lo, hi in PARAMS]
@@ -284,9 +301,14 @@ class SimRobot:
         self.front_cache = (-1.0, 1e9)
         self.scan_until = 0.0
         self.explore_turn = 0.0
-        self.servo_i = 0
-        self.servo_dir = 1
-        self.next_servo = 0.0
+        # range sweep (model of src/range_sweep.cpp)
+        self.rs_on = self.rs_started = False
+        self.rs_k, self.rs_dir = 0, 1
+        self.rs_last_cmd = None       # servo command last written, deg
+        self.rs_head = 0.0            # head angle the firmware reports (sensor 0)
+        self.rs_true_head = 0.0       # where the head really points
+        self.rs_next = 0.0
+        self.rs_measuring = False
         self.motor_l = self.motor_r = 0.0
         self.battery = 12.45
         self.push = 0.0               # sim-only disturbance (rad/s^2), see push()
@@ -403,7 +425,7 @@ class SimRobot:
             self.ctl.heading_sp -= self.TH - self.oth   # keep the heading target where it physically was
             self.log("pose reset")
         elif ev == lp.EVT_START_SCAN:
-            self.scan_until = self.now() + 2 * SERVO_STEPS * SERVO_STEP_S
+            self.scan_until = self.now() + 2 * self._rs_steps() * 0.08
             self.log("scan")
 
     def set_mode(self, mode):
@@ -612,16 +634,7 @@ class SimRobot:
             self.last_tlm = now
             self.out.append(self._telemetry(o, pitch, pitch_rate, yaw_rate, w, batt_v))
 
-        # range sensor: servo steps every 60 ms, both sensors read at each step
-        if now >= self.next_servo:
-            x, y, th = self.odom()
-            self.next_servo = now + SERVO_STEP_S
-            ang = -90.0 + self.servo_i * SERVO_STEP_DEG
-            for sid, a in ((0, ang), (1, ang + 180.0)):
-                self.out.append(self._range(sid, a, x, y, th, pitch))
-            self.servo_i += self.servo_dir
-            if self.servo_i in (0, SERVO_STEPS - 1):
-                self.servo_dir = -self.servo_dir
+        self._range_step(now, pitch)
 
         # nav status: on change and at 2 Hz while navigating
         key = (self.nav_state, len(self.waypoints), self.nav_index)
@@ -674,17 +687,92 @@ class SimRobot:
             "vel_out_deg": o["vel_out"], "step": self.step_n & 0xFFFFFFFF,
         })
 
-    def _range(self, sid, sensor_ang, x, y, th, pitch):
+    # ---------------------------------------------------------------- range sweep (src/range_sweep.cpp)
+    def _rs_steps(self):
+        return max(1, min(64, int(round(self.P("rng.steps")))))
+
+    def _rs_step_deg(self):
+        w, n = self.P("rng.sweep_deg"), self._rs_steps()
+        if w >= 179.5:
+            return w / n          # full circle with two sensors: no repeated end point
+        return w / (n - 1) if n > 1 else 180.0
+
+    def _rs_position(self, k):
+        w, n = self.P("rng.sweep_deg"), self._rs_steps()
+        if n == 1 or w <= 0:
+            return 0.0
+        return -0.5 * w + k * self._rs_step_deg()
+
+    def _rs_next_position(self):
+        n = self._rs_steps()
+        if self.rs_k >= n:
+            self.rs_k = n - 1
+        if n == 1:
+            self.rs_k = 0
+            return
+        if self.rs_k >= n - 1:
+            self.rs_dir = -1
+        elif self.rs_k <= 0:
+            self.rs_dir = 1
+        self.rs_k += self.rs_dir
+
+    def _rs_command(self, head):
+        """commandServo(): servo command from the head angle; returns the settle time, s."""
+        P = self.P
+        trim, scale = P("rng.servo_trim_deg"), P("rng.servo_deg_per_cmd")
+        sdir = -1 if P("rng.servo_dir") < 0 else 1
+        cmd = max(P("rng.servo_min_deg"), min(P("rng.servo_max_deg"), 90.0 + trim + sdir * head / scale))
+        self.rs_head = sdir * scale * (cmd - 90.0 - trim)          # reported (true if the firmware is set up right)
+        self.rs_true_head = (cmd - 90.0) + self.head_error_deg      # the sim's servo: +1 deg per command deg
+        moved = 1e9 if self.rs_last_cmd is None else abs(cmd - self.rs_last_cmd)
+        self.rs_last_cmd = cmd
+        if moved < 0.01:
+            return 0.0
+        step = 11.25 if P("rng.servo_hold_deg") >= 0 else self._rs_step_deg()
+        f = max(1.0, moved / max(step, 0.5))
+        return min(1.5, P("rng.settle_ms") / 1000.0 * f)
+
+    def _range_step(self, now, pitch):
+        if self.P("rng.enable") < 0.5:
+            if self.rs_on:
+                self.rs_on = self.rs_measuring = False
+                self.rs_last_cmd = None       # no pulses: the servo goes limp
+                self.log("rng: off")
+            return
+        if not self.rs_on:
+            self.log("rng: on" if self.rs_started else "rng: started, sensor0 ok, sensor1 ok")
+            self.rs_on, self.rs_started, self.rs_measuring, self.rs_next = True, True, False, now
+        if now < self.rs_next:
+            return
+        if self.rs_measuring:                 # both sensors finish together (pose at that moment)
+            x, y, th = self.odom()
+            for sid in (0, 1):
+                self.out.append(self._range(sid, x, y, th, pitch))
+            self.rs_measuring = False
+            self._rs_next_position()
+        hold = self.P("rng.servo_hold_deg")
+        if hold >= 0:
+            sdir = -1 if self.P("rng.servo_dir") < 0 else 1
+            head = sdir * self.P("rng.servo_deg_per_cmd") * (hold - 90.0)
+        else:
+            head = self._rs_position(self.rs_k)
+        settle = self._rs_command(head)
+        self.rs_next = now + settle + self.P("rng.timing_budget_ms") / 1000.0 + RANGE_IO_S
+        self.rs_measuring = True
+
+    def _range(self, sid, x, y, th, pitch):
         h = math.radians(self.TH)
         d = self.room.raycast(self.X + SENSOR_FWD_MM * math.cos(h), self.Y + SENSOR_FWD_MM * math.sin(h),
-                              math.radians(self.TH + sensor_ang))
-        valid = 1
-        if d is None or d > RANGE_MAX or self.rng.random() < 0.03:
-            valid, r = 0, 8190
-        else:
-            r = int(max(30, d + self.rng.gauss(0, 8 + 0.01 * d)))
+                              math.radians(self.TH + self.rs_true_head + 180.0 * sid))
+        reach = RANGE_MAX if self.P("rng.long_range") >= 0.5 else RANGE_MAX_SHORT
+        valid, r = 0, 8190                    # no target (what the VL53L0X reports then)
+        if d is not None and d - SENSOR_RADIUS_MM <= reach and self.rng.random() >= RANGE_DROPOUT:
+            d -= SENSOR_RADIUS_MM
+            noise = (8 + 0.01 * d) * math.sqrt(33.0 / self.P("rng.timing_budget_ms"))
+            r = int(max(30, d + self.rng.gauss(0, noise)))
+            valid = 1 if r <= self.P("rng.max_mm") else 0
         return lp.encode_range({"t_us": self.t_us(), "x_mm": x, "y_mm": y, "heading_deg": th,
-                                "pitch_deg": pitch, "sensor_angle_deg": sensor_ang,
+                                "pitch_deg": pitch, "sensor_angle_deg": _wrap180(self.rs_head + 180.0 * sid),
                                 "range_mm": r, "sensor_id": sid, "valid": valid})
 
     def run_until(self, t, max_steps=2000):

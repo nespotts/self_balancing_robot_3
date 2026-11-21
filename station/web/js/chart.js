@@ -3,6 +3,10 @@
 import { el } from "./ui.js";
 
 export const S1 = "#3987e5", S2 = "#d95926", S3 = "#199e70", SUM = "#c3c2b7";   // categorical slots 1-3, total
+// Range sensors, used everywhere (Sensors view, map): 0 = front (XSHUT 34) amber, 1 = rear (XSHUT 28) magenta.
+// Checked with the dataviz palette validator on the dark surface (CVD dE 13). SENS_RGB for alpha fades.
+export const SENS = ["#c98500", "#d55181"], SENS_RGB = [[201, 133, 0], [213, 81, 129]];
+export const SENS_NEW = ["#ffc23d", "#ff86b4"];   // newest points (brighter)
 
 export class Strip {
   // def: {title, series: [[key, label, color, fn?]], minSpan?, fixed?: [lo, hi]}; fn(m) computes the value
