@@ -376,7 +376,7 @@ def analyze(runs, params, cfg, vref=None, vbatt=None, band=None):
     # ---------------- proposal
     vref = vref or params.get("mot.v_ref") or 11.5
     band = band if band is not None else params.get("mot.dz_band", 0.01)
-    dz, dz_rows = {}, []
+    dz, dz_rows, bk = {}, [], {}
     for w in WHEELS:
         for d in DIRS:
             e = A.get((w, d), {})
@@ -396,6 +396,8 @@ def analyze(runs, params, cfg, vref=None, vbatt=None, band=None):
             dz[(w, d)] = max(0.0, v)
             dz_rows.append({"param": "mot.dz_%s_%s" % (w[0], d), "v": _r(dz[(w, d)], 2), "how": how,
                             "start": _r(st), "stop": _r(sp)})
+            if st is not None:   # stiction kick (issue #69): breakaway = the test's start volts (>= the dead zone)
+                bk[(w, d)] = max(st, dz[(w, d)])
     # per-wheel scale so u gives the same speed on both wheels (stronger wheel turned down)
     K = {}
     for w in WHEELS:
@@ -449,6 +451,8 @@ def analyze(runs, params, cfg, vref=None, vbatt=None, band=None):
     pset = {"mot.model": 1.0, "mot.vcomp": 1.0, "mot.v_ref": round(vref, 1)}
     for (w, d), v in sorted(dz.items()):
         pset["mot.dz_%s_%s" % (w[0], d)] = round(v, 2)
+    for (w, d), v in sorted(bk.items()):
+        pset["mot.bk_%s_%s" % (w[0], d)] = round(v, 2)
     if scales:
         pset["mot.left_scale"] = round(scales["left"], 3)
         pset["mot.right_scale"] = round(scales["right"], 3)
@@ -552,6 +556,10 @@ def report(R):
     p("\n== proposal (mot.model 1 = volts model, mot.vcomp 1, mot.v_ref %.1f V)" % P["vref"])
     for row in P["dz"]:
         p("%s = %.2f V   (%s; start %s, stop %s)" % (row["param"], row["v"], row["how"], fmt(row["start"]), fmt(row["stop"])))
+    bks = [(k, v) for k, v in sorted(P["params"].items()) if k.startswith("mot.bk_")]
+    if bks:
+        p("%s   (stiction kick: breakaway = start volts; mot.bk_gain 0 = off)" %
+          ", ".join("%s = %.2f V" % kv for kv in bks))
     if P["scales"]:
         p("mot.left_scale = %.3f, mot.right_scale = %.3f   (speed at u=1: left %.0f, right %.0f mm/s at %.1f V)" %
           (P["scales"]["left"], P["scales"]["right"], P["speed_at_u1"]["left"], P["speed_at_u1"]["right"], P["vref"]))

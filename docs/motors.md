@@ -72,6 +72,33 @@ scale, how the v3 curve and the volts model map u → speed, and a `tune.py set 
 A/B live with `mot.model` 0 / 1; the volts model has a different gain near 0, so retune `bal.*` (the tool suggests a
 starting factor). **Save to robot** keeps it. On a bench supply without the balance lead, vcomp does nothing (bad reading → 1×).
 
+## Stiction kick (mot.bk_*, model 1, issue #69)
+
+A stopped TT wheel needs its **start** volts (~2.1–2.7 V) to break loose; a turning one keeps going down to its
+**stop** volts (~0.8 V = `mot.dz_*`). Without help it sits still while the balance command builds, then lurches:
+the ~1.4 Hz stick-slip rock.
+
+```
+ volts │      kick           fade 40 ms
+ bk ───┤ ┌───────────┐╲
+       │ │           │  ╲___ dead-zone model (dz + (v_ref − dz)·|u|)
+ dz ───┤ │
+     0 ┼─┴───────────┴──────────────── t
+         ↑ wheel stopped ≥ 20 ms         ↑ wheel turns (≥ bk_mms) or bk_ms is up
+           and |u| > bk_band
+```
+
+| | |
+|---|---|
+| Kick | \|V\| ≥ `mot.bk_gain` × `mot.bk_<wheel>_<dir>` (direction of the command), vcomp + brake cap apply as usual |
+| No kick | \|u\| ≤ `mot.bk_band`, wheel turning, no fresh encoder reads, `mot.model 0`, speed loop, motor test (raw duty) |
+| No chatter | command back in the band or reversed → floor gone at once; after a kick none for 150 ms unless \|u\| has stayed > band one way for 60 ms |
+| Values | motor_fit.py proposes `mot.bk_*` = the test's start volts |
+| Sim | `python -m station.sim --stiction` (TT motors with breakaway > kinetic friction), `mot.model 1`, compare `mot.bk_gain` 0 / 1 |
+
+Tune live (balancing in HOLD): `bk_gain` 0 → rock; 1 → rock smaller, wheels no longer stall at 0 mm/s. Buzz → raise
+`bk_band` or lower `bk_gain` / `bk_ms`; still stalling → raise `bk_gain` (≤ 1.5).
+
 ## L298N drive (issue #22)
 
 ```

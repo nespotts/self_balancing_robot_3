@@ -31,7 +31,8 @@ RUNS_MAX = 60
 MT_LINES_MAX = 3000
 PARAM_HIST_MAX = 4000
 MOTOR_APPLY_OK = frozenset(("mot.model", "mot.vcomp", "mot.v_ref", "mot.dz_l_fwd", "mot.dz_l_rev", "mot.dz_r_fwd",
-                            "mot.dz_r_rev", "mot.dz_band", "mot.left_scale", "mot.right_scale", "mot.k_l", "mot.k_r"))
+                            "mot.dz_r_rev", "mot.dz_band", "mot.left_scale", "mot.right_scale", "mot.k_l", "mot.k_r",
+                            "mot.bk_l_fwd", "mot.bk_l_rev", "mot.bk_r_fwd", "mot.bk_r_rev"))
 LAST_S_MAX = 300
 
 

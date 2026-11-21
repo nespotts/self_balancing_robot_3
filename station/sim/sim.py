@@ -70,7 +70,8 @@ PARAMS = [
     ("rng.servo_dir", 1.0, -1.0, 1.0), ("rng.servo_min_deg", 5.0, 0.0, 90.0),
     ("rng.servo_max_deg", 175.0, 90.0, 180.0), ("rng.servo_deg_per_cmd", 1.0, 0.5, 1.5),
     # wheels-up motor test (sim: robot on a stand, TT motors; station/sim/motor_test.py). mot.model / vcomp /
-    # v_ref / dz_* are listed (the Tune page applies motor fits to them) but the balance sim keeps the v3 curve.
+    # v_ref / dz_* are listed (the Tune page applies motor fits to them); the balance sim keeps the v3 curve
+    # unless SimRobot.use_floor_wheels() (python -m station.sim --stiction) runs the firmware motor layer.
     ("mot.test", 0.0, 0.0, 7.0), ("mot.test_max", 4095.0, 500.0, 4095.0), ("mot.model", 0.0, 0.0, 1.0),
     ("mot.vcomp", 0.0, 0.0, 1.0), ("mot.v_ref", 12.0, 6.0, 17.0), ("mot.dz_l_fwd", 2.0, 0.0, 8.0),
     ("mot.dz_l_rev", 2.0, 0.0, 8.0), ("mot.dz_r_fwd", 2.0, 0.0, 8.0), ("mot.dz_r_rev", 2.0, 0.0, 8.0),
@@ -101,6 +102,11 @@ PARAMS = [
     ("nav.stuck_ms", 2500.0, 0.0, 20000.0),
     ("nav.stuck_mm", 40.0, 5.0, 500.0),
     ("nav.stuck_backoff_mm", 100.0, 0.0, 500.0),
+    # issue #69: stiction kick (mot.model 1); the balance sim uses it with SimRobot.use_floor_wheels()
+    ("mot.bk_l_fwd", 2.46, 0.0, 8.0), ("mot.bk_l_rev", 2.11, 0.0, 8.0),
+    ("mot.bk_r_fwd", 2.73, 0.0, 8.0), ("mot.bk_r_rev", 2.49, 0.0, 8.0),
+    ("mot.bk_gain", 1.0, 0.0, 1.5), ("mot.bk_ms", 80.0, 0.0, 300.0),
+    ("mot.bk_band", 0.03, 0.0, 0.3), ("mot.bk_mms", 15.0, 1.0, 200.0),
 ]
 CELLS = 3
 WAYPOINT_MAX = 32         # src/config.h
@@ -193,6 +199,107 @@ def motor_curve(cmd, exp, knee_in, knee_out):
     else:
         out = knee_out + (MOTOR_FULL - knee_out) / (MOTOR_FULL - knee_in) * (a - knee_in)
     return min(out, MOTOR_FULL)
+
+
+def motor_dz_volts(u, dz, v_ref, band):
+    """src/motor_model.h: |u| 0..1 -> volts (mot.model 1)."""
+    u = min(abs(u), 1.0)
+    if u <= 0.0:
+        return 0.0
+    dz = min(dz, v_ref)
+    if u < band:
+        return u / band * (dz + (v_ref - dz) * band)
+    return dz + (v_ref - dz) * u
+
+
+class StictionKick:
+    """Port of StictionKick (src/motor_model.h, issue #69); times in us."""
+    STOP_US, FADE_US, LOCK_US, SUSTAIN_US = 20000, 40000, 150000, 60000
+    IDLE, KICK, FADE = 0, 1, 2
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.state, self.dir, self.sus_dir, self.floor = self.IDLE, 0, 0, 0.0
+        self.init = self.kicked = False
+        self.t_state = self.t_moving = self.t_sus = self.t_kick = 0
+
+    def apply(self, u, v, speed, fb_ok, now_us, bk_fwd, bk_rev, gain, kick_ms, band, move_mms):
+        if gain <= 0.0 or not fb_ok:
+            self.reset()
+            return v
+        if not self.init:
+            self.init = True
+            self.t_moving = self.t_sus = now_us
+            self.sus_dir = 0
+        moving = abs(speed) >= move_mms
+        if moving:
+            self.t_moving = now_us
+        d = 1 if u > band else (-1 if u < -band else 0)
+        if d != self.sus_dir:
+            self.sus_dir, self.t_sus = d, now_us
+        if self.state != self.IDLE and d != self.dir:
+            self.state = self.IDLE
+        if self.state == self.KICK and (moving or now_us - self.t_state >= kick_ms * 1000.0):
+            self.state, self.t_state = self.FADE, now_us
+        if self.state == self.FADE and now_us - self.t_state >= self.FADE_US:
+            self.state = self.IDLE
+        if (self.state == self.IDLE and d != 0 and now_us - self.t_moving >= self.STOP_US and
+                (not self.kicked or now_us - self.t_kick >= self.LOCK_US or now_us - self.t_sus >= self.SUSTAIN_US)):
+            self.state, self.dir, self.t_state, self.t_kick, self.kicked = self.KICK, d, now_us, now_us, True
+        bk = gain * (bk_fwd if self.dir > 0 else bk_rev)
+        if self.state == self.KICK:
+            self.floor = bk
+        elif self.state == self.FADE:
+            self.floor = bk * (1.0 - (now_us - self.t_state) / self.FADE_US)
+        else:
+            self.floor = 0.0
+        if self.floor <= abs(v):
+            return v
+        return self.floor if d > 0 else -self.floor
+
+
+class FloorWheel:
+    """Sim-only TT gear motor on the floor with static friction (issue #69): a stopped wheel needs its
+    breakaway volts (v_start, per direction) to move, a turning one keeps going down to v_stop (kinetic).
+    Defaults: the new motors' motor-test numbers (left wheel; right: 2.73 / 2.49, 0.85 / 0.88)."""
+    STICK_MMS = 5.0
+
+    def __init__(self, v_start=(2.46, 2.11), v_stop=(0.82, 0.76), k=124.0, tau=MOTOR_TAU):
+        self.v_start, self.v_stop, self.k, self.tau = v_start, v_stop, k, tau
+        self.v = 0.0
+        self.pos = 0.0
+        self.moving = False
+        self.hist = []           # (t, encoder mm) of the last 20 ms: WheelSpeedEst
+
+    def step(self, volts, dt):
+        a, i = abs(volts), (0 if volts >= 0 else 1)
+        if not self.moving and a >= self.v_start[i] and volts != 0.0:
+            self.moving = True
+        if self.moving:
+            target = math.copysign(self.k * max(0.0, a - self.v_stop[i]), volts) if volts else 0.0
+            nv = self.v + (target - self.v) * min(1.0, dt / self.tau)
+            # slowing through ~0 (or reversing) without the breakaway volts in the drive direction: sticks
+            if (abs(nv) < self.STICK_MMS or nv * self.v < 0.0) and (a < self.v_start[i] or volts == 0.0):
+                self.moving, nv = False, 0.0
+            self.v = nv
+        else:
+            self.v = 0.0
+        self.pos += self.v * dt
+
+    def coast(self, v, dt):
+        self.v, self.moving = v, abs(v) >= self.STICK_MMS
+        self.pos += v * dt
+
+    def speed_est(self, now):
+        """Encoder speed over the last 20 ms (counts quantised), like WheelSpeedEst at 200 Hz."""
+        c = math.floor(self.pos / MM_PER_COUNT) * MM_PER_COUNT
+        self.hist.append((now, c))
+        while len(self.hist) > 2 and now - self.hist[0][0] > 0.0201:
+            self.hist.pop(0)
+        t0, c0 = self.hist[0]
+        return (c - c0) / (now - t0) if now > t0 else 0.0
 
 
 class Navigator:
@@ -871,6 +978,7 @@ class SimRobot:
         self.mtest = SimMotorTest(self.log)   # wheels-up motor test (mot.test)
         self.on_stand = False
         self.tt = []                  # TT motors on the stand (see _motor_test_step)
+        self.floor = None             # FloorWheel pair: volts motor layer + stiction (use_floor_wheels, #69)
         self.enc_ring = []
         self.out = []                 # frames to send
         self.log("boot sim v4, params DEFAULTS, imu ok, radio %s" % ("ok" if remote else "ok (no remote)"))
@@ -1084,6 +1192,40 @@ class SimRobot:
         return v_t, w_t
 
     # ---------------------------------------------------------------- one balance step
+    def use_floor_wheels(self, right=((2.73, 2.49), (0.85, 0.88)), left=((2.46, 2.11), (0.82, 0.76)), k=124.0):
+        """Sim-only (issue #69): balance on TT motors with static friction (breakaway > kinetic volts) through
+        a port of the firmware motor layer (Motor::set: mot.model 0 / 1, stiction kick, vcomp, brake cap)."""
+        self.floor = [FloorWheel(left[0], left[1], k), FloorWheel(right[0], right[1], k)]
+        self.kick = [StictionKick(), StictionKick()]
+        self.floor_speed = [0.0, 0.0]
+        self.volts = [0.0, 0.0]
+
+    def _motor_volts(self, side, cmd, now, batt):
+        """Motor::set() (src/motors.cpp) without the speed loop: command -> volts at the motor."""
+        P = self.P
+        w = "lr"[side]
+        if cmd == 0.0:
+            self.kick[side].reset()
+            return 0.0
+        brake = (P("mot.drive_mode") >= 0.5 and P("mot.pwm_hz") <= P("mot.brake_max_hz") and P("mot.model") >= 0.5)
+        if P("mot.model") >= 0.5:
+            v_ref = P("mot.v_ref")
+            u = cmd / MOTOR_FULL
+            v = motor_dz_volts(u, P("mot.dz_%s_%s" % (w, "fwd" if cmd >= 0 else "rev")), v_ref, P("mot.dz_band"))
+            v = abs(self.kick[side].apply(u, v if cmd >= 0 else -v, self.floor_speed[side], True, int(now * 1e6),
+                                          P("mot.bk_%s_fwd" % w), P("mot.bk_%s_rev" % w), P("mot.bk_gain"),
+                                          P("mot.bk_ms"), P("mot.bk_band"), P("mot.bk_mms")))
+            pwm = min(v, v_ref) / v_ref * MOTOR_FULL
+        else:
+            self.kick[side].reset()
+            pwm = motor_curve(cmd, P("mot.curve_exp"), P("mot.knee_in"), P("mot.knee_out"))
+        if P("mot.vcomp") >= 0.5 and batt > 0:
+            pwm *= max(0.5, min(1.3, P("mot.v_ref") / batt))
+        duty = math.copysign(min(pwm, MOTOR_FULL), cmd)
+        if brake:
+            duty = _clamp(duty, P("mot.brake_duty_max"))
+        return duty / MOTOR_FULL * batt
+
     def _wheel_target(self, counts, strength):
         P = self.P
         pwm = motor_curve(counts, P("mot.curve_exp"), P("mot.knee_in"), P("mot.knee_out"))
@@ -1120,15 +1262,28 @@ class SimRobot:
             self.engaged_at = None
 
         # wheels: first-order lag towards the speed the PWM gives (dead zone, battery sag)
-        if o["active"]:
-            tl = self._wheel_target(self.motor_l, LEFT_STRONGER)
-            tr = self._wheel_target(self.motor_r, 1.0)
-            k = min(1.0, dt / MOTOR_TAU)
-        else:   # coasting / lying on the floor
-            tl = tr = 0.0
-            k = min(1.0, dt / (0.08 if abs(self.theta) >= math.radians(LIE_DEG) - 1e-6 else 0.4))
-        self.vl += (tl - self.vl) * k
-        self.vr += (tr - self.vr) * k
+        if self.floor is not None and o["active"]:
+            for side, (fw, cmd) in enumerate(zip(self.floor, (self.motor_l, self.motor_r))):
+                self.volts[side] = self._motor_volts(side, cmd, now, self.battery)
+                fw.step(self.volts[side], dt)
+            self.vl, self.vr = self.floor[0].v, self.floor[1].v
+        else:
+            if o["active"]:
+                tl = self._wheel_target(self.motor_l, LEFT_STRONGER)
+                tr = self._wheel_target(self.motor_r, 1.0)
+                k = min(1.0, dt / MOTOR_TAU)
+            else:   # coasting / lying on the floor
+                tl = tr = 0.0
+                k = min(1.0, dt / (0.08 if abs(self.theta) >= math.radians(LIE_DEG) - 1e-6 else 0.4))
+            self.vl += (tl - self.vl) * k
+            self.vr += (tr - self.vr) * k
+            if self.floor is not None:
+                self.floor[0].coast(self.vl, dt)
+                self.floor[1].coast(self.vr, dt)
+                self.kick[0].reset()
+                self.kick[1].reset()
+        if self.floor is not None:   # encoder read after the step (feeds the next step's kick)
+            self.floor_speed = [fw.speed_est(now) for fw in self.floor]
         v = (self.vl + self.vr) / 2
         acc = (v - self.v_prev) / dt / 1000.0    # m/s^2
         self.v_prev = v
@@ -1160,6 +1315,8 @@ class SimRobot:
             self.X, self.Y = nx, ny
         else:
             self.vl = self.vr = self.v_prev = 0.0
+            for fw in self.floor or ():
+                fw.v, fw.moving = 0.0, False
 
         self._motor_test_step(now, dt, pitch, pitch_rate, stand_pose)
 

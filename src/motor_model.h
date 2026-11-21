@@ -3,6 +3,7 @@
 //
 //   motor_curve       mot.model 0: v3 dead-zone linearisation curve (duty in, duty out)
 //   motor_dz_volts    mot.model 1: u -> volts with the dead zone added
+//   StictionKick      mot.model 1: breakaway volts for a stopped wheel (issue #69)
 //   WheelSpeedEst     fast wheel speed from encoder counts (20 ms window, ~10 ms lag)
 //   WheelSpeedLoop    closed-loop wheel speed (mot.speed_loop): feed-forward from the volts model
 //                     + PI on the speed error, dead-zone inverse on the result, anti-windup
@@ -64,6 +65,81 @@ inline float motor_dz_inverse(float x, float dz_fwd, float dz_rev, float band) {
   else v = dz + a;
   return x >= 0.0f ? v : -v;
 }
+
+// Stiction (breakaway) compensation, mot.model 1 (issue #69). A stopped TT gear motor needs its breakaway
+// volts (motor test "start", ~2.1-2.7 V) to move, a turning one only its kinetic dead zone (mot.dz_*, ~0.8 V):
+// without help the wheel sits still while the command builds, then lurches (stick-slip rock).
+//   wheel stopped (|speed| < move_mms for kStopUs) and |u| > band  ->  kick: |V| >= gain * breakaway volts
+//   kick ends on motion (|speed| >= move_mms) or after kick_ms, then the floor fades to the kinetic model
+//   (kFadeUs). No kick for |u| <= band; after a kick, none for kLockUs unless |u| > band in one direction
+//   for kSustainUs (no chatter / buzz on small commands around 0).
+struct StictionCfg {
+  float bk_fwd = 2.5f, bk_rev = 2.5f;  // breakaway volts (mot.bk_<wheel>_fwd / _rev)
+  float gain = 1.0f;                   // mot.bk_gain: scale, 0 = off
+  float kick_ms = 80.0f;               // mot.bk_ms: longest kick
+  float band = 0.03f;                  // mot.bk_band: |u| at or below this never kicks
+  float move_mms = 15.0f;              // mot.bk_mms: |wheel speed| at/above this = turning
+};
+
+class StictionKick {
+ public:
+  static constexpr uint32_t kStopUs = 20000;     // stopped this long before a kick
+  static constexpr uint32_t kFadeUs = 40000;     // kick floor -> kinetic model
+  static constexpr uint32_t kLockUs = 150000;    // no new kick this soon after the last one ...
+  static constexpr uint32_t kSustainUs = 60000;  // ... unless the command has asked for one this long
+  enum : uint8_t { IDLE = 0, KICK = 1, FADE = 2 };
+
+  void reset() { state_ = IDLE; dir_ = 0; sus_dir_ = 0; floor_ = 0; init_ = false; kicked_ = false; }
+
+  // u: command -1..1 (+ = wheel forward); v: the kinetic model's volts for it (signed like u);
+  // speed: wheel speed, mm/s; fb_ok: fresh encoder feedback (else no kick). Returns the volts to drive.
+  float apply(float u, float v, float speed_mms, bool fb_ok, uint32_t now_us, const StictionCfg& c) {
+    if (c.gain <= 0.0f || !fb_ok) {
+      reset();
+      return v;
+    }
+    if (!init_) {
+      init_ = true;
+      t_moving_ = t_sus_ = now_us;
+      sus_dir_ = 0;
+    }
+    const bool moving = fabsf(speed_mms) >= c.move_mms;
+    if (moving) t_moving_ = now_us;
+    const int8_t d = u > c.band ? 1 : (u < -c.band ? -1 : 0);
+    if (d != sus_dir_) {
+      sus_dir_ = d;
+      t_sus_ = now_us;
+    }
+    if (state_ != IDLE && d != dir_) state_ = IDLE;  // command back in the band or reversed: no floor
+    if (state_ == KICK && (moving || (float)(now_us - t_state_) >= c.kick_ms * 1000.0f)) {
+      state_ = FADE;
+      t_state_ = now_us;
+    }
+    if (state_ == FADE && now_us - t_state_ >= kFadeUs) state_ = IDLE;
+    if (state_ == IDLE && d != 0 && now_us - t_moving_ >= kStopUs &&
+        (!kicked_ || now_us - t_kick_ >= kLockUs || now_us - t_sus_ >= kSustainUs)) {
+      state_ = KICK;
+      dir_ = d;
+      t_state_ = t_kick_ = now_us;
+      kicked_ = true;
+    }
+    const float bk = c.gain * (dir_ > 0 ? c.bk_fwd : c.bk_rev);
+    if (state_ == KICK) floor_ = bk;
+    else if (state_ == FADE) floor_ = bk * (1.0f - (float)(now_us - t_state_) / (float)kFadeUs);
+    else floor_ = 0.0f;
+    if (floor_ <= fabsf(v)) return v;
+    return d > 0 ? floor_ : -floor_;
+  }
+  uint8_t state() const { return state_; }
+  float floorV() const { return floor_; }
+
+ private:
+  uint8_t state_ = IDLE;
+  int8_t dir_ = 0, sus_dir_ = 0;
+  bool init_ = false, kicked_ = false;
+  float floor_ = 0;
+  uint32_t t_state_ = 0, t_moving_ = 0, t_sus_ = 0, t_kick_ = 0;
+};
 
 // Speed from the encoder counts over the last kN reads (200 Hz reads -> 20 ms window).
 class WheelSpeedEst {

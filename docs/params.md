@@ -47,6 +47,11 @@ Gains are br3ttb units: ki per second, kd seconds.
 | mot.v_ref | 12 V | model 1: u = 1 → this many volts; vcomp reference |
 | mot.dz_l_fwd / l_rev / r_fwd / r_rev | 2.0 V | model 1 dead zone per wheel + direction |
 | mot.dz_band | 0.01 | model 1: below this \|u\| ramp 0 → dead zone (no kick on noise) |
+| mot.bk_l_fwd / l_rev / r_fwd / r_rev | 2.46 / 2.11 / 2.73 / 2.49 V | model 1 stiction kick: breakaway volts of a stopped wheel (motor test **start**; see Stiction kick in motors.md) |
+| mot.bk_gain | 1 | kick volts × this (0 = off, max 1.5) |
+| mot.bk_ms | 80 | longest kick, ms (ends earlier once the wheel turns), then a 40 ms fade to the dead-zone model |
+| mot.bk_band | 0.03 | no kick for \|u\| ≤ this (no buzz on noise) |
+| mot.bk_mms | 15 | wheel speed ≥ this = turning (ends the kick); below it for 20 ms = stopped |
 | rng.idle_off | 1 | 1 = servo off while disarmed / E-stop (sweep only): head to centre, 0.4 s, then no pulses |
 | mot.pwm_hz | 36621 | motor PWM frequency, 100–50000 Hz ² |
 | mot.drive_mode | 0 | 0 PWM on EN (coast in the off-time), 1 PWM on IN (brake in the off-time) ², **mode 1 only at pwm_hz ≤ brake_max_hz and with mot.model 1** (see L298N drive) |

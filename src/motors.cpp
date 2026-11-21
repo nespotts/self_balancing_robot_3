@@ -85,6 +85,7 @@ void Motor::off() {
   loop_.reset();
   loop_run_ = false;
   sl_target_ = 0;
+  kick_.reset();
 }
 
 void Motor::drive(float pwm_signed) {
@@ -129,11 +130,15 @@ void Motor::drive(float pwm_signed) {
 
 void Motor::feedback(int32_t counts, uint32_t t_us) { est_.sample(counts, t_us, kMmPerCount); }
 
+bool Motor::feedbackFresh(uint32_t now_us) const {
+  return est_.valid() && (int32_t)(now_us - est_.lastUs()) <= (int32_t)kFeedbackStaleUs;
+}
+
 // mot.speed_loop 1: cmd -> target wheel speed -> WheelSpeedLoop -> signed duty. false = not active
 // (off, or no fresh encoder feedback): the caller uses mot.model instead.
 bool Motor::speedLoop(float cmd, float& duty) {
   const uint32_t now = micros();
-  if (P(P_MOT_SPEED_LOOP) < 0.5f || !est_.valid() || (int32_t)(now - est_.lastUs()) > (int32_t)kFeedbackStaleUs) {
+  if (P(P_MOT_SPEED_LOOP) < 0.5f || !feedbackFresh(now)) {
     if (loop_run_) loop_.reset();
     loop_run_ = false;
     sl_target_ = 0;
@@ -163,15 +168,31 @@ void Motor::set(float cmd) {
   if (isnan(cmd)) cmd = 0;
   cmd_ = cmd;
   float duty;
-  if (!speedLoop(cmd, duty)) {
+  if (speedLoop(cmd, duty)) {
+    kick_.reset();
+  } else {
     float pwm;
     // Brake mode never with the v3 curve (issue #40): mode 1 is only entered with mot.model 1, and a live
     // change to model 0 keeps the volts model until the next stop (then mode 0 is used).
     if (P(P_MOT_MODEL) >= 0.5f || g_mode == 1) {
       const float v_ref = P(P_MOT_V_REF);
       const float dz = P((ParamId)(cmd >= 0 ? dz_fwd_ : dz_rev_));
-      pwm = motor_dz_volts(cmd / MOTOR_FULL, dz, v_ref, P(P_MOT_DZ_BAND)) / v_ref * MOTOR_FULL;
+      const float u = cmd / MOTOR_FULL;
+      float v = motor_dz_volts(u, dz, v_ref, P(P_MOT_DZ_BAND));
+      // stiction kick (issue #69): breakaway volts for a stopped wheel; volts, so vcomp below applies too
+      StictionCfg kc;
+      kc.bk_fwd = P((ParamId)bk_fwd_);
+      kc.bk_rev = P((ParamId)bk_rev_);
+      kc.gain = P(P_MOT_BK_GAIN);
+      kc.kick_ms = P(P_MOT_BK_MS);
+      kc.band = P(P_MOT_BK_BAND);
+      kc.move_mms = P(P_MOT_BK_MMS);
+      const uint32_t now = micros();
+      v = fabsf(kick_.apply(u, cmd >= 0 ? v : -v, est_.speed(), feedbackFresh(now), now, kc));
+      if (v > v_ref) v = v_ref;
+      pwm = v / v_ref * MOTOR_FULL;
     } else {
+      kick_.reset();
       pwm = motor_curve(cmd, P(P_MOT_CURVE_EXP), P(P_MOT_KNEE_IN), P(P_MOT_KNEE_OUT));
     }
     pwm *= motors_vscale();
@@ -187,9 +208,9 @@ void Motor::setRaw(float duty) {
 }
 
 static Motor g_left(pins::MOT_L_EN, pins::MOT_L_D1, pins::MOT_L_D2, P_MOT_DZ_L_FWD, P_MOT_DZ_L_REV, P_MOT_K_L,
-                    P_MOT_LEFT_DIR);
+                    P_MOT_LEFT_DIR, P_MOT_BK_L_FWD, P_MOT_BK_L_REV);
 static Motor g_right(pins::MOT_R_EN, pins::MOT_R_D1, pins::MOT_R_D2, P_MOT_DZ_R_FWD, P_MOT_DZ_R_REV, P_MOT_K_R,
-                     P_MOT_RIGHT_DIR);
+                     P_MOT_RIGHT_DIR, P_MOT_BK_R_FWD, P_MOT_BK_R_REV);
 
 // mot.pwm_hz, or its default while the params are not loaded yet (motors_begin runs first: all 0)
 static float validHz(float hz) {
