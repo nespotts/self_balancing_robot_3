@@ -40,18 +40,21 @@ struct Wheel {
 };
 
 struct Sim {
-  Wheel wl{1.9f, 1.5f, 95.0f, 0.06f, 40}, wr{2.1f, 1.6f, 90.0f, 0.07f, 30};
+  // like the yellow TT motors at 11.7 V (start / keep-turning volts, mm/s per V, tau, backlash)
+  Wheel wl{6.7f, 5.7f, 190.0f, 0.06f, 40}, wr{6.4f, 5.9f, 215.0f, 0.07f, 30};
+  bool left_unplugged = false;
+  float max_l = 0, max_r = 0;  // largest |duty| commanded
   MtIn in;
   MotorTest mt;
   uint32_t t_us = 1000;
   int32_t ring[2][16] = {};
   uint32_t ring_t[16] = {};
   int ring_i = 0, ring_n = 0;
-  float vb = 11.8f;
+  float vb = 11.7f;
   bool print = false;
   int lines = 0;
   char last[200] = "";
-  bool saw_abort = false, saw_end = false;
+  bool saw_abort = false, saw_end = false, show_sum = false, no_reading = false, saw_warn = false;
 
   Sim() {
     in.request = 0;
@@ -62,12 +65,18 @@ struct Sim {
     in.enc_ok = true;
     in.pitch = -3.0f;
     in.vbatt = vb;
+    in.dz[0][0] = in.dz[0][1] = 5.9f;
+    in.dz[1][0] = in.dz[1][1] = 6.0f;
+    in.k[0] = 190;
+    in.k[1] = 215;
   }
   void drain() {
     for (const char* l; (l = mt.peekLine()) != nullptr; mt.popLine()) {
       if (print) printf("[\"log\",%.3f,\"%s\"]\n", t_us * 1e-6, l);
       snprintf(last, sizeof(last), "%s", l);
       if (!strncmp(l, "mt,abort", 8)) saw_abort = true;
+      if (!strncmp(l, "mt,warn,no_supply", 17)) saw_warn = true;
+      if (show_sum && (!strncmp(l, "mt,sum", 6) || !strncmp(l, "mt,l,", 5) || !strncmp(l, "mt,abort", 8))) printf("   %s\n", l);
       if (!strncmp(l, "mt,end", 6)) saw_end = true;
       lines++;
     }
@@ -78,9 +87,12 @@ struct Sim {
       t_us += 1000;
       const float dl = mt.driving() ? mt.left() : 0.0f, dr = mt.driving() ? mt.right() : 0.0f;
       // battery sags a little under load
-      in.vbatt = vb - 0.0002f * (fabsf(dl) + fabsf(dr));
-      wl.step(dl / 4095.0f * in.vbatt, 1e-3f);
+      in.vbatt = vb - 0.00005f * (fabsf(dl) + fabsf(dr));
+      if (fabsf(dl) > max_l) max_l = fabsf(dl);
+      if (fabsf(dr) > max_r) max_r = fabsf(dr);
+      wl.step(left_unplugged ? 0.0f : dl / 4095.0f * in.vbatt, 1e-3f);
       wr.step(dr / 4095.0f * in.vbatt, 1e-3f);
+      if (no_reading) in.vbatt = 0.06f;  // balance lead not connected
       if (enc_running && t_us % 5000 == 0) {
         const int32_t cl = (int32_t)floor(wl.po) + (rand() % 3) - 1;
         const int32_t cr = (int32_t)floor(wr.po) + (rand() % 3) - 1;
@@ -210,6 +222,87 @@ int main(int argc, char** argv) {
     CHECK(s.saw_end || s.saw_abort);
     CHECK(!s.mt.pending());
     printf("stuck wheel        -> %s\n", s.last);
+  }
+  {  // right wheel only, left unplugged: the left output is never driven, test 4 completes
+    Sim s;
+    s.left_unplugged = true;
+    s.in.wheels = 2;
+    s.in.request = 4;
+    s.run(400000);
+    CHECK(s.saw_end && !s.saw_abort && s.max_l == 0 && s.max_r > 0);
+    printf("right only test 4  -> %s\n", s.last);
+  }
+  {  // both wheels selected but the left motor unplugged: stall abort
+    Sim s;
+    s.left_unplugged = true;
+    s.in.request = 1;
+    s.run(200000);
+    CHECK(s.saw_abort && strstr(s.last, "stall,left"));
+    printf("unplugged left     -> %s\n", s.last);
+  }
+  {  // tracking tests 5, 6, 7 (right only): complete, print the scores
+    for (uint8_t t = 5; t <= 7; t++) {
+      Sim s;
+      s.show_sum = t == 7;
+      s.left_unplugged = true;
+      s.in.wheels = 2;
+      s.in.request = t;
+      s.run(200000);
+      CHECK(s.saw_end && !s.saw_abort && s.max_l == 0);
+      printf("tracking test %u    -> %s\n", t, s.last);
+    }
+  }
+  {  // drive mode 1 above mot.brake_max_hz: refused, never drives
+    Sim s;
+    s.in.drive_mode = 1;
+    s.in.pwm_hz = 36621;
+    s.in.request = 4;
+    s.run(5000);
+    CHECK(s.saw_abort && strstr(s.last, "brake_hz_above_max") && s.max_l == 0 && s.max_r == 0);
+    printf("brake at 36.6 kHz  -> %s\n", s.last);
+  }
+  {  // drive mode 1 at 1 kHz: duty capped at mot.brake_duty_max, cool-downs, completes
+    Sim s;
+    s.left_unplugged = true;
+    s.in.wheels = 2;
+    s.in.drive_mode = 1;
+    s.in.pwm_hz = 1000;
+    s.in.request = 4;
+    s.run(900000);
+    CHECK(s.saw_end && !s.saw_abort && s.max_r <= 3000 && s.max_r > 0);
+    printf("brake 1 kHz test 4 -> max duty %.0f, %s\n", s.max_r, s.last);
+  }
+  {  // supply sag > 1.5 V: abort
+    Sim s;
+    s.in.wheels = 2;
+    s.in.request = 2;
+    s.run(5000);
+    s.vb = 9.9f;
+    s.run(1000);
+    CHECK(s.saw_abort && strstr(s.last, "supply_sag"));
+    printf("supply sag         -> %s\n", s.last);
+  }
+  {  // binding: speed at a fixed duty falls > 30 % during test 3 (after test 1 + 2)
+    Sim s;
+    s.in.wheels = 2;
+    s.in.request = 4;
+    for (int i = 0; i < 400 && !strstr(s.last, "mt,sum,b"); i++) s.run(500);
+    s.run(4500);
+    s.wr.k_mms_per_v *= 0.4f;
+    s.run(20000);
+    CHECK(s.saw_abort && strstr(s.last, "speed_drop,right"));
+    printf("binding            -> %s\n", s.last);
+  }
+  {  // no valid pack reading (bench supply): runs with mot.v_ref as the supply volts, flagged
+    Sim s;
+    s.vb = 12.0f;
+    s.no_reading = true;
+    s.in.v_ref = 12.0f;
+    s.in.wheels = 2;
+    s.in.request = 1;
+    s.run(60000);
+    CHECK(s.saw_end && !s.saw_abort && s.saw_warn);
+    printf("no supply reading  -> %s\n", s.last);
   }
   printf(g_fail ? "%d FAILED\n" : "all ok\n", g_fail);
   return g_fail ? 1 : 0;
