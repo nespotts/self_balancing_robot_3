@@ -13,7 +13,7 @@ Drive, map, plot and tune the robot from any browser (phone, PC, Kindle). Python
 
 ```mermaid
 flowchart LR
-  T[Teensy 4.1<br>firmware v4] -- "USB serial<br>link protocol v2" --> B
+  T[Teensy 4.1<br>firmware v4] -- "USB serial<br>link protocol v3" --> B
   subgraph Pi[Orange Pi]
     B[bridge<br>python -m station.bridge] --> L[(~/sbr3-logs<br>sessions, 2 GB cap)]
   end

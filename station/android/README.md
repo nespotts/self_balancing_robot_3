@@ -22,7 +22,7 @@ flowchart LR
 <img src="../docs/screenshots/android-pick.png" width="23%">
 
 A simulator on the same Wi-Fi never wins over the real robot (it's only listed). On opening, a small label
-"Robot · 192.168.0.209" / "Simulator · …" shows for 4 s (also in the Drive ⋯ menu once the Pi has this branch).
+"Robot · 192.168.0.209" / "Simulator · …" shows for 4 s (also in the Drive ⋯ menu).
 
 ## Install
 
@@ -33,7 +33,7 @@ adb install -r station\android\build\BalanceBot.apk
 Or copy the APK to the phone and open it (allow "install unknown apps").
 Signing key: `%USERPROFILE%\.android\sbr3-station.jks` (made on the first build, never in the repo; keep it, a new key = uninstall first).
 
-The Pi serves the web UI: **pull this branch on the Pi** (`station/web`) so Tilt / Pad show up. Older Pi code still works, just without them.
+The Pi serves the web UI (`station/web`), including Tilt / Pad.
 
 ## Drive
 
@@ -51,7 +51,7 @@ The Pi serves the web UI: **pull this branch on the Pi** (`station/web`) so Tilt
 - No tilt samples for 300 ms, a gamepad silent for 400 ms, the app in the background, Wi-Fi gone → stop.
   The bridge also stops forwarding 300 ms after the last command (`python -m unittest discover -s station -t .` checks all of this in Chrome).
 - Buzz: E-stop (long), link lost (3 short), obstacle (2 short).
-- Plain http only to private LAN addresses (10/8, 172.16/12, 192.168/16, .local names); anything else is blocked.
+- Plain http only to private LAN addresses (10/8, 172.16/12, 192.168/16, loopback, link-local) and local names (single-label, .local, .lan, .internal, .home.arpa); anything else is blocked.
 
 ## Files
 
