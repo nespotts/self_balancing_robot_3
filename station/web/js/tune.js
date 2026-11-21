@@ -5,6 +5,7 @@ import { el, fmt, toast } from "./ui.js";
 import { Strip, S1, S2, S3, SUM } from "./chart.js";
 import "./tunetools.js";   // presets, scored runs, Balance / Motor test switch (issue #16)
 import "./motortest.js";
+import "./balpoint.js";   // Find balance point (issue #52)
 
 const GROUPS = { bal: "Balance", str: "Heading", vel: "Velocity", drv: "Driving", mot: "Motors",
   ctl: "Control loop", batt: "Battery", tlm: "Telemetry", rng: "Range sensor" };
