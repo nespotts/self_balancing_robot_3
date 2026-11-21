@@ -28,11 +28,24 @@ window.addEventListener("hashchange", () => show(location.hash.slice(1)));
 show(location.hash.slice(1) || "map");
 
 // ---------- STOP ----------
+// STOP latches (bridge + robot, link v4): nothing restarts the motors until "Release E-stop" (asks first),
+// and even then the robot stays disarmed until it is armed again.
 const stopBtn = document.getElementById("stop");
+const estopBar = document.getElementById("estop-bar");
 function estop() {
   if (!send({ t: "estop" })) toast("Not connected - STOP not sent!", 3000);
   stopBtn.classList.remove("flash"); void stopBtn.offsetWidth; stopBtn.classList.add("flash");
 }
+// latched: the bridge's flag, or the robot's own (remote_flags LINK_RF_LINK_ESTOP 0x08)
+function estopLatched() {
+  const s = state.status, t = state.tlm;
+  return !!(s?.estop || s?.robot_estop || (t && robotAlive() && (t.remote_flags & 0x08)));
+}
+document.getElementById("estop-release").onclick = () => {
+  if (!confirm("Release the E-stop?\n\nThe robot stays disarmed: arm it again (Arm & Balance, or the RC remote's ARMED switch off -> on) to drive.")) return;
+  // the bar goes away when the bridge / robot report the latch cleared; no link -> a no_link error toast
+  if (!send({ t: "estop_release" })) toast("Not connected - release not sent", 3000);
+};
 stopBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); estop(); });   // fire on touch-down, not release
 window.addEventListener("keydown", (e) => {
   if ((e.code === "Space" || e.code === "Escape") && !e.target.closest("input, textarea")) { e.preventDefault(); estop(); }
@@ -40,13 +53,13 @@ window.addEventListener("keydown", (e) => {
 
 // The bridge refuses robot commands while it has no link to the robot (and says so): show it once, here.
 on("error", (m) => {
-  if (m.code === "no_link" && m.text) toast(m.text.charAt(0).toUpperCase() + m.text.slice(1), 3500);
+  if ((m.code === "no_link" || m.code === "estop") && m.text) toast(m.text.charAt(0).toUpperCase() + m.text.slice(1), 3500);
 });
 
 // ---------- top bar ----------
 const pLink = document.getElementById("pill-link"), pMode = document.getElementById("pill-mode");
 const pArmed = document.getElementById("pill-armed"), pBatt = document.getElementById("pill-batt");
-let rcLost = false;
+let rcLost = false, navHandover = false;
 function setPill(p, text, cls) {
   p.querySelector(".txt").textContent = text;
   p.className = "pill " + (cls || "");
@@ -66,7 +79,13 @@ function updateTop() {
   rcLost = lost;
   const alive = robotAlive();
   setPill(pMode, t && alive ? modeName(t.mode) : "—", t && alive && t.mode !== 0 ? "mode-on" : "");
-  if (s?.estop) setPill(pArmed, "E-STOP", "estop");
+  const latched = estopLatched();
+  estopBar.hidden = !latched;
+  // GOTO / EXPLORE / HOLD paused because the RC remote was lost: needs it back, or a mode from here (link v4: 0x10)
+  const handover = !!(t && alive && (t.remote_flags & 0x10));
+  if (handover && !navHandover) toast("Remote lost: the robot stopped and waits. Pick the mode here to take over.", 5000);
+  navHandover = handover;
+  if (latched) setPill(pArmed, "E-STOP", "estop");
   else if (t && alive && (t.remote_flags & 1)) setPill(pArmed, "RC E-STOP", "estop");   // link v3: LINK_RF_ESTOP
   else if (t && alive) setPill(pArmed, flag("armed") ? (flag("upright") ? "ARMED" : "ARMED·DOWN") : "SAFE", flag("armed") ? "armed" : "");
   else setPill(pArmed, "—");

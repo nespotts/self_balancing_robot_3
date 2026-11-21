@@ -15,9 +15,10 @@
 //   0  PWM on EN, IN1/IN2 static for the direction: off-time = both bridge sides off = coast (fast decay)
 //   1  EN high, PWM on the IN pin of the direction, the other IN low: off-time = both INs low =
 //      motor shorted through the low side = brake (slow decay). Command 0 = brake (hold).
-// Mode 1 only at mot.pwm_hz <= mot.brake_max_hz (default 2000 Hz); above it mot.drive_mode 1 is
-// refused (mode 0 is used, logged once): brake decay at high PWM frequency heats the L298N more
-// (issues #23 / #26). Default mot.drive_mode 0.
+// Mode 1 only at mot.pwm_hz <= mot.brake_max_hz (default 2000 Hz) and with mot.model 1; else
+// mot.drive_mode 1 is refused (mode 0 is used, logged once): brake decay at high PWM frequency heats the
+// L298N more (issues #23 / #26), and brake + the v3 curve is far too hot near 0 (issue #40). Balancing in
+// mode 1: duty capped at mot.brake_duty_max (default 3000). Default mot.drive_mode 0.
 // Either way the motor sees ~ d * V_pack. motors_stop() (IDLE, disarm, E-stop, faults) is always
 // free-wheeling: EN low, both INs low, in both modes.
 // Direction changes: the IN pin going low is switched to GPIO low at once, before the other one
@@ -80,7 +81,8 @@ bool motors_test_begin(uint8_t drive_mode, float pwm_hz);
 void motors_test_end();
 void motors_stop();     // both free-wheeling (EN low), then applies a pending pwm_hz / drive_mode
 void motors_service();  // applies a pending pwm_hz / drive_mode if both motors are off (call often)
-bool motors_drive_mode_refused();  // mot.drive_mode 1 asked for above mot.brake_max_hz (mode 0 used)
+// mot.drive_mode 1 asked for but refused (mode 0 used): MotorDriveRefusal (motor_model.h), 0 = not refused
+uint8_t motors_drive_mode_refused();
 // True once after mot.pwm_hz / the drive mode were applied (for a log line).
 bool motors_take_config_changed();
 uint8_t motors_drive_mode();  // in use: 0 EN PWM (coast), 1 IN PWM (brake)

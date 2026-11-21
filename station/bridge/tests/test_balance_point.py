@@ -301,7 +301,7 @@ class TestWithSim(unittest.TestCase):
             self.assertEqual(first["state"], "idle")
 
             send(t="set_param", id=pid, value=1.0)        # the robot's real balance point is 3.15 deg
-            send(t="set_mode", mode=lp.MODE_BALANCE)
+            send(t="set_mode", mode=lp.MODE_BALANCE, arm=True)
             await wait_for(ws, lambda m: m["t"] == "tlm" and m["status"] & lp.TLM_UPRIGHT, 8)
             # not before it stands (the routine refuses to start on a moving robot), then run on its own
             end = time.monotonic() + 15

@@ -10,6 +10,25 @@
 #include <math.h>
 #include <stdint.h>
 
+// Balancing drive mode check (issue #40). mot.drive_mode 1 (brake decay) is used only if
+//   mot.pwm_hz <= mot.brake_max_hz (high-frequency brake decay heats the L298N, #23 / #26), and
+//   mot.model = 1 (the volts model: the v3 curve is far too hot near 0 in brake mode, motor-profile.md).
+// Returns the reason it is refused (mode 0 is used then), MOTOR_DRIVE_OK if not.
+enum MotorDriveRefusal : uint8_t { MOTOR_DRIVE_OK = 0, MOTOR_DRIVE_REFUSED_HZ = 1, MOTOR_DRIVE_REFUSED_MODEL = 2 };
+inline uint8_t motor_drive_refusal(bool want_brake, float pwm_hz, float brake_max_hz, float model) {
+  if (!want_brake) return MOTOR_DRIVE_OK;
+  if (pwm_hz > brake_max_hz) return MOTOR_DRIVE_REFUSED_HZ;
+  if (model < 0.5f) return MOTOR_DRIVE_REFUSED_MODEL;
+  return MOTOR_DRIVE_OK;
+}
+
+// Balancing command in drive mode 1: duty capped at mot.brake_duty_max (until the brake-mode heat checks,
+// motor-profile.md plan steps 3 / 6, are done; then set it to 4095). Mode 0: unchanged.
+inline float motor_brake_cap(float duty, uint8_t drive_mode, float brake_duty_max) {
+  if (drive_mode != 1) return duty;
+  return duty > brake_duty_max ? brake_duty_max : (duty < -brake_duty_max ? -brake_duty_max : duty);
+}
+
 // |in| 0..4095 -> PWM 0..4095. Below knee_in: knee_out * (in/knee_in)^(1/exp), above: linear to 4095.
 inline float motor_curve(float in, float exp, float knee_in, float knee_out) {
   in = fabsf(in);

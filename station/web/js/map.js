@@ -234,17 +234,19 @@ bClear.onclick = () => {
 bGo.onclick = () => {
   if (!state.connected) return toast("Not connected");
   const t = state.tlm, disarmed = t && !flag("armed");
-  if (disarmed && !t.radio_ok) {   // no remote: SET_MODE GOTO arms the motors
+  let arm = false;
+  if (disarmed && !t.radio_ok) {   // no remote: the station arms, after this explicit confirm
     if (!confirm("The robot is disarmed.\nArm it and drive to the waypoints?")) return;
+    arm = true;
   } else if (disarmed) toast("Waypoints sent - arm with the RC remote to go", 3500);
   if (pending.length) {
     const pts = pending.map((p) => [Math.round(p[0]), Math.round(p[1])]);
     // with a map: the bridge plans a route around obstacles through the tapped points (#12)
-    if (routeOn.get() && hasMap()) send({ t: "plan", action: "goto", points: pts });
-    else send({ t: "goto", points: pts, replace: true, go: true });
+    if (routeOn.get() && hasMap()) send({ t: "plan", action: "goto", points: pts, arm });
+    else send({ t: "goto", points: pts, replace: true, go: true, arm });
     pending = [];
   } else {
-    send({ t: "set_mode", mode: state.hello.modes.indexOf("GOTO") });
+    send({ t: "set_mode", mode: state.hello.modes.indexOf("GOTO"), arm });
   }
   updateBar(); dirty = true;
 };
@@ -257,7 +259,7 @@ bExplore.onclick = () => {
     ? "Explore: the robot arms and drives by itself to unmapped places until the room is mapped.\nSTOP ends it. Start?"
     : "Explore: the robot drives by itself to unmapped places until the room is mapped.\nSTOP ends it. Start?")) return;
   if (disarmed && t.radio_ok) toast("Arm with the RC remote to go", 3500);
-  send({ t: "plan", action: "explore" });
+  send({ t: "plan", action: "explore", arm: !!(disarmed && !t.radio_ok) });   // confirmed above
 };
 onChange(() => { dirty = true; updateBar(); });
 

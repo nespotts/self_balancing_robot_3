@@ -21,6 +21,16 @@ void Controller::reset(const CtlIn& in) {
   last_pitch_ = in.pitch;
 }
 
+void Controller::disengage() {
+  upright_ = false;
+  bal_i_ = str_i_ = vel_i_ = vel_out_ = vel_acc_dt_ = 0;
+  speed_sp_ = turn_sp_ = 0;
+  snap_heading_ = true;  // last_pitch_ / last_speed_ / heading_sp_ are re-taken by reset() on re-engage
+  out_.upright = false;
+  out_.active = false;
+  out_.left = out_.right = 0;
+}
+
 CtlOut Controller::step(const CtlIn& in) {
   CtlOut o;
   const float offset = P(P_BAL_OFFSET) + in.trim_deg;  // balance point is pitch = -offset

@@ -13,7 +13,7 @@ Drive, map, plot and tune the robot from any browser (phone, PC, Kindle). Python
 
 ```mermaid
 flowchart LR
-  T[Teensy 4.1<br>firmware v4] -- "USB serial<br>link protocol v3" --> B
+  T[Teensy 4.1<br>firmware v4] -- "USB serial<br>link protocol v4" --> B
   subgraph Pi[Orange Pi]
     B[bridge<br>python -m station.bridge] --> L[(~/sbr3-logs<br>sessions, 2 GB cap)]
   end
@@ -46,7 +46,7 @@ Screenshots: `python -m station.tools.screenshots --url http://localhost:8080/ -
 
 | | |
 |---|---|
-| **STOP** (or Space / Esc) | motors off, robot disarms |
+| **STOP** (or Space / Esc) | motors off, robot disarms, **latched**: no mode request (station, app, remote selector) starts the motors until **Release E-stop** (confirm), then arm again |
 | **Arm & Balance** | two taps. With no RC remote, the station arms the robot; with the remote, its switch does |
 | **Map** | tap to add waypoints, **Go** (asks before it arms the robot): with a map, the route goes around walls. **Explore**: the robot maps the room by itself |
 | **Drive** | joystick / WASD in STATION mode |
@@ -160,12 +160,12 @@ rm /tmp/sbr3-bridge.release                   # bridge reconnects
 
 | Send | |
 |---|---|
-| `{"t":"set_mode","mode":1}` | mode index from `hello.modes`; with no remote, non-IDLE arms |
+| `{"t":"set_mode","mode":1}` | mode index from `hello.modes`. With no remote it changes an armed robot's mode only; `"arm":true` (the UI's two-tap Arm step) arms with it (link v4: EVT_LINK_ARM first). Refused while E-stopped |
 | `{"t":"cmd_vel","speed":200,"turn":0}` | mm/s, °/s; forwarded only while sent (300 ms) |
-| `{"t":"estop"}` | |
+| `{"t":"estop"}` / `{"t":"estop_release"}` | latching E-stop (robot + bridge); release clears the latch only, the robot stays disarmed. `status.estop` = bridge latch, `status.robot_estop` = the robot's (`tlm.remote_flags` 0x08) |
 | `{"t":"set_param","id":0,"value":260}` / `{"t":"get_params"}` | |
 | `{"t":"cfg","action":"save"}` / `"defaults"` | EEPROM save / firmware defaults |
-| `{"t":"goto","points":[[x,y],...],"go":true}` / `{"t":"event","event":3}` | |
+| `{"t":"goto","points":[[x,y],...],"go":true}` / `{"t":"event","event":3}` | `go` + `"arm":true` arms (no remote); same for `{"t":"plan","action":"goto\|explore","arm":true}` |
 | `{"t":"sub","tune":true}` | receive every telemetry frame as `{"t":"tune","cols":[...],"rows":[...]}` |
 | `{"t":"preset"\|"score"\|"motor"\|"balpoint","action":...}` | Tune tools: see the docstring of `bridge/tuning_api.py` |
 
@@ -176,6 +176,7 @@ and for the Tune tools `presets`, `score_state`, `score_runs`, `motor_state`, `m
 No WebSocket (old Kindle): `GET /api/state`, `GET|POST /api/cmd`.
 The Android app uses `POST /api/cmd` when it is left: `cmd_vel 0`, `{"t":"plan","action":"stop"}`, and `set_mode` BALANCE if the
 robot is armed + upright in GOTO / EXPLORE (`plan stop` alone leaves the robot in GOTO / EXPLORE with its waypoints).
+That `set_mode` has no `arm`, so it can never arm a robot that was disarmed meanwhile.
 
 ### Who may command the robot
 

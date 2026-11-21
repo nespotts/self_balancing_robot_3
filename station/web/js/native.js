@@ -124,7 +124,7 @@ function init() {
     return { x: x * k, y: y * k };
   });
   const modeIdx = (n) => state.hello?.modes?.indexOf(n) ?? -1;
-  function setModeName(n) { const i = modeIdx(n); if (i >= 0) send({ t: "set_mode", mode: i }); }
+  function setModeName(n, arm) { const i = modeIdx(n); if (i >= 0) send({ t: "set_mode", mode: i, arm: !!arm }); }
   onNative("gamepadButton", (d) => {
     if (!d.down) return;
     switch (d.name) {
@@ -139,7 +139,7 @@ function init() {
       case "Y":
         if (disarmedNoRemote() && performance.now() - armAsk > 2500) { armAsk = performance.now(); toast("Press Y again to arm & balance", 2500); break; }
         armAsk = 0;
-        setModeName("BALANCE");
+        setModeName("BALANCE", disarmedNoRemote());   // the second Y press is the explicit arm step
         toast(disarmedNoRemote() ? "Arming - stand the robot up" : "BALANCE");
         break;
       case "A":

@@ -652,7 +652,8 @@ class TestNoLinkCommands(Base):
         for m in ({"t": "set_mode", "mode": 3}, {"t": "set_param", "id": 7, "value": 300}, {"t": "cfg", "action": "save"},
                   {"t": "goto", "points": [[1, 2]], "go": True}, {"t": "event", "event": 1}, {"t": "get_params"},
                   {"t": "preset", "action": "apply", "name": "x"}, {"t": "motor", "action": "start"},
-                  {"t": "plan", "action": "goto", "points": [[1, 2]]}, {"t": "plan", "action": "explore"}):
+                  {"t": "plan", "action": "goto", "points": [[1, 2]]}, {"t": "plan", "action": "explore"},
+                  {"t": "estop_release"}):
             r = b.handle_command(m, "test")
             self.assertEqual((r or {}).get("code"), "no_link", m)
             self.assertEqual(r["t"], "error")

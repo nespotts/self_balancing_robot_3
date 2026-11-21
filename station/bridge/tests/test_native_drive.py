@@ -114,7 +114,7 @@ class TestNativeDrive(unittest.TestCase):
         await self.until("!!(window.sbr3 && sbr3.state.connected && sbr3.state.tlm && sbr3.state.hello)", what="page connected")
 
     async def station(self, b):
-        await self.ev("sbr3.send({t: 'set_mode', mode: %d})" % lp.MODE_STATION)
+        await self.ev("sbr3.send({t: 'set_mode', mode: %d, arm: true})" % lp.MODE_STATION)
         await self.until("sbr3.state.tlm.mode === %d && (sbr3.state.tlm.status & %d)" % (lp.MODE_STATION, lp.TLM_ARMED),
                          what="STATION + armed")
         await self.until("!document.getElementById('joy').classList.contains('locked')", what="joystick unlocked")

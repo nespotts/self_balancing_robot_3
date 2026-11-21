@@ -335,7 +335,7 @@ class TestBridgeMapApi(unittest.TestCase):
             self.assertEqual(full["res_mm"], 25.0)
             await wait_for(ws, lambda m: m["t"] == "plan" and m["mode"] == "idle")
             # robot boots lying down: arm it so the sweep sees the room, tiles start coming
-            ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_BALANCE}))
+            ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_BALANCE, "arm": True}))
             d = await wait_for(ws, lambda m: m["t"] == "map" and not m["full"] and m["tiles"])
             self.assertTrue(d["tiles"][0][2])
             ws.send(json.dumps({"t": "map", "action": "save", "name": "t1"}))

@@ -1,4 +1,4 @@
-// Link protocol v1: Teensy 4.1 <-> Orange Pi over the Teensy's USB serial (the same cable the Pi
+// Link protocol (version below): Teensy 4.1 <-> Orange Pi over the Teensy's USB serial (the same cable the Pi
 // uses to flash the Teensy). The Pi bridge (station/) mirrors these definitions in Python;
 // keep station/bridge/link_protocol.py in sync with this file.
 //
@@ -14,7 +14,12 @@
 // v2: TelemetryFrame gained bal_p .. step at the end (balance tuning data).
 // v3: TelemetryFrame gained remote_flags, nav_state, nav_index, reserved2 (108 bytes);
 //     NavStatusFrame gained obstacle_mm (20 bytes). Older frames are shorter: receivers pad with 0.
-#define LINK_PROTOCOL_VERSION 3
+// v4: no layout change, new rules (safety review #38 / #41): link-only events EVT_LINK_ESTOP /
+//     EVT_LINK_ESTOP_RELEASE (latching station E-stop) and EVT_LINK_ARM (SET_MODE alone no longer
+//     arms), remote_flags bits LINK_RF_LINK_ESTOP / LINK_RF_NAV_HANDOVER, HeartbeatFrame.clients
+//     counts (0 = nobody watching: the Pi does not supervise). A v3 bridge can't arm a v4 robot
+//     without the remote (fail-safe); a v4 bridge works with v3 firmware (the events are ignored).
+#define LINK_PROTOCOL_VERSION 4
 #define LINK_SYNC1 0xA5
 #define LINK_SYNC2 0x5A
 #define LINK_MAX_PAYLOAD 200
@@ -34,17 +39,36 @@ enum LinkMsgType : uint8_t {
   // Pi -> Teensy
   MSG_HEARTBEAT = 0x80,   // HeartbeatFrame, 10 Hz
   MSG_CMD_VEL = 0x81,     // CmdVelFrame, used in MODE_STATION (and by Pi-side autonomy)
-  MSG_SET_MODE = 0x82,    // SetModeFrame. No remote present: a mode != IDLE also ARMS, IDLE disarms.
+  MSG_SET_MODE = 0x82,    // SetModeFrame. No remote present: IDLE disarms; a mode != IDLE arms only
+                          // right after EVT_LINK_ARM (else it just changes an armed robot's mode).
+                          // Ignored while the link E-stop is latched.
   MSG_SET_PARAM = 0x83,   // SetParamFrame. Echoed with a ParamInfoFrame holding the value actually
                           // applied (clamped to min..max). cfg.* params are actions, not settings:
                           // cfg.save = 1 -> write EEPROM (waits until the motors are off),
-                          // cfg.defaults = 1 -> all defaults (not saved, every ParamInfo re-sent);
-                          // both read back 0. mot.test = 1..4 starts the wheels-up motor test.
+                          // cfg.defaults = 1 -> all defaults (not saved, every ParamInfo re-sent;
+                          // also waits until the motors are off); both read back 0.
+                          // mot.test = 1..4 starts the wheels-up motor test.
   MSG_GET_PARAMS = 0x84,  // empty payload; reply: HelloFrame, then one ParamInfoFrame per param
   MSG_GOTO = 0x85,        // GotoFrame: add/replace waypoints. GOTO and EXPLORE follow the list;
                           // a new list while BLOCKED resumes.
-  MSG_EVENT = 0x86,       // EventFrame: same events as RadioEvent
+  MSG_EVENT = 0x86,       // EventFrame: same events as RadioEvent, plus the link-only LinkEvent values
 };
+
+// Link-only EventFrame.event values (never sent by the remote; RadioEvent values stay < EVT_COUNT).
+enum LinkEvent : uint8_t {
+  // Station E-stop: IDLE + disarm now, latched. While latched no mode request from any source
+  // (remote selector, SET_MODE, GO_HOME) can start the motors.
+  EVT_LINK_ESTOP = 0x80,
+  // Clears the latch only; the robot stays IDLE and disarmed. Then the normal arming rules:
+  // remote present -> its ARMED switch off -> on + a mode selection; no remote -> a SET_MODE != IDLE.
+  EVT_LINK_ESTOP_RELEASE = 0x81,
+  // Explicit arm request (no remote present): the next SET_MODE != IDLE within LINK_ARM_WINDOW_MS
+  // arms. Without it a SET_MODE never arms (it only changes the mode of an armed robot), so a stray
+  // or late mode request (another client, the app stopping in the background) can't start the motors.
+  // Ignored while an E-stop (remote or link) is latched. The bridge sends it for {"arm": true} only.
+  EVT_LINK_ARM = 0x82,
+};
+#define LINK_ARM_WINDOW_MS 500
 
 struct __attribute__((packed)) HelloFrame {
   uint8_t link_version;   // LINK_PROTOCOL_VERSION
@@ -91,6 +115,9 @@ struct __attribute__((packed)) TelemetryFrame {
 #define LINK_RF_ESTOP 0x01     // E-stop latched (from the remote); clears with a packet without it
 #define LINK_RF_ARM_WAIT 0x02  // arming needs the remote's ARMED switch off -> on (after boot / E-stop)
 #define LINK_RF_PRESENT 0x04   // remote packets in the last RADIO_LOST_MS (radio_ok = last 250 ms)
+#define LINK_RF_LINK_ESTOP 0x08  // station E-stop latched (EVT_LINK_ESTOP) until EVT_LINK_ESTOP_RELEASE
+#define LINK_RF_NAV_HANDOVER 0x10  // GOTO/EXPLORE/HOLD paused: the remote was lost, needs the remote back
+                                   // or a fresh SET_MODE from the station (issue #38)
 
 #if defined(__cplusplus) && __cplusplus >= 201103L
 static_assert(sizeof(TelemetryFrame) == 108, "TelemetryFrame size changed - bump LINK_PROTOCOL_VERSION");
@@ -140,7 +167,8 @@ static_assert(sizeof(NavStatusFrame) == 20, "NavStatusFrame size changed - bump 
 
 struct __attribute__((packed)) HeartbeatFrame {
   uint32_t pi_ms;
-  uint8_t clients;        // ground-station clients connected to the bridge
+  uint8_t clients;        // ground-station clients connected to the bridge (browsers / app / pollers,
+                          // not the planner). 0 = nobody watching: the Pi does not supervise.
 };
 
 struct __attribute__((packed)) CmdVelFrame {

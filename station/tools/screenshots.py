@@ -165,7 +165,7 @@ async def prep_tune(url):
                 pass
     await drain(1.5)
     send(t="set_param", id=params["tlm.hz"]["id"], value=400)
-    send(t="set_mode", mode=1)
+    send(t="set_mode", mode=1, arm=True)
     await drain(6)
     for name in ("v3 known good", "2026-11-21 (kd 7.15, ki 1500)"):
         send(t="preset", action="apply", name=name, confirm=True)
@@ -215,7 +215,7 @@ async def prep(url):
             except asyncio.TimeoutError:
                 pass
     await drain(1)
-    send(t="set_mode", mode=1)
+    send(t="set_mode", mode=1, arm=True)
     await drain(2)
     send(t="goto", points=[[1200, 0], [1800, -600], [2400, 300], [3300, 300]], replace=True, go=True)
     await drain(22)

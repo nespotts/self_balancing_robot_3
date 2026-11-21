@@ -91,9 +91,12 @@ PARAMS = [
     ("nav.corridor_mm", 220.0, 50.0, 1000.0), ("nav.obst_age_ms", 1500.0, 100.0, 10000.0),
     ("nav.floor_mm", 50.0, 0.0, 200.0), ("nav.backoff_mm", 0.0, 0.0, 500.0),
     ("nav.hold_kp", 2.0, 0.0, 20.0), ("nav.hold_max_speed", 150.0, 0.0, 1000.0), ("nav.hold_db_mm", 15.0, 0.0, 200.0),
+    # safety review #38: GOTO without range readings: speed cap (0 = paused); EXPLORE always pauses
+    ("nav.blind_speed", 150.0, 0.0, 1500.0),
 ]
 CELLS = 3
 WAYPOINT_MAX = 32         # src/config.h
+BLIND_MS = 3000           # Navigator::kBlindMs
 
 NAV_IDLE, NAV_TURNING, NAV_DRIVING, NAV_BLOCKED, NAV_ARRIVED, NAV_HOLDING = (
     lp.NAV_IDLE, lp.NAV_TURNING, lp.NAV_DRIVING, lp.NAV_BLOCKED, lp.NAV_ARRIVED, lp.NAV_HOLDING)
@@ -205,6 +208,8 @@ class Navigator:
         self.now_ms = 0
         self.pts = []                 # (x, y, t_ms), newest last, at most PTS
         self.last_range_ms = 0
+        self.sensed_ms = 0            # last range reading of any kind (valid or not)
+        self.warned_no_range = False
         self.sent = None
         self.sent_ms = 0
 
@@ -233,6 +238,7 @@ class Navigator:
     # ---- inputs
     def add_range(self, f, now_ms):
         P = self.P
+        self.sensed_ms = now_ms or 1          # the sweep is running (a "no target" reading counts too)
         if not f["valid"] or f["range_mm"] == 0:
             return
         a = f["sensor_angle_deg"]
@@ -265,10 +271,24 @@ class Navigator:
         if i["mode"] == lp.MODE_HOLD:
             self.hold = (i["x"], i["y"])
         if i["mode"] in NAV_MODES:
-            if not self.last_range_ms or i["now_ms"] - self.last_range_ms > 3000:
-                self.log("nav: no range readings - obstacle stop is off")
+            self.warned_no_range = self.blind(i["now_ms"])
+            if self.warned_no_range:
+                self._log_blind(i["mode"])
             if i["mode"] != lp.MODE_HOLD:
                 self.log("nav: %u waypoints, going to %u" % (n, self.idx + 1))
+
+    def blind(self, now_ms):
+        """No range reading for 3 s (rng.enable 0, sensor fault): no obstacle stop (safety review #38)."""
+        return not self.sensed_ms or now_ms - self.sensed_ms > BLIND_MS
+
+    def _log_blind(self, mode):
+        if mode == lp.MODE_EXPLORE or self.P("nav.blind_speed") <= 0:
+            self.log("nav: no range readings - obstacle stop is off: %s paused"
+                     % ("EXPLORE" if mode == lp.MODE_EXPLORE else "GOTO"))
+        elif mode == lp.MODE_GOTO:
+            self.log("nav: no range readings - obstacle stop is off: GOTO max %.0f mm/s" % self.P("nav.blind_speed"))
+        else:
+            self.log("nav: no range readings - obstacle stop is off")
 
     def on_pose_reset(self):
         self.wp = []
@@ -386,14 +406,24 @@ class Navigator:
         if self.phase == self.DONE and self.idx < n:
             self.phase = self.SEEK
         self._set_target(i, *self.wp[min(self.idx, n - 1)])
-        run = i["upright"] and i["live"]      # else paused: stand still, keep the state
+        # no range readings: EXPLORE pauses; GOTO is capped at nav.blind_speed (0 = pauses)
+        no_range = self.blind(i["now_ms"])
+        if no_range != self.warned_no_range:
+            self.warned_no_range = no_range
+            if no_range:
+                self._log_blind(i["mode"])
+            else:
+                self.log("nav: range readings back - obstacle stop on")
+        blind_v = P("nav.blind_speed")
+        blind_stop = no_range and (i["mode"] == lp.MODE_EXPLORE or blind_v <= 0)
+        run = i["upright"] and i["live"] and not blind_stop   # else paused: stand still, keep the state
         if self.phase == self.DONE:           # arrived: hold the last point
             self.state = NAV_ARRIVED
             self.obst = self.front
             if run:
                 self.speed = self._hold_speed(i, self.tx, self.ty)
             return
-        vmax = min(P("nav.max_speed"), i["max_speed"])
+        vmax = min(P("nav.max_speed"), i["max_speed"], blind_v if no_range else 1e9)
         tmax = min(P("nav.max_turn"), i["max_turn"])
         arrive = P("nav.arrive_mm")
         stopped = abs(i["speed"]) < P("nav.stop_speed") and abs(i["yaw_rate"]) < P("nav.stop_turn_dps")
@@ -652,6 +682,11 @@ class SimRobot:
         self.mode = lp.MODE_IDLE
         self.save_pending = False
         self.save_wait_logged = False
+        self.defaults_pending = False     # cfg.defaults waits for the motors off too (issue #42)
+        self.defaults_wait_logged = False
+        self.link_estop = False           # station E-stop latch (EVT_LINK_ESTOP, issue #41)
+        self.arm_req = None               # time of the last EVT_LINK_ARM (explicit arm request), s
+        self.pi_clients = 0               # HeartbeatFrame.clients (0 = nobody watching, issue #38)
         self.step_n = 0
         self.last_tlm = -1.0
         self.rate_t0, self.rate_n0, self.loop_hz = 0.0, 0, 0.0
@@ -735,6 +770,7 @@ class SimRobot:
         d = lp.decode(t, p)
         if t == lp.MSG_HEARTBEAT:
             self.last_hb = self.now()
+            self.pi_clients = d["clients"]
             if not self.pi_link:
                 self.pi_link = True
                 self.log("pi link up (%d clients)" % d["clients"])
@@ -744,7 +780,11 @@ class SimRobot:
                 self.cmd_time = self.now()
                 self.cmd_valid = True
         elif t == lp.MSG_SET_MODE:
-            self.set_mode(d["mode"])
+            r = self.set_mode(d["mode"])
+            if r == "estop":
+                self.log("SET_MODE %u ignored: station E-stop latched (release it first)" % d["mode"])
+            elif r == "not_armed":
+                self.log("SET_MODE %u ignored: not armed (arm first)" % d["mode"])
         elif t == lp.MSG_SET_PARAM:
             self.set_param(d["id"], d["value"])
         elif t == lp.MSG_GET_PARAMS:
@@ -759,7 +799,22 @@ class SimRobot:
                     self.log("waypoints: list full (%u), %u dropped" % (WAYPOINT_MAX, d["count"] - added))
                 self.nav.list_changed(bool(d["replace"]))   # also resumes from BLOCKED
         elif t == lp.MSG_EVENT:
-            self.on_event(d["event"])
+            ev = d["event"]
+            if ev == lp.EVT_LINK_ESTOP:            # latching station E-stop (main.cpp onLinkFrame)
+                if not self.link_estop:
+                    self.log("E-STOP (station): latched, motors off")
+                self.link_estop, self.armed, self.requested, self.arm_req = True, False, lp.MODE_IDLE, None
+                self._update_mode()
+            elif ev == lp.EVT_LINK_ESTOP_RELEASE:
+                if self.link_estop:
+                    self.link_estop, self.armed, self.requested, self.arm_req = False, False, lp.MODE_IDLE, None
+                    self.log("E-stop released: re-arm with the remote (ARMED off -> on)" if self.radio_live()
+                             else "E-stop released: arm from the station to continue")
+            elif ev == lp.EVT_LINK_ARM:
+                if not self.link_estop:
+                    self.arm_req = self.now()
+            else:
+                self.on_event(ev)
 
     def set_param(self, pid, value):
         """params_set(): clamp + apply, echo the applied value. cfg.* are actions and read back 0."""
@@ -773,10 +828,7 @@ class SimRobot:
             v = 0.0
         elif pr[0] == "cfg.defaults":
             if v >= 0.5:
-                for p, (_n, dflt, _lo, _hi) in zip(self.params, PARAMS):
-                    p[1] = dflt
-                self.out += self.param_frames()   # firmware re-streams every param
-                self.log("params: defaults restored (not saved)")
+                self.defaults_pending = True    # done in step() once the motors are off (issue #42)
             v = 0.0
         pr[1] = v
         self.out += self.param_frames([pid])     # echo = ack
@@ -797,7 +849,8 @@ class SimRobot:
             self.nav.clear_list()
             self.nav.add(hx, hy)
             self.nav.list_changed(True)
-            self.requested = lp.MODE_GOTO
+            if not self.link_estop:            # ModeManager::requestMode: ignored while latched
+                self.requested = lp.MODE_GOTO
             self.log("GO_HOME: to %.0f, %.0f" % (hx, hy))
         elif ev == lp.EVT_RESET_POSE:
             h_old = th
@@ -809,16 +862,29 @@ class SimRobot:
             self.log("START_SCAN: the sweep runs all the time while rng.enable = 1" if self.P("rng.enable") >= 0.5
                      else "START_SCAN: rng.enable is 0")
 
-    def set_mode(self, mode):
-        """ModeManager::onPiSetMode."""
+    def set_mode(self, mode, arm=False):
+        """ModeManager::onPiSetMode: ignored while the link E-stop is latched; with no remote IDLE disarms and
+        a mode != IDLE arms only right after an EVT_LINK_ARM (else it changes an armed robot's mode)."""
         if not 0 <= mode < lp.MODE_COUNT:
-            return
-        self.requested = mode
+            return "bad"
+        if arm and not self.link_estop:        # Python callers (tour, tests): as if EVT_LINK_ARM came first
+            self.arm_req = self.now()
+        if self.link_estop:
+            return "estop"
+        arm_req = self.arm_req is not None and self.now() - self.arm_req <= lp.LINK_ARM_WINDOW_MS / 1000.0
+        self.arm_req = None
         if not self.radio_live():
-            self.armed = mode != lp.MODE_IDLE
+            if mode == lp.MODE_IDLE:
+                self.armed = False
+            elif not self.armed:
+                if not arm_req:
+                    return "not_armed"
+                self.armed = True
+        self.requested = mode
+        return "ok"
 
     def _update_mode(self):
-        eff = self.requested if self.armed else lp.MODE_IDLE
+        eff = self.requested if self.armed and not self.link_estop else lp.MODE_IDLE
         if eff == self.mode:
             return
         if eff != lp.MODE_IDLE and self.mode == lp.MODE_IDLE:
@@ -834,8 +900,9 @@ class SimRobot:
 
     # ---------------------------------------------------------------- targets (ModeManager::update + navigator)
     def supervised(self):
-        """ModeManager::supervised: remote live, or (no remote) the Pi heartbeat."""
-        return self.remote or self.pi_link
+        """ModeManager::supervised: remote live, or (no remote) the Pi heartbeat with a client connected.
+        (The sim's remote never drops out, so the handover rule after a remote loss is not simulated.)"""
+        return self.remote or (self.pi_link and self.pi_clients > 0)
 
     def _nav_in(self, now):
         x, y, th = self.odom()
@@ -963,6 +1030,16 @@ class SimRobot:
             elif not self.save_wait_logged:
                 self.save_wait_logged = True
                 self.log("params: save waits until the motors are off")
+        if self.defaults_pending:                     # cfg.defaults also waits for the motors off (#42)
+            if not o["active"] and not any(self.mtest.duty):
+                self.defaults_pending = self.defaults_wait_logged = False
+                for p, (_n, dflt, _lo, _hi) in zip(self.params, PARAMS):
+                    p[1] = dflt
+                self.out += self.param_frames()   # firmware re-streams every param
+                self.log("params: defaults restored (not saved)")
+            elif not self.defaults_wait_logged:
+                self.defaults_wait_logged = True
+                self.log("params: defaults wait until the motors are off")
         if not o["active"]:
             self.dt = 1.0 / self.P("ctl.rate_hz")   # ctl.rate_hz applies with the motors off
 
@@ -1063,7 +1140,8 @@ class SimRobot:
             "battery_v": batt_v + rng.gauss(0, 0.01), "loop_hz": self.loop_hz,
             "bal_p": o["bal_p"], "bal_i": o["bal_i"], "bal_d": o["bal_d"], "steer_out": o["steer"],
             "vel_out_deg": o["vel_out"], "step": self.step_n & 0xFFFFFFFF,
-            "remote_flags": lp.LINK_RF_PRESENT if self.radio_live() else 0,
+            "remote_flags": (lp.LINK_RF_PRESENT if self.radio_live() else 0) |
+                            (lp.LINK_RF_LINK_ESTOP if self.link_estop else 0),
             "nav_state": self.nav.state, "nav_index": min(255, self.nav.idx), "reserved2": 0,
         })
 

@@ -39,6 +39,10 @@ class Controller {
   void onModeChange() { snap_heading_ = true; }
   // Heading frame shifted by delta (pose reset): move the target with it.
   void shiftHeading(float delta) { heading_sp_ += delta; }
+  // Motors were stopped outside step() (IMU dropout / stale, disarm): forget being upright, the
+  // integrators, ramps and D history, so the next step must re-engage inside bal.reengage_deg and
+  // goes through ctl.settle_ms again (issue #39).
+  void disengage();
   const CtlOut& last() const { return out_; }
 
  private:

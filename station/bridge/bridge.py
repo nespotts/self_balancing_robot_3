@@ -36,7 +36,7 @@ LOG_RETRY_S = 30.0                # session log could not be opened: try again t
 TICK_LATE_S = 0.2                 # warn in the log when the event loop was blocked this long (#45)
 TLM_HZ_GRACE_S = 10.0             # Tune closed this long ago -> put tlm.hz back (#46)
 # Commands that act on the robot: refused with an error while there is no link (#48)
-NEEDS_LINK = {"set_mode", "set_param", "cfg", "get_params", "goto", "event"}
+NEEDS_LINK = {"set_mode", "set_param", "cfg", "get_params", "goto", "event", "estop_release"}  # release: the robot latches too
 NEEDS_LINK_ACTION = {"preset": ("apply",), "motor": ("start", "apply"), "plan": ("goto", "explore")}
 NO_LINK_TEXT = "robot not connected"
 POLLER_TIMEOUT_S = 3.0
@@ -68,6 +68,13 @@ def _num(v, default=0.0, lo=-1e9, hi=1e9):
     if not math.isfinite(v):
         return default
     return max(lo, min(hi, v))
+
+
+def _flag(v):
+    """A boolean field from JSON (true / 1) or a query string ("1", "true")."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
 
 
 def _sig(v):
@@ -147,9 +154,10 @@ class Bridge:
         self.cmd = (0.0, 0.0)
         self.cmd_time = -10.0
         self.cmd_active = False
-        self.estop = False
+        self.estop = False              # station E-stop latched (cleared only by "estop_release")
         self.estop_time = -10.0
         self.estop_repeats = []
+        self.robot_estop = False        # robot reports its link E-stop latch (remote_flags, v4 firmware)
 
         self.clients = set()
         self.pollers = {}               # ip -> last poll time (Kindle polling page, #11)
@@ -303,8 +311,9 @@ class Bridge:
             last = self.track[-1] if self.track else None
             if last is None or abs(d["x_mm"] - last[0]) + abs(d["y_mm"] - last[1]) > 20:
                 self.track.append([int(d["x_mm"]), int(d["y_mm"])])
-            if self.estop and d["mode"] != lp.MODE_IDLE and _now() - self.estop_time > 0.5:
-                self.estop = False
+            rf = (d["remote_flags"] & lp.LINK_RF_LINK_ESTOP) != 0
+            if rf != self.robot_estop:          # the robot's own latch (v4 firmware)
+                self.robot_estop = rf
                 self.push_status()
         elif t == lp.MSG_RANGE:
             d = lp.decode_range(p)
@@ -349,6 +358,8 @@ class Bridge:
             if _now() - self.last_get_params > 2.0:
                 self.send(lp.encode_get_params())
                 self.last_get_params = _now()
+            if self.estop:                     # Teensy rebooted while latched here: latch it there again
+                self.send(lp.encode_event(lp.EVT_LINK_ESTOP))
 
     def _add_tune(self, d):
         # robot time (exact step spacing) mapped onto the Pi clock the browser plots use
@@ -424,6 +435,7 @@ class Bridge:
                     self.send(lp.encode_cmd_vel(*self.cmd))
             while self.estop_repeats and now >= self.estop_repeats[0]:
                 self.estop_repeats.pop(0)
+                self.send(lp.encode_event(lp.EVT_LINK_ESTOP))
                 self.send(lp.encode_set_mode(lp.MODE_IDLE))
             if self.get_params_at is not None and now >= self.get_params_at:
                 self.get_params_at = None
@@ -548,7 +560,8 @@ class Bridge:
             "rng_hz": [round(h, 1) for h in self.rng_hz],     # range readings/s, sensor 0 and 1
             "crc_errors": self.parser.crc_errors, "frames": self.parser.frames_ok,
             "clients": self.client_count(), "session": self.log.name if self.log.f else None,
-            "estop": self.estop, "cmd_active": self.cmd_active, "remote_seen": self.remote_seen,
+            "estop": self.estop, "robot_estop": self.robot_estop,
+            "cmd_active": self.cmd_active, "remote_seen": self.remote_seen,
             "uptime_s": int(now - self.t_start), "release_file": self.release_file,
             "tlm_boost": self.hz_base is not None,         # tlm.hz raised by the Tune page, restored when it closes
             "tlm_base": self.hz_base,                      # ... and what it goes back to
@@ -592,16 +605,18 @@ class Bridge:
                 return {"t": "error", "code": "no_link", "text": "robot link down - STOP may not have reached the robot"}
             return None
         self.log.record("cmd", dict(m, who=who))
+        if t == "estop_release":
+            return self.do_estop_release(who)
         if t == "set_mode":
             mode = int(_num(m.get("mode"), -1))
             if not 0 <= mode < lp.MODE_COUNT:
                 return {"t": "error", "text": "bad mode"}
-            self.send(lp.encode_set_mode(mode))
+            if mode != lp.MODE_IDLE and self.estop:
+                return {"t": "error", "code": "estop", "text": "E-stop is on: release it first"}
+            self.send_mode(mode, _flag(m.get("arm")))
             if who != "planner" and mode not in (lp.MODE_GOTO, lp.MODE_EXPLORE):
                 self.planner.stop("stopped: mode %s from %s" % (lp.MODE_NAMES[mode], who))
-            if mode != lp.MODE_IDLE:
-                self.estop = False
-            self.say("%s: mode -> %s" % (who, lp.MODE_NAMES[mode]))
+            self.say("%s: mode -> %s%s" % (who, lp.MODE_NAMES[mode], " (arm)" if _flag(m.get("arm")) else ""))
         elif t == "set_param":
             pid = int(_num(m.get("id"), -1))
             if pid not in self.params:
@@ -644,8 +659,9 @@ class Bridge:
             self.waypoints = (pts if replace else self.waypoints + pts)
             self.broadcast(json.dumps({"t": "waypoints", "points": self.waypoints}))
             if m.get("go"):
-                self.send(lp.encode_set_mode(lp.MODE_GOTO))
-                self.estop = False
+                if self.estop:
+                    return {"t": "error", "code": "estop", "text": "waypoints sent; E-stop is on: release it first"}
+                self.send_mode(lp.MODE_GOTO, _flag(m.get("arm")))
             if who != "planner":                       # (the planner re-sends routes often)
                 self.say("%s: %d waypoint(s)%s" % (who, len(pts), " -> GOTO" if m.get("go") else ""))
         elif t == "event":
@@ -671,12 +687,21 @@ class Bridge:
         elif t == "map":       # occupancy grid: reset / save / load / list / delete / set (#12)
             return self.mapper.command(m, who)
         elif t == "plan":      # route planning / explore: goto / explore / stop / set
+            if self.estop and m.get("action") in ("goto", "explore"):
+                return {"t": "error", "code": "estop", "text": "E-stop is on: release it first"}
             return self.planner.command(m, who)
         elif t == "ping":
             return {"t": "pong", "id": m.get("id")}
         else:
             return {"t": "error", "text": "unknown command %r" % t}
         return None
+
+    def send_mode(self, mode, arm=False):
+        """SET_MODE. arm (an explicit user arm step, e.g. the two-tap Arm & Balance): EVT_LINK_ARM first, so
+        with no remote present this SET_MODE may arm the robot. Without it a SET_MODE never arms (v4 firmware)."""
+        if arm and mode != lp.MODE_IDLE:
+            self.send(lp.encode_event(lp.EVT_LINK_ARM))
+        self.send(lp.encode_set_mode(mode))
 
     @staticmethod
     def _needs_link(t, action):
@@ -686,8 +711,11 @@ class Bridge:
             return False
 
     def do_estop(self, who):
+        """Station E-stop: latched in the robot (EVT_LINK_ESTOP, v4) and here; SET_MODE IDLE for older firmware.
+        Stays on until "estop_release" (then the robot still needs arming)."""
         self.cmd = (0.0, 0.0)
         self.cmd_active = False
+        self.send(lp.encode_event(lp.EVT_LINK_ESTOP))
         self.send(lp.encode_set_mode(lp.MODE_IDLE))
         self.send(lp.encode_cmd_vel(0.0, 0.0))
         now = _now()
@@ -698,6 +726,18 @@ class Bridge:
         self.log.record("cmd", {"t": "estop", "who": who})
         self.say("E-STOP from %s" % who)
         self.push_status()
+
+    def do_estop_release(self, who):
+        """Clear the station E-stop latch. The robot stays IDLE and disarmed: arm again (remote ARMED
+        off -> on, or the station's Arm step)."""
+        if not self.estop and not self.robot_estop:
+            return None
+        self.estop_repeats = []          # a pending E-stop repeat must not re-latch it after the release
+        self.estop = False
+        self.send(lp.encode_event(lp.EVT_LINK_ESTOP_RELEASE))
+        self.say("E-stop released by %s (robot stays disarmed until armed again)" % who)
+        self.push_status()
+        return None
 
     # ------------------------------------------------------------------ clients
     def hello_msg(self):

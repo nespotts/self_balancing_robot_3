@@ -129,8 +129,8 @@ class TestAppStop(unittest.TestCase):
 
         try:
             await until(lambda: b.tlm is not None, "telemetry")
-            # arm (no remote: non-IDLE arms) and stand up, like the app's Drive screen would
-            await apost({"t": "set_mode", "mode": lp.MODE_STATION})
+            # arm (no remote: the explicit arm request + a mode) and stand up, like the app's Arm step
+            await apost({"t": "set_mode", "mode": lp.MODE_STATION, "arm": True})
             await until(lambda: b.tlm["mode"] == lp.MODE_STATION and b.tlm["status"] & lp.TLM_UPRIGHT, "STATION upright")
 
             # ---- Explore from the phone, then the app is left
@@ -181,6 +181,11 @@ class TestAppStop(unittest.TestCase):
             await asyncio.sleep(0.4)
             self.assertEqual(b.tlm["mode"], lp.MODE_IDLE)
             self.assertFalse(b.tlm["status"] & lp.TLM_ARMED, "the stop did not arm the robot")
+            # the race the old rule had: a late / stray set_mode BALANCE (what AppStop sends) never arms
+            await apost({"t": "set_mode", "mode": lp.MODE_BALANCE})
+            await asyncio.sleep(0.4)
+            self.assertEqual(b.tlm["mode"], lp.MODE_IDLE)
+            self.assertFalse(b.tlm["status"] & lp.TLM_ARMED, "a plain set_mode did not arm the robot")
         finally:
             for t in tasks + [phys]:
                 t.cancel()

@@ -77,8 +77,11 @@ class TestBridgeWithSim(unittest.TestCase):
             st = await wait_for(ws, lambda m: m["t"] == "status" and min(m["rng_hz"]) > 5)
             self.assertLess(max(st["rng_hz"]), 20)                   # ~12.5/s per sensor while sweeping
 
-            # no remote: SET_MODE != IDLE arms; the controller engages and reports P/I/D
+            # no remote: a plain SET_MODE never arms (link v4) ...
             ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_STATION}))
+            await wait_for(ws, lambda m: m["t"] == "log" and "ignored: not armed" in m["text"])
+            # ... the explicit arm step does; the controller engages and reports P/I/D
+            ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_STATION, "arm": True}))
             await wait_for(ws, lambda m: m["t"] == "tlm" and m["mode"] == lp.MODE_STATION
                            and m["status"] & lp.TLM_ARMED)
             await wait_for(ws, lambda m: m["t"] == "tlm" and m["status"] & lp.TLM_UPRIGHT)
@@ -119,16 +122,20 @@ class TestBridgeWithSim(unittest.TestCase):
             ws.send(json.dumps({"t": "sub", "tune": False}))
             ws.send(json.dumps({"t": "set_param", "id": names["tlm.hz"]["id"], "value": 100}))
 
-            # cfg.save waits for the motors to be off; cfg.defaults restores (and the list is re-sent)
+            # cfg.save and cfg.defaults both wait for the motors to be off (issue #42); then the save runs
+            # first, the defaults after it (and the list is re-sent)
             ws.send(json.dumps({"t": "cfg", "action": "save"}))
             await wait_for(ws, lambda m: m["t"] == "log" and "save waits" in m["text"])
             ws.send(json.dumps({"t": "cfg", "action": "defaults"}))
-            await wait_for(ws, lambda m: m["t"] == "params" and
-                           any(p["id"] == pid and p["value"] == 250 for p in m["list"]))
+            await wait_for(ws, lambda m: m["t"] == "log" and "defaults wait" in m["text"])
+            self.assertEqual(b.params[pid]["value"], 260)                   # still the tuned value mid-balance
             ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_IDLE}))      # no remote: IDLE disarms
             await wait_for(ws, lambda m: m["t"] == "log" and m["text"] == "params: saved")
+            await wait_for(ws, lambda m: m["t"] == "params" and
+                           any(p["id"] == pid and p["value"] == 250 for p in m["list"]))
+            self.assertEqual(robot.eeprom[pid], 260)                              # the save did not write defaults
             await wait_for(ws, lambda m: m["t"] == "tlm" and not m["status"] & lp.TLM_ARMED)
-            ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_STATION}))
+            ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_STATION, "arm": True}))
             await wait_for(ws, lambda m: m["t"] == "tlm" and m["status"] & lp.TLM_UPRIGHT)
 
             # goto
@@ -137,10 +144,21 @@ class TestBridgeWithSim(unittest.TestCase):
             await wait_for(ws, lambda m: m["t"] == "nav" and m["waypoint_count"] == 2)
             await wait_for(ws, lambda m: m["t"] == "tlm" and m["mode"] == lp.MODE_GOTO)
 
-            # e-stop -> IDLE
+            # e-stop -> IDLE, latched in the bridge and the robot (issue #41)
             ws.send(json.dumps({"t": "estop"}))
             await wait_for(ws, lambda m: m["t"] == "status" and m["estop"])
             await wait_for(ws, lambda m: m["t"] == "tlm" and m["mode"] == lp.MODE_IDLE, 2)
+            await wait_for(ws, lambda m: m["t"] == "tlm" and m["remote_flags"] & lp.LINK_RF_LINK_ESTOP, 2)
+            await wait_for(ws, lambda m: m["t"] == "status" and m["robot_estop"])
+            ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_STATION, "arm": True}))   # refused by the bridge
+            await wait_for(ws, lambda m: m["t"] == "error" and "E-stop" in m["text"])
+            robot.on_frame(lp.MSG_EVENT, lp.encode_event(lp.EVT_LINK_ARM)[4:-2])            # and by the robot
+            robot.on_frame(lp.MSG_SET_MODE, lp.encode_set_mode(lp.MODE_STATION)[4:-2])
+            await asyncio.sleep(0.3)
+            self.assertEqual(b.tlm["mode"], lp.MODE_IDLE)
+            ws.send(json.dumps({"t": "estop_release"}))
+            await wait_for(ws, lambda m: m["t"] == "status" and not m["estop"] and not m["robot_estop"])
+            self.assertEqual(b.tlm["mode"], lp.MODE_IDLE)                    # release alone never arms
 
             # HTTP polling endpoint (Kindle)
             st = json.loads(await loop.run_in_executor(None, http_get, "/api/state?r=0&params=1"))
@@ -148,7 +166,7 @@ class TestBridgeWithSim(unittest.TestCase):
             self.assertTrue(st["ranges"])
             self.assertIn("pitch_deg", st["tlm"])
             self.assertTrue(st["params"])
-            r = json.loads(await loop.run_in_executor(None, http_get, "/api/cmd?t=set_mode&mode=1"))
+            r = json.loads(await loop.run_in_executor(None, http_get, "/api/cmd?t=set_mode&mode=1&arm=1"))
             self.assertEqual(r["t"], "ok")
             await wait_for(ws, lambda m: m["t"] == "tlm" and m["mode"] == lp.MODE_BALANCE)
 

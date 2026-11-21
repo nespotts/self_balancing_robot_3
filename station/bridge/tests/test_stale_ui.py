@@ -100,8 +100,8 @@ class TestStaleUi(unittest.TestCase):
             self.assertTrue(await self.ev("%s.every(b => !b.disabled)" % modes))
             self.assertEqual(await self.ev("%s.filter(b => b.classList.contains('on')).map(b => b.dataset.name)" % modes), ["IDLE"])
 
-            # arm (station arms with SET_MODE when there is no RC remote), then GOTO / EXPLORE need two taps
-            await self.ev("sbr3.send({t: 'set_mode', mode: %d})" % lp.MODE_STATION)
+            # arm (no RC remote: the explicit arm step), then GOTO / EXPLORE need two taps
+            await self.ev("sbr3.send({t: 'set_mode', mode: %d, arm: true})" % lp.MODE_STATION)
             await self.until("sbr3.state.tlm.mode === %d" % lp.MODE_STATION, what="STATION")
             await self.ev("__sent.length = 0")
             tap = "document.querySelector('#modes [data-name=%s]')"
