@@ -12,7 +12,7 @@ flowchart LR
   S["simulator<br>python -m station.sim"] -. "same protocol" .-> P
 ```
 
-`HELLO link v4 radio v2 params 94`
+`HELLO link v4 radio v2 params 96`
 
 ## Quick start (30 s)
 

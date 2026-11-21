@@ -93,6 +93,8 @@ PARAMS = [
     ("nav.hold_kp", 2.0, 0.0, 20.0), ("nav.hold_max_speed", 150.0, 0.0, 1000.0), ("nav.hold_db_mm", 15.0, 0.0, 200.0),
     # safety review #38: GOTO without range readings: speed cap (0 = paused); EXPLORE always pauses
     ("nav.blind_speed", 150.0, 0.0, 1500.0),
+    ("mot.left_dir", 1.0, -1.0, 1.0),
+    ("mot.right_dir", 1.0, -1.0, 1.0),
 ]
 CELLS = 3
 WAYPOINT_MAX = 32         # src/config.h

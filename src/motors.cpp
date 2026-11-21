@@ -88,6 +88,9 @@ void Motor::off() {
 }
 
 void Motor::drive(float pwm_signed) {
+  // Wiring direction (mot.left_dir / mot.right_dir): flipped here, below every caller (balance loop,
+  // speed loop, motor test), so a + command always means "wheel forward" whatever the wires do.
+  if (P((ParamId)dir_) < 0.0f) pwm_signed = -pwm_signed;
   float a = fabsf(pwm_signed);
   if (a > MOTOR_FULL) a = MOTOR_FULL;
   const int duty = (int)(a + 0.5f);
@@ -183,8 +186,10 @@ void Motor::setRaw(float duty) {
   drive(duty);
 }
 
-static Motor g_left(pins::MOT_L_EN, pins::MOT_L_D1, pins::MOT_L_D2, P_MOT_DZ_L_FWD, P_MOT_DZ_L_REV, P_MOT_K_L);
-static Motor g_right(pins::MOT_R_EN, pins::MOT_R_D1, pins::MOT_R_D2, P_MOT_DZ_R_FWD, P_MOT_DZ_R_REV, P_MOT_K_R);
+static Motor g_left(pins::MOT_L_EN, pins::MOT_L_D1, pins::MOT_L_D2, P_MOT_DZ_L_FWD, P_MOT_DZ_L_REV, P_MOT_K_L,
+                    P_MOT_LEFT_DIR);
+static Motor g_right(pins::MOT_R_EN, pins::MOT_R_D1, pins::MOT_R_D2, P_MOT_DZ_R_FWD, P_MOT_DZ_R_REV, P_MOT_K_R,
+                     P_MOT_RIGHT_DIR);
 
 // mot.pwm_hz, or its default while the params are not loaded yet (motors_begin runs first: all 0)
 static float validHz(float hz) {

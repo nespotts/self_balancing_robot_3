@@ -74,6 +74,8 @@ Gains are br3ttb units: ki per second, kd seconds.
 | nav.backoff_mm | 0 | when blocked, back off this far (rear checked too) |
 | nav.hold_kp / hold_max_speed / hold_db_mm | 2 /s / 150 mm/s / 15 mm | HOLD position loop |
 | nav.blind_speed | 150 mm/s | GOTO speed cap with no range readings for 3 s (`rng.enable 0`); 0 = GOTO pauses too. EXPLORE always pauses |
+| mot.left_dir | 1 | Left motor wiring: -1 if its wires are swapped (fixed in software) |
+| mot.right_dir | 1 | Right motor wiring: -1 if its wires are swapped |
 
 ¹ applied between readings, only while the motors are off. ² applied only while both motors are off
 (disarm / IDLE / fallen; log line `mot: drive_mode …, pwm … Hz`). Everything else applies at once.

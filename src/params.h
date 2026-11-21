@@ -108,7 +108,10 @@
   X(NAV_HOLD_MAX,    "nav.hold_max_speed", 150.0f,    0.0f,    1000.0f)  \
   X(NAV_HOLD_DB_MM,  "nav.hold_db_mm",     15.0f,     0.0f,    200.0f)   \
   /* safety review #38: GOTO without range readings (rng.enable 0): speed cap, 0 = refuse */ \
-  X(NAV_BLIND_SPEED, "nav.blind_speed",    150.0f,    0.0f,    1500.0f)
+  X(NAV_BLIND_SPEED, "nav.blind_speed",    150.0f,    0.0f,    1500.0f)  \
+  /* motor wiring: -1 = that motor's wires are swapped; fixed in software at the lowest level */ \
+  X(MOT_LEFT_DIR,    "mot.left_dir",       1.0f,      -1.0f,   1.0f)     \
+  X(MOT_RIGHT_DIR,   "mot.right_dir",      1.0f,      -1.0f,   1.0f)
 
 enum ParamId : uint16_t {
 #define PARAM_ENUM(id, name, def, mn, mx) P_##id,

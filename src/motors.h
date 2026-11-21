@@ -37,8 +37,8 @@
 
 class Motor {
  public:
-  Motor(uint8_t en, uint8_t d1, uint8_t d2, uint16_t dz_fwd, uint16_t dz_rev, uint16_t k)
-      : pin_{en, d1, d2}, dz_fwd_(dz_fwd), dz_rev_(dz_rev), k_(k) {}
+  Motor(uint8_t en, uint8_t d1, uint8_t d2, uint16_t dz_fwd, uint16_t dz_rev, uint16_t k, uint16_t dir)
+      : pin_{en, d1, d2}, dz_fwd_(dz_fwd), dz_rev_(dz_rev), k_(k), dir_(dir) {}
   void begin();
   void set(float cmd);       // -4095..4095, + = forward, through the correction (or the speed loop)
   void setRaw(float duty);   // -4095..4095 raw duty, no correction (motor test)
@@ -58,6 +58,7 @@ class Motor {
   uint8_t pin_[3];
   bool is_pwm_[3] = {false, false, false};
   uint16_t dz_fwd_, dz_rev_, k_;  // ParamIds of this wheel's dead zones (V) and speed gain (mm/s/V)
+  uint16_t dir_;                  // ParamId of this wheel's wiring direction (+1 normal, -1 swapped wires)
   float cmd_ = 0;
   bool off_ = true;
   WheelSpeedEst est_;
