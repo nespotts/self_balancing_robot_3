@@ -252,10 +252,16 @@ class TestNativeDrive(unittest.TestCase):
             self.assertLess(c[-1][2], -20, "right turn")
 
             # release: an immediate zero, nothing after it
-            rel = await self.ev("performance.now()")
+            # (latency is measured from the page's own touchend event, not from before the CDP round trip, which
+            # can itself take 100+ ms while the machine is busy - #66)
+            await self.ev("window.__rel = null; document.addEventListener('touchend', () => { window.__rel = performance.now(); }, "
+                          "{capture: true, once: true})")
+            rel0 = await self.ev("performance.now()")
             await self.touch("touchEnd")
             await asyncio.sleep(0.6)
-            c = await self.cmds(rel)
+            c = await self.cmds(rel0)
+            rel = await self.ev("window.__rel")
+            self.assertIsNotNone(rel, "the page saw the touch end")
             self.assertTrue(c, "a stop after release")
             self.assertEqual(c[0][1:], [0, 0])
             self.assertLess(c[0][0] - rel, 150, "zero within 150 ms of release")

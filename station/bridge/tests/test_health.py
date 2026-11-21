@@ -327,7 +327,9 @@ class TestHealthWithSim(unittest.TestCase):
             rig.robot.radio_log_at = 0.0                                          # print the radio line now
             ws = await rig.ws()
             h = await wait_for(ws, lambda m: m["t"] == "health" and tile(m, "batt")["value"] == "bench supply"
-                               and tile(m, "radio")["value"].endswith("%") and m["preflight"]["level"] != "red", 10)
+                               and tile(m, "radio")["value"].endswith("%") and m["preflight"]["level"] != "red", 35)
+            # (deadline, not a sleep: returns at once when ready. The radio line is printed every 10 s, so one
+            # printed before the bridge listened is the next one; 35 s covers that plus a loaded machine - #67)
             self.assertEqual(tile(h, "batt")["level"], "ok")
             self.assertIsNone(h["battery"]["minutes"])
             self.assertEqual(tile(h, "radio")["value"], "100%")
