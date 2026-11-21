@@ -1,0 +1,1557 @@
+{
+  "source": {
+    "document": "Self_Balancing_Model_Rev3",
+    "fusion_version": 71,
+    "document_saved_utc": "2025-02-22T22:07:59Z",
+    "extracted_utc": "2026-11-21T02:15:00.672667Z",
+    "generated_utc": "2026-11-21T02:15:08.293116Z",
+    "tools": "cad/fusion_dump.py (read-only Fusion script) -> cad/fusion_dump.json -> cad/build_model.py",
+    "note": "Geometry is from CAD (high confidence). Masses are ESTIMATES: nearly every body in the design has the default 'Steel' material, so Fusion's own masses (6.8 kg total) are meaningless."
+  },
+  "frame": {
+    "origin": "axle centre (midpoint between the wheels)",
+    "x": "fore/aft, +X = PCB/Teensy side (which side the firmware calls 'forward' is not in the CAD - confirm)",
+    "y": "along the axle (wheel axis)",
+    "z": "up",
+    "pitch_axis": "Y",
+    "units": "mm, g, kg*m^2"
+  },
+  "key": {
+    "wheel_diameter_mm": {
+      "value": 68.9,
+      "confidence": "medium",
+      "notes": "tyre tread tips in CAD ('Wheel D65x25', nominal 65 mm); rolling diameter is a little less - measure the distance per wheel turn"
+    },
+    "wheel_width_mm": 24.8,
+    "track_width_mm": {
+      "value": 126.8,
+      "confidence": "high",
+      "notes": "tyre centre to tyre centre"
+    },
+    "axle_height_mm": {
+      "value": 34.5,
+      "confidence": "medium",
+      "notes": "= wheel radius (axle above ground)"
+    },
+    "overall_mm": {
+      "height_above_ground": 237.8,
+      "width_y": 151.8,
+      "depth_x": 90.0,
+      "bbox_min": [
+        -45.0,
+        -75.9,
+        -34.5
+      ],
+      "bbox_max": [
+        45.0,
+        75.9,
+        203.3
+      ],
+      "notes": "robot only (parking stand excluded)"
+    },
+    "mass_total_g": {
+      "value": 820.0,
+      "confidence": "low",
+      "notes": "estimate; weigh the robot"
+    },
+    "com_total_mm": {
+      "value": [
+        3.9,
+        0.1,
+        79.4
+      ],
+      "confidence": "low"
+    },
+    "com_height_above_axle_mm": {
+      "value": 84.4,
+      "confidence": "low",
+      "notes": "body (everything except wheels); depends mostly on the printed frame masses and the battery"
+    },
+    "com_fore_aft_offset_mm": {
+      "value": 4.1,
+      "confidence": "low",
+      "notes": "+X; gives a static balance tilt of atan(x/z)"
+    },
+    "static_balance_tilt_deg": {
+      "value": 2.8,
+      "confidence": "low",
+      "notes": "the CoM is not straight above the axle in the CAD pose; to balance, the body tilts by this angle so the CoM moves over the axle (top toward -X when the offset is +X)"
+    },
+    "pitch_inertia_body_about_axle_kgm2": {
+      "value": 0.007348,
+      "confidence": "low"
+    },
+    "pitch_inertia_body_about_com_kgm2": {
+      "value": 0.001844,
+      "confidence": "low"
+    },
+    "firmware_compare": {
+      "wheel_diameter": {
+        "firmware_mm": 66.0,
+        "cad_mm": 68.9,
+        "diff_pct": 4.4
+      },
+      "track_width": {
+        "firmware_mm": 123.0,
+        "cad_mm": 126.8,
+        "diff_pct": 3.1
+      },
+      "notes": "firmware: src/Odometry/wheel.h wheel_diameter=66.0, src/Odometry/Odometry.h wheel_separation=123.0"
+    }
+  },
+  "sensors": {
+    "imu": {
+      "part": "GY-BNO085 (BNO08x)",
+      "chip_centre_mm": [
+        0.0,
+        0.032,
+        98.55
+      ],
+      "height_above_axle_mm": 98.5,
+      "orientation": "board flat (horizontal, chip up), CAD rotation = identity; header on the +Y edge. Chip axes vs robot axes are not knowable from the CAD box model - check by tilting (pitch is about CAD Y = axle)",
+      "confidence": "high for position, unknown for axis signs"
+    },
+    "range_head": {
+      "parts": "2x VL53L0X back to back on a micro servo (SMALLSERVO)",
+      "servo_axis": {
+        "point_mm": [
+          26.0,
+          0.15,
+          174.35
+        ],
+        "direction": [
+          0,
+          0,
+          1
+        ],
+        "notes": "vertical axis through the horn"
+      },
+      "sensor_centres_mm": [
+        [
+          38.939,
+          -1.288,
+          188.955
+        ],
+        [
+          13.061,
+          1.588,
+          188.955
+        ]
+      ],
+      "facing": [
+        "+X",
+        "-X"
+      ],
+      "radius_from_servo_axis_mm": 12.9,
+      "height_above_axle_mm": 189.0,
+      "height_above_ground_mm": 223.4,
+      "fore_aft_offset_from_axle_mm": 26.0
+    }
+  },
+  "placements_mm": {
+    "orange_pi_zero_2w": [
+      -21.315,
+      -3.035,
+      75.987
+    ],
+    "battery_3s_2200": [
+      1.5,
+      0.143,
+      125.25
+    ],
+    "motor_neg_y": [
+      0.0,
+      -35.392,
+      24.11
+    ],
+    "motor_pos_y": [
+      -0.0,
+      35.392,
+      24.11
+    ],
+    "motor_driver": [
+      -11.618,
+      -0.397,
+      43.818
+    ],
+    "encoder_as5600_pos_y": [
+      -0.001,
+      8.673,
+      0.009
+    ],
+    "encoder_as5600_neg_y": [
+      0.001,
+      -8.673,
+      0.009
+    ],
+    "servo": [
+      26.0,
+      4.972,
+      154.156
+    ],
+    "teensy_4_1": [
+      27.914,
+      0.29,
+      58.192
+    ],
+    "pcb_assembly": [
+      16.52,
+      -1.627,
+      49.296
+    ]
+  },
+  "inverted_pendulum": {
+    "m_body_kg": 0.772,
+    "m_wheels_total_kg": 0.0487,
+    "l_axle_to_body_com_m": 0.0845,
+    "I_body_pitch_about_com_kgm2": 0.001844,
+    "I_body_pitch_about_axle_kgm2": 0.007348,
+    "I_wheel_each_about_axle_kgm2": 1.624e-05,
+    "wheel_radius_m": 0.0345,
+    "fall_time_constant_s": 0.107,
+    "fall_time_constant_point_mass_s": 0.093,
+    "notes": [
+      "tau = sqrt(I_axle / (m g l)): tilt error grows ~e^(t/tau) with wheels held still",
+      "wheel inertia here is tyre + rim + magnet mount only; the TT gearbox (~1:48) reflects motor rotor inertia roughly N^2 times larger at the wheel, likely bigger than the wheel itself - not in the CAD",
+      "all masses are estimates (confidence low) until parts are weighed"
+    ]
+  },
+  "components": [
+    {
+      "name": "motor:1",
+      "component": "motor",
+      "group": "body",
+      "est_mass_g": 30.0,
+      "mass_confidence": "medium",
+      "mass_basis": "yellow 'TT' dual-shaft gear motor, catalogue ~28-32 g",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 116.0,
+      "volume_cm3": 14.77,
+      "com_mm": [
+        0.0,
+        -35.392,
+        24.11
+      ],
+      "bbox_mm": {
+        "min": [
+          -11.15,
+          -53.9,
+          -16.18
+        ],
+        "max": [
+          11.15,
+          -16.9,
+          54.62
+        ]
+      },
+      "size_mm": [
+        22.3,
+        37.0,
+        70.8
+      ],
+      "frame": {
+        "origin_mm": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "motor:2",
+      "component": "motor",
+      "group": "body",
+      "est_mass_g": 30.0,
+      "mass_confidence": "medium",
+      "mass_basis": "yellow 'TT' dual-shaft gear motor, catalogue ~28-32 g",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 116.0,
+      "volume_cm3": 14.77,
+      "com_mm": [
+        -0.0,
+        35.392,
+        24.11
+      ],
+      "bbox_mm": {
+        "min": [
+          -11.15,
+          16.9,
+          -16.18
+        ],
+        "max": [
+          11.15,
+          53.9,
+          54.62
+        ]
+      },
+      "size_mm": [
+        22.3,
+        37.0,
+        70.8
+      ],
+      "frame": {
+        "origin_mm": [
+          0.0,
+          30.0,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "Wheel D65x25:2",
+      "component": "Wheel D65x25",
+      "group": "wheel",
+      "est_mass_g": 23.5,
+      "mass_confidence": "medium",
+      "mass_basis": "tyre rubber 1.15 g/cm3 + rim plastic 1.05 g/cm3 (CAD volumes)",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 168.0,
+      "volume_cm3": 21.4,
+      "com_mm": [
+        0.001,
+        -64.026,
+        -0.0
+      ],
+      "bbox_mm": {
+        "min": [
+          -34.46,
+          -75.9,
+          -34.41
+        ],
+        "max": [
+          34.46,
+          -45.9,
+          34.46
+        ]
+      },
+      "size_mm": [
+        68.92,
+        30.0,
+        68.87
+      ],
+      "frame": {
+        "origin_mm": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "Wheel D65x25:3",
+      "component": "Wheel D65x25",
+      "group": "wheel",
+      "est_mass_g": 23.5,
+      "mass_confidence": "medium",
+      "mass_basis": "tyre rubber 1.15 g/cm3 + rim plastic 1.05 g/cm3 (CAD volumes)",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 168.0,
+      "volume_cm3": 21.4,
+      "com_mm": [
+        0.001,
+        64.026,
+        0.0
+      ],
+      "bbox_mm": {
+        "min": [
+          -34.46,
+          45.9,
+          -34.46
+        ],
+        "max": [
+          34.46,
+          75.9,
+          34.41
+        ]
+      },
+      "size_mm": [
+        68.92,
+        30.0,
+        68.87
+      ],
+      "frame": {
+        "origin_mm": [
+          0.0,
+          -1.032,
+          -23.529
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "AS5600 v1:1",
+      "component": "AS5600 v1",
+      "group": "body",
+      "est_mass_g": 1.5,
+      "mass_confidence": "medium",
+      "mass_basis": "AS5600 encoder breakout",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 6.7,
+      "volume_cm3": 0.85,
+      "com_mm": [
+        -0.001,
+        8.673,
+        0.009
+      ],
+      "bbox_mm": {
+        "min": [
+          -11.5,
+          7.75,
+          -11.5
+        ],
+        "max": [
+          11.5,
+          10.9,
+          11.5
+        ]
+      },
+      "size_mm": [
+        23.0,
+        3.15,
+        23.0
+      ],
+      "frame": {
+        "origin_mm": [
+          -0.0,
+          9.45,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          -0.0,
+          0.0
+        ],
+        "y_axis": [
+          -0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          -0.0,
+          -0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "AS5600 v1:2",
+      "component": "AS5600 v1",
+      "group": "body",
+      "est_mass_g": 1.5,
+      "mass_confidence": "medium",
+      "mass_basis": "AS5600 encoder breakout",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 6.7,
+      "volume_cm3": 0.85,
+      "com_mm": [
+        0.001,
+        -8.673,
+        0.009
+      ],
+      "bbox_mm": {
+        "min": [
+          -11.5,
+          -10.9,
+          -11.5
+        ],
+        "max": [
+          11.5,
+          -7.75,
+          11.5
+        ]
+      },
+      "size_mm": [
+        23.0,
+        3.15,
+        23.0
+      ],
+      "frame": {
+        "origin_mm": [
+          -0.0,
+          -9.45,
+          0.0
+        ],
+        "x_axis": [
+          -1.0,
+          -0.0,
+          0.0
+        ],
+        "y_axis": [
+          -0.0,
+          -1.0,
+          0.0
+        ],
+        "z_axis": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "SMALLSERVO:1",
+      "component": "SMALLSERVO",
+      "group": "body",
+      "est_mass_g": 9.0,
+      "mass_confidence": "medium",
+      "mass_basis": "micro servo (SG90 class) catalogue 9 g",
+      "cad_material": [
+        "Generic"
+      ],
+      "cad_mass_g_meaningless": 6.9,
+      "volume_cm3": 6.94,
+      "com_mm": [
+        26.0,
+        4.972,
+        154.156
+      ],
+      "bbox_mm": {
+        "min": [
+          20.0,
+          -10.45,
+          141.25
+        ],
+        "max": [
+          32.0,
+          21.45,
+          172.35
+        ]
+      },
+      "size_mm": [
+        12.0,
+        31.9,
+        31.1
+      ],
+      "frame": {
+        "origin_mm": [
+          20.0,
+          -5.75,
+          141.25
+        ],
+        "x_axis": [
+          0.0,
+          1.0,
+          -0.0
+        ],
+        "y_axis": [
+          -1.0,
+          0.0,
+          -0.0
+        ],
+        "z_axis": [
+          0.0,
+          -0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "SMALLSERVOHORN:1",
+      "component": "SMALLSERVOHORN",
+      "group": "body",
+      "est_mass_g": 0.3,
+      "mass_confidence": "medium",
+      "mass_basis": "servo horn",
+      "cad_material": [
+        "ABS Plastic"
+      ],
+      "cad_mass_g_meaningless": 0.2,
+      "volume_cm3": 0.23,
+      "com_mm": [
+        26.0,
+        3.559,
+        172.464
+      ],
+      "bbox_mm": {
+        "min": [
+          22.3,
+          -3.55,
+          169.35
+        ],
+        "max": [
+          29.7,
+          16.5,
+          174.35
+        ]
+      },
+      "size_mm": [
+        7.4,
+        20.05,
+        5.0
+      ],
+      "frame": {
+        "origin_mm": [
+          26.0,
+          0.15,
+          174.35
+        ],
+        "x_axis": [
+          0.0,
+          1.0,
+          -0.0
+        ],
+        "y_axis": [
+          1.0,
+          -0.0,
+          0.0
+        ],
+        "z_axis": [
+          -0.0,
+          0.0,
+          -1.0
+        ]
+      }
+    },
+    {
+      "name": "Orange_Pi_Zero_2W:1",
+      "component": "Orange_Pi_Zero_2W",
+      "group": "body",
+      "est_mass_g": 15.0,
+      "mass_confidence": "low",
+      "mass_basis": "Orange Pi Zero 2W + soldered headers, guess",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 29.8,
+      "volume_cm3": 3.8,
+      "com_mm": [
+        -21.315,
+        -3.035,
+        75.987
+      ],
+      "bbox_mm": {
+        "min": [
+          -29.66,
+          -36.11,
+          61.91
+        ],
+        "max": [
+          -18.12,
+          32.44,
+          92.91
+        ]
+      },
+      "size_mm": [
+        11.54,
+        68.55,
+        31.0
+      ],
+      "frame": {
+        "origin_mm": [
+          11.82,
+          -25.292,
+          26.478
+        ],
+        "x_axis": [
+          -0.0,
+          1.0,
+          0.0
+        ],
+        "y_axis": [
+          -1.0,
+          -0.0,
+          -0.0
+        ],
+        "z_axis": [
+          0.0,
+          -0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "Motor Driver:1",
+      "component": "Motor Driver",
+      "group": "body",
+      "est_mass_g": 26.0,
+      "mass_confidence": "low",
+      "mass_basis": "43x43x27 mm H-bridge module (L298N-size), catalogue ~26-30 g",
+      "cad_material": [
+        "Generic",
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 10.7,
+      "volume_cm3": 10.19,
+      "com_mm": [
+        -11.618,
+        -0.397,
+        43.818
+      ],
+      "bbox_mm": {
+        "min": [
+          -31.0,
+          -21.7,
+          24.3
+        ],
+        "max": [
+          -4.0,
+          21.7,
+          67.7
+        ]
+      },
+      "size_mm": [
+        27.0,
+        43.4,
+        43.4
+      ],
+      "frame": {
+        "origin_mm": [
+          -4.0,
+          0.0,
+          47.5
+        ],
+        "x_axis": [
+          -0.0,
+          1.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "z_axis": [
+          -1.0,
+          -0.0,
+          -0.0
+        ]
+      }
+    },
+    {
+      "name": "servo_Lidar_Mount:1",
+      "component": "servo_Lidar_Mount",
+      "group": "body",
+      "est_mass_g": 3.9,
+      "mass_confidence": "low",
+      "mass_basis": "printed; CAD volume x PLA x fill 0.9",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 27.8,
+      "volume_cm3": 3.54,
+      "com_mm": [
+        26.32,
+        0.149,
+        186.953
+      ],
+      "bbox_mm": {
+        "min": [
+          13.55,
+          -12.3,
+          174.35
+        ],
+        "max": [
+          38.45,
+          12.6,
+          203.35
+        ]
+      },
+      "size_mm": [
+        24.9,
+        24.9,
+        29.0
+      ],
+      "frame": {
+        "origin_mm": [
+          26.0,
+          0.15,
+          174.35
+        ],
+        "x_axis": [
+          0.0,
+          1.0,
+          -0.0
+        ],
+        "y_axis": [
+          0.0,
+          -0.0,
+          1.0
+        ],
+        "z_axis": [
+          1.0,
+          -0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "name": "vl53l0x:1",
+      "component": "vl53l0x",
+      "group": "body",
+      "est_mass_g": 0.5,
+      "mass_confidence": "medium",
+      "mass_basis": "VL53L0X breakout",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 1.8,
+      "volume_cm3": 0.23,
+      "com_mm": [
+        38.939,
+        -1.288,
+        188.955
+      ],
+      "bbox_mm": {
+        "min": [
+          37.45,
+          -7.0,
+          176.35
+        ],
+        "max": [
+          40.45,
+          4.0,
+          201.35
+        ]
+      },
+      "size_mm": [
+        3.0,
+        11.0,
+        25.0
+      ],
+      "frame": {
+        "origin_mm": [
+          0.0,
+          -45.0,
+          200.0
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "vl53l0x:2",
+      "component": "vl53l0x",
+      "group": "body",
+      "est_mass_g": 0.5,
+      "mass_confidence": "medium",
+      "mass_basis": "VL53L0X breakout",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 1.8,
+      "volume_cm3": 0.23,
+      "com_mm": [
+        13.061,
+        1.588,
+        188.955
+      ],
+      "bbox_mm": {
+        "min": [
+          11.55,
+          -3.7,
+          176.35
+        ],
+        "max": [
+          14.55,
+          7.3,
+          201.35
+        ]
+      },
+      "size_mm": [
+        3.0,
+        11.0,
+        25.0
+      ],
+      "frame": {
+        "origin_mm": [
+          0.0,
+          -45.0,
+          200.0
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "2200mAh Lipo:1",
+      "component": "2200mAh Lipo",
+      "group": "body",
+      "est_mass_g": 185.0,
+      "mass_confidence": "medium",
+      "mass_basis": "3S 2200 mAh LiPo catalogue mass (firmware monitors 3 cells)",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 822.8,
+      "volume_cm3": 104.81,
+      "com_mm": [
+        1.5,
+        0.143,
+        125.25
+      ],
+      "bbox_mm": {
+        "min": [
+          -16.0,
+          -54.75,
+          111.5
+        ],
+        "max": [
+          19.0,
+          54.75,
+          139.0
+        ]
+      },
+      "size_mm": [
+        35.0,
+        109.5,
+        27.5
+      ],
+      "frame": {
+        "origin_mm": [
+          1.5,
+          0.0,
+          125.25
+        ],
+        "x_axis": [
+          -0.0,
+          0.0,
+          1.0
+        ],
+        "y_axis": [
+          -0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          -1.0,
+          -0.0,
+          -0.0
+        ]
+      }
+    },
+    {
+      "name": "circuit board assembly:1",
+      "component": "circuit board assembly",
+      "group": "body",
+      "est_mass_g": 48.1,
+      "mass_confidence": "low",
+      "mass_basis": "sum of per-part guesses, see children",
+      "cad_material": [
+        "Gen\u00e9rico",
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 165.4,
+      "volume_cm3": 21.25,
+      "com_mm": [
+        16.52,
+        -1.627,
+        49.296
+      ],
+      "bbox_mm": {
+        "min": [
+          -0.51,
+          -25.0,
+          -0.75
+        ],
+        "max": [
+          31.98,
+          25.0,
+          90.25
+        ]
+      },
+      "size_mm": [
+        32.49,
+        50.0,
+        91.0
+      ],
+      "frame": {
+        "origin_mm": [
+          20.0,
+          0.0,
+          50.0
+        ],
+        "x_axis": [
+          -0.0,
+          1.0,
+          -0.0
+        ],
+        "y_axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "z_axis": [
+          1.0,
+          0.0,
+          -0.0
+        ]
+      }
+    },
+    {
+      "name": "GY-BNO085:1",
+      "component": "GY-BNO085",
+      "group": "body",
+      "est_mass_g": 2.0,
+      "mass_confidence": "medium",
+      "mass_basis": "GY-BNO08x breakout + header",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 13.5,
+      "volume_cm3": 1.72,
+      "com_mm": [
+        0.0,
+        7.439,
+        91.931
+      ],
+      "bbox_mm": {
+        "min": [
+          -12.7,
+          -4.32,
+          81.25
+        ],
+        "max": [
+          12.7,
+          11.23,
+          99.2
+        ]
+      },
+      "size_mm": [
+        25.4,
+        15.55,
+        17.95
+      ],
+      "frame": {
+        "origin_mm": [
+          0.0,
+          3.457,
+          96.25
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          0.0,
+          -0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "magnet mount:1",
+      "component": "magnet mount",
+      "group": "wheel",
+      "est_mass_g": 0.8,
+      "mass_confidence": "low",
+      "mass_basis": "printed; CAD volume x PLA x fill 0.9",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 5.4,
+      "volume_cm3": 0.69,
+      "com_mm": [
+        0.0,
+        -18.172,
+        -0.0
+      ],
+      "bbox_mm": {
+        "min": [
+          -5.0,
+          -23.9,
+          -5.0
+        ],
+        "max": [
+          5.0,
+          -12.9,
+          5.0
+        ]
+      },
+      "size_mm": [
+        10.0,
+        11.0,
+        10.0
+      ],
+      "frame": {
+        "origin_mm": [
+          -0.0,
+          -23.9,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          -0.0,
+          0.0
+        ],
+        "y_axis": [
+          -0.0,
+          -1.0,
+          0.0
+        ],
+        "z_axis": [
+          0.0,
+          -0.0,
+          -1.0
+        ]
+      }
+    },
+    {
+      "name": "magnet mount:2",
+      "component": "magnet mount",
+      "group": "wheel",
+      "est_mass_g": 0.8,
+      "mass_confidence": "low",
+      "mass_basis": "printed; CAD volume x PLA x fill 0.9",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 5.4,
+      "volume_cm3": 0.69,
+      "com_mm": [
+        0.0,
+        18.172,
+        0.0
+      ],
+      "bbox_mm": {
+        "min": [
+          -5.0,
+          12.9,
+          -5.0
+        ],
+        "max": [
+          5.0,
+          23.9,
+          5.0
+        ]
+      },
+      "size_mm": [
+        10.0,
+        11.0,
+        10.0
+      ],
+      "frame": {
+        "origin_mm": [
+          -0.0,
+          23.9,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "y_axis": [
+          -0.0,
+          1.0,
+          -0.0
+        ],
+        "z_axis": [
+          -0.0,
+          -0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "magnet:1",
+      "component": "magnet",
+      "group": "wheel",
+      "est_mass_g": 0.1,
+      "mass_confidence": "high",
+      "mass_basis": "4x1 mm NdFeB disc, 7.5 g/cm3",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 0.1,
+      "volume_cm3": 0.01,
+      "com_mm": [
+        0.0,
+        -13.9,
+        -0.0
+      ],
+      "bbox_mm": {
+        "min": [
+          -2.0,
+          -14.4,
+          -2.0
+        ],
+        "max": [
+          2.0,
+          -13.4,
+          2.0
+        ]
+      },
+      "size_mm": [
+        4.0,
+        1.0,
+        4.0
+      ],
+      "frame": {
+        "origin_mm": [
+          -0.0,
+          -14.4,
+          -0.0
+        ],
+        "x_axis": [
+          1.0,
+          -0.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          1.0,
+          -0.0
+        ],
+        "z_axis": [
+          -0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "magnet:2",
+      "component": "magnet",
+      "group": "wheel",
+      "est_mass_g": 0.1,
+      "mass_confidence": "high",
+      "mass_basis": "4x1 mm NdFeB disc, 7.5 g/cm3",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 0.1,
+      "volume_cm3": 0.01,
+      "com_mm": [
+        0.0,
+        13.9,
+        0.0
+      ],
+      "bbox_mm": {
+        "min": [
+          -2.0,
+          13.4,
+          -2.0
+        ],
+        "max": [
+          2.0,
+          14.4,
+          2.0
+        ]
+      },
+      "size_mm": [
+        4.0,
+        1.0,
+        4.0
+      ],
+      "frame": {
+        "origin_mm": [
+          -0.0,
+          13.4,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          -0.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          -0.0,
+          -0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "Frame:1",
+      "component": "Frame",
+      "group": "body",
+      "est_mass_g": 209.9,
+      "mass_confidence": "low",
+      "mass_basis": "printed; CAD volume x PLA 1.24 g/cm3 x assumed fill 0.75",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 1772.0,
+      "volume_cm3": 225.73,
+      "com_mm": [
+        -1.044,
+        0.036,
+        45.0
+      ],
+      "bbox_mm": {
+        "min": [
+          -20.0,
+          -44.8,
+          -18.75
+        ],
+        "max": [
+          20.0,
+          44.8,
+          101.25
+        ]
+      },
+      "size_mm": [
+        40.0,
+        89.6,
+        120.0
+      ],
+      "frame": {
+        "origin_mm": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "frame_top:1",
+      "component": "frame_top",
+      "group": "body",
+      "est_mass_g": 183.2,
+      "mass_confidence": "low",
+      "mass_basis": "printed; CAD volume x PLA 1.24 g/cm3 x assumed fill 0.75",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 1546.1,
+      "volume_cm3": 196.96,
+      "com_mm": [
+        13.92,
+        0.641,
+        120.119
+      ],
+      "bbox_mm": {
+        "min": [
+          -45.0,
+          -75.0,
+          101.25
+        ],
+        "max": [
+          45.0,
+          75.0,
+          159.25
+        ]
+      },
+      "size_mm": [
+        90.0,
+        150.0,
+        58.0
+      ],
+      "frame": {
+        "origin_mm": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "stand:1",
+      "component": "stand",
+      "group": "excluded",
+      "est_mass_g": 0.0,
+      "mass_confidence": "n/a",
+      "mass_basis": "parking stand, not part of the robot (excluded)",
+      "cad_material": [
+        "Steel"
+      ],
+      "cad_mass_g_meaningless": 1804.1,
+      "volume_cm3": 229.82,
+      "com_mm": [
+        0.0,
+        -0.0,
+        -32.685
+      ],
+      "bbox_mm": {
+        "min": [
+          -70.0,
+          -47.0,
+          -48.75
+        ],
+        "max": [
+          70.0,
+          47.0,
+          11.25
+        ]
+      },
+      "size_mm": [
+        140.0,
+        94.0,
+        60.0
+      ],
+      "frame": {
+        "origin_mm": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "y_axis": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "z_axis": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "name": "unmodelled wires/screws/nuts (allowance)",
+      "group": "body",
+      "est_mass_g": 25.0,
+      "mass_confidence": "low",
+      "mass_basis": "nothing in CAD; guess, spread along the frame",
+      "com_mm": [
+        0.0,
+        0.0,
+        70.0
+      ]
+    }
+  ],
+  "to_weigh_or_measure": [
+    "whole robot (kitchen scale) - fixes the total",
+    "Frame and frame_top prints (biggest uncertainty: unknown infill)",
+    "battery (3S 2200 mAh)",
+    "one wheel with tyre; one TT motor",
+    "PCB with everything on it; motor driver; Orange Pi",
+    "CoM height: balance the robot on its side on a pencil/edge, or hang it from two points",
+    "rolling diameter: mark the tyre, roll 10 turns, distance / (10*pi)",
+    "track width: tyre centre to tyre centre with calipers",
+    "IMU axis signs: tilt forward and log pitch"
+  ]
+}
