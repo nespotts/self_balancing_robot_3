@@ -37,7 +37,7 @@ constexpr uint32_t kATickUs = 50000;
 constexpr float kAdStep = 60.0f;               // ramp-down speed sample every 60 duty (~0.18 V at 12 V)
 // test b
 constexpr uint8_t kBLevels = 16;
-constexpr uint32_t kBHoldUs = 1200000, kBMeasUs = 500000, kBDropRefUs = 600000;
+constexpr uint32_t kBHoldUs = 1200000, kBMeasUs = 500000, kBDropRefUs = 800000;  // ref after the step settles
 constexpr float kBHalfWindowMs = 40.0f;        // 80 ms speed window -> ~40 ms lag in the trace
 // test c
 constexpr uint8_t kCReps = 6;                  // alternating, 3 each way
@@ -553,8 +553,14 @@ void MotorTest::runB(const MtIn& in, bool new_enc) {
       b_c0_[w] = enc[w];
       b_t0_[w] = in.enc_us;
     }
-    // speed-drop reference: first settled speed of this level
-    if (sel(w) && !drop_ref_ok_[w] && el >= kBDropRefUs && fabsf(sp[w]) > kDropMinMms) {
+    // speed-drop reference: first settled speed of this level, only when this duty really drives the
+    // wheel (above this run's test-1 start duty, else 25 % of max). Below that the wheel is just coasting
+    // down from the previous step, and "slowing" is not binding (false aborts on 2026-11-21: right wheel
+    // at duty 256 with ref 596 mm/s, left at duty 938 with ref 701 mm/s).
+    const int dI = di(dir_);
+    const float drive_min = a_start_[w][dI] > 0 ? 1.05f * a_start_[w][dI] : 0.25f * max_duty_;
+    if (sel(w) && !drop_ref_ok_[w] && el >= kBDropRefUs && fabsf(duty_[w]) >= drive_min &&
+        fabsf(sp[w]) > kDropMinMms) {
       drop_ref_ok_[w] = true;
       drop_ref_[w] = fabsf(sp[w]);
       drop_on_[w] = false;
