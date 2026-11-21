@@ -71,7 +71,7 @@
   X(RNG_IDLE_OFF,    "rng.idle_off",       1.0f,      0.0f,    1.0f)     \
   /* L298N drive experiments (issue #22, see motors.h); applied while the motors are off */ \
   X(MOT_PWM_HZ,      "mot.pwm_hz",         36621.09f, 100.0f,  50000.0f) \
-  X(MOT_DRIVE_MODE,  "mot.drive_mode",     0.0f,      0.0f,    1.0f)
+  X(MOT_DRIVE_MODE,  "mot.drive_mode",     0.0f,      0.0f,    0.0f)  /* LOCKED to 0: mode 1 (PWM on IN) smoked the L298N, issue #23 */
 
 enum ParamId : uint16_t {
 #define PARAM_ENUM(id, name, def, mn, mx) P_##id,
