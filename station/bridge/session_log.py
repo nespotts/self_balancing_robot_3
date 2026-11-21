@@ -34,20 +34,29 @@ class SessionLog:
         self.name = None
         self.t0 = 0.0
         self.last_flush = 0.0
+        self.error = ""       # why logging is off (full / read-only / missing dir), "" when fine
 
     # -- lifecycle --
     def start(self):
+        """Open a new session file. False (and .error set) when the disk will not let us: the bridge then
+        runs without logging instead of dying, and tries again later."""
         self.stop()
-        self._prune()
-        base = time.strftime("sbr3-%Y%m%d-%H%M%S")
-        name, n = base + ".jsonl", 1
-        while os.path.exists(os.path.join(self.dir, name)):
-            name = "%s-%d.jsonl" % (base, n)
-            n += 1
-        self.name = name
-        self.f = open(os.path.join(self.dir, name), "w", buffering=64 * 1024, encoding="utf-8")
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            self._prune()
+            base = time.strftime("sbr3-%Y%m%d-%H%M%S")
+            name, n = base + ".jsonl", 1
+            while os.path.exists(os.path.join(self.dir, name)):
+                name = "%s-%d.jsonl" % (base, n)
+                n += 1
+            f = open(os.path.join(self.dir, name), "w", buffering=64 * 1024, encoding="utf-8")
+        except OSError as e:
+            self.f, self.name, self.error = None, None, "%s" % (e.strerror or e)
+            return False
+        self.name, self.f, self.error = name, f, ""
         self.t0 = time.monotonic()
         self._w(["schema", {"tlm": TLM_COLS, "rng": RNG_COLS, "started": time.strftime("%Y-%m-%dT%H:%M:%S")}])
+        return self.f is not None
 
     def stop(self):
         if self.f:
@@ -66,8 +75,9 @@ class SessionLog:
             if now - self.last_flush > 2.0:
                 self.f.flush()
                 self.last_flush = now
-        except (OSError, ValueError):
+        except (OSError, ValueError) as e:
             self.f = None  # disk full / removed: stop logging rather than crash
+            self.error = "%s" % (getattr(e, "strerror", None) or e)
 
     def _t(self):
         return round(time.monotonic() - self.t0, 3)
@@ -88,9 +98,16 @@ class SessionLog:
     # -- listing / export --
     def list(self):
         out = []
-        for n in os.listdir(self.dir):
+        try:
+            names = os.listdir(self.dir)
+        except OSError:
+            return out
+        for n in names:
             if NAME_RE.match(n):
-                st = os.stat(os.path.join(self.dir, n))
+                try:
+                    st = os.stat(os.path.join(self.dir, n))
+                except OSError:       # deleted by a prune in another thread
+                    continue
                 out.append({"name": n, "size": st.st_size, "mtime": int(st.st_mtime),
                             "active": n == self.name and self.f is not None})
         out.sort(key=lambda d: d["name"], reverse=True)
@@ -103,7 +120,8 @@ class SessionLog:
         return p if os.path.isfile(p) else None
 
     def prune(self):
-        """Delete the oldest sessions while the total is above the cap (the active one is kept)."""
+        """Delete the oldest sessions while the total is above the cap (the active one is kept).
+        Touches the disk a lot: the bridge runs it in a worker thread."""
         files = sorted(self.list(), key=lambda d: d["name"])
         total = sum(f["size"] for f in files)
         for f in files:

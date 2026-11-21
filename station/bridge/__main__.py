@@ -28,6 +28,14 @@ def build_parser():
     ap.add_argument("--map-dir", default=os.environ.get("SBR3_MAP_DIR", "~/sbr3-maps"), help="saved occupancy maps")
     ap.add_argument("--falls-dir", default=os.environ.get("SBR3_FALLS_DIR", "~/sbr3-falls"),
                     help="black-box fall records (Logs page > Falls), capped at 200 files / 100 MB")
+    ap.add_argument("--allow-any-origin", action="store_true",
+                    default=os.environ.get("SBR3_ALLOW_ANY_ORIGIN", "") in ("1", "true", "yes"),
+                    help="turn off the Origin / Host checks on /ws and /api/* (default: only pages served by the "
+                         "bridge itself and tools without an Origin header, e.g. curl, tune.py, may command the robot)")
+    ap.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                    help="also accept this Host header (a public DNS name for the Pi); repeatable")
+    ap.add_argument("--allow-origin", action="append", default=[], metavar="ORIGIN",
+                    help="also accept pages from this origin, e.g. http://tablet.example:3000; repeatable")
     ap.add_argument("--quiet", action="store_true")
     return ap
 
@@ -35,7 +43,8 @@ def build_parser():
 def main(argv=None):
     a = build_parser().parse_args(argv)
     b = Bridge(a.port, a.web, a.log_dir, a.host, a.http_port, a.baud, a.release_file, a.log_max_mb, a.quiet,
-               preset_dir=a.preset_dir, map_dir=a.map_dir, falls_dir=a.falls_dir)
+               preset_dir=a.preset_dir, map_dir=a.map_dir, allow_any_origin=a.allow_any_origin,
+               allow_hosts=a.allow_host, allow_origins=a.allow_origin, falls_dir=a.falls_dir)
     try:
         asyncio.run(b.run())
     except KeyboardInterrupt:

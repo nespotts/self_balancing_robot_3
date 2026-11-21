@@ -18,7 +18,7 @@ import urllib.request
 
 from station.bridge import link_protocol as lp
 from station.bridge.bridge import Bridge
-from station.bridge.httpws import HttpServer, WsClient
+from station.bridge.httpws import WsClient
 from station.sim.sim import SimRobot, SimServer
 from station.tools.screenshots import BROWSERS, Cdp
 
@@ -179,8 +179,7 @@ class TestNativeDrive(unittest.TestCase):
         phys = asyncio.ensure_future(sim.physics())
         b = Bridge("tcp://127.0.0.1:%d" % srv.sockets[0].getsockname()[1], WEB, self.tmp, "127.0.0.1", 0,
                    release_file=os.path.join(self.tmp, "release"), quiet=True)
-        routes = [("GET", "/api/status", b.api_status)]
-        hs = await HttpServer(WEB, routes, "/ws", b.ws_handler).start("127.0.0.1", 0)
+        hs = await b.build_http().start("127.0.0.1", 0)     # real server: Chrome sends Origin on the WebSocket
         url = "http://127.0.0.1:%d/#drive" % hs.sockets[0].getsockname()[1]
         tasks = [asyncio.ensure_future(b.link_task()), asyncio.ensure_future(b.tick_task())]
         dport = free_port()

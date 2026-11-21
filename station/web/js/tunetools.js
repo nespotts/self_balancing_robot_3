@@ -24,7 +24,7 @@ function setSub(v) {
 subSeg.onclick = (e) => { const b = e.target.closest("button"); if (b) setSub(b.dataset.v); };
 setSub(tuneSub);
 
-on("error", (m) => { if (m.text && !m.need_confirm) toast(m.text, 3500); });
+on("error", (m) => { if (m.text && !m.need_confirm && !m.code) toast(m.text, 3500); });   // (code: main.js says it)
 on("ok", (m) => { if (m.text) toast(m.text); });
 
 // small ⋯ menus: one open at a time, closed by a tap elsewhere

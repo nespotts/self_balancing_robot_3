@@ -464,7 +464,7 @@ class FallRecorder:
         if any(-0.2 <= now - s <= STOP_WINDOW_S for s in self.stops):
             return "stopped from the station (E-stop / IDLE)"
         if int(d.get("remote_flags", 0)) & lp.LINK_RF_ESTOP or any(
-                int(f.get("remote_flags", 0)) & lp.LINK_RF_ESTOP for t, f in list(self.ring)[-60:] if now - t < 1.0):
+                int(f.get("remote_flags", 0)) & lp.LINK_RF_ESTOP for t, f in (self.ring[i] for i in range(-min(60, len(self.ring)), 0)) if now - t < 1.0):
             return "E-stop from the remote"
         armed = bool(int(d["status"]) & lp.TLM_ARMED)
         recent = [f for t, f in self.ring if now - t < 3.0]

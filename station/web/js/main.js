@@ -38,6 +38,11 @@ window.addEventListener("keydown", (e) => {
   if ((e.code === "Space" || e.code === "Escape") && !e.target.closest("input, textarea")) { e.preventDefault(); estop(); }
 });
 
+// The bridge refuses robot commands while it has no link to the robot (and says so): show it once, here.
+on("error", (m) => {
+  if (m.code === "no_link" && m.text) toast(m.text.charAt(0).toUpperCase() + m.text.slice(1), 3500);
+});
+
 // ---------- top bar ----------
 const pLink = document.getElementById("pill-link"), pMode = document.getElementById("pill-mode");
 const pArmed = document.getElementById("pill-armed"), pBatt = document.getElementById("pill-batt");

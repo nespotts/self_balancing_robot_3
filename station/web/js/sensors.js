@@ -2,7 +2,7 @@
 // Live readout per sensor, polar view of the last sweep (robot frame, forward up), range vs time,
 // and setup (park / trim / sweep / direction / hand test) behind the ⋯.
 // Data: "ranges" entries [i, hx, hy, rx, ry, valid, tilt, t_ms, sensor_id, sensor_angle_deg, range_mm].
-import { state, on, send } from "./conn.js";
+import { state, on, send, tlmFresh } from "./conn.js";
 import { el, toast } from "./ui.js";
 import { SENS, SENS_NEW, SENS_RGB } from "./chart.js";
 
@@ -58,6 +58,7 @@ const cards = [0, 1].map((i) => {
   const ok = el("span", { class: "sc-ok" }, "—"), ang = el("span", {}, "—"), rate = el("span", {}, "—");
   const card = el("div", { class: "card sens-card", style: `--sc:${SENS[i]}` },
     el("div", { class: "sc-head" }, el("i", { class: "sw" }), el("b", {}, NAMES[i]),
+      el("span", { class: "nodata" }, "no data"),
       el("span", { class: "muted" }, `sensor ${i} · XSHUT ${XSHUT[i]}`), el("span", { class: "sc-badge" }, "this one")),
     el("div", { class: "sc-range" }, big, unit),
     el("div", { class: "sc-meta" }, ok, ang, rate));
@@ -69,7 +70,8 @@ function updateCards() {
   const now = piNow(), nowP = performance.now(), max = pv("rng.max_mm", 2000);
   const hz = state.status?.rng_hz;
   cards.forEach((c, i) => {
-    const r = S[i].last, stale = !r || (piAt && now - r.t > STALE_MS);
+    // stale: the robot went quiet (the last numbers are old) or this sensor stopped reporting
+    const r = S[i].last, stale = !r || !tlmFresh() || (piAt && now - r.t > STALE_MS);
     c.card.classList.toggle("stale", !!stale);
     c.card.classList.toggle("hit", handTest && S[i].hitUntil > nowP);
     if (!r) { c.big.textContent = "—"; c.unit.textContent = ""; c.ok.textContent = "no readings"; c.ok.className = "sc-ok"; c.ang.textContent = ""; c.rate.textContent = ""; return; }

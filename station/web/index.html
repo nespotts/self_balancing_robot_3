@@ -75,6 +75,7 @@
   <!-- Drive (side panel on desktop) -->
   <section id="view-drive" class="view">
     <div class="tiles">
+      <span class="nodata" title="No telemetry from the robot: the numbers are old">no data</span>
       <div class="tile"><b id="rd-speed">0</b><span>mm/s</span></div>
       <div class="tile"><b id="rd-turn">0</b><span>°/s turn</span></div>
       <div class="tile"><b id="rd-pitch">0.0</b><span>° pitch</span></div>
@@ -187,6 +188,14 @@
       <div id="score-hint" class="muted score-hint"></div>
       <div id="score-tiles" class="score-tiles"></div>
       <div id="score-hist" class="score-hist"></div>
+    </div>
+    <!-- Find balance point (issue #52): station/web/js/balpoint.js -->
+    <div class="card bp-card tb-only" id="bp-card">
+      <div class="sc-bar"><h3>Find balance point</h3>
+        <span id="bp-status" class="muted"></span>
+        <button id="bp-go" class="small primary" title="Measure the lean the robot needs to stand still, then fix bal.offset_deg">Start</button>
+      </div>
+      <div id="bp-body" class="bp-body"></div>
     </div>
     <!-- wheels-up motor test (issue #16): station/web/js/motortest.js -->
     <div class="tm-only" id="motor-view"></div>
