@@ -5,11 +5,13 @@ import { el, fmt, toast } from "./ui.js";
 import { Strip, S1, S2, S3, SUM } from "./chart.js";
 
 const GROUPS = { bal: "Balance", str: "Heading", vel: "Velocity", drv: "Driving", mot: "Motors",
-  ctl: "Control loop", batt: "Battery", tlm: "Telemetry" };
+  ctl: "Control loop", batt: "Battery", tlm: "Telemetry", rng: "Range sensor" };
 const OPEN_BY_DEFAULT = new Set(["bal", "str", "vel"]);
 const DISCRETE = {   // small integer params shown as segmented buttons
   "bal.d_src": ["d(pitch)/dt", "Gyro"],
   "ctl.loops": ["Balance", "+Heading", "+Velocity", "All"],
+  "rng.enable": ["Off", "On"],
+  "rng.long_range": ["Normal", "Long range"],
 };
 const HIDDEN = (name) => name.startsWith("cfg.");   // actions, not settings
 

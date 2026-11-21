@@ -22,10 +22,12 @@ def main(argv=None):
     ap.add_argument("--garbage", type=float, default=0.0,
                     help="probability per frame of injecting junk bytes (tests resync)")
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--head-error", type=float, default=0.0, metavar="DEG",
+                    help="range-sensor head mounted this far CCW (+) of true; rng.servo_trim_deg -DEG fixes it")
     a = ap.parse_args(argv)
     host, _, port = a.listen.rpartition(":")
     remote = a.remote or a.remote_disarmed
-    robot = SimRobot(remote=remote, remote_armed=not a.remote_disarmed, seed=a.seed)
+    robot = SimRobot(remote=remote, remote_armed=not a.remote_disarmed, seed=a.seed, head_error_deg=a.head_error)
     server = SimServer(robot, host or "127.0.0.1", int(port), a.garbage)
 
     async def run():

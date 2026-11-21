@@ -66,8 +66,8 @@ class TestBridgeWithSim(unittest.TestCase):
             names = {p["name"]: p for p in params["list"]}
             self.assertEqual(names["bal.kp"]["value"], 250.0)
             self.assertEqual(names["vel.kd"]["value"], 0.00007)
-            self.assertEqual(len(params["list"]), 35)
-            self.assertEqual(names["cfg.save"]["id"], 33)
+            self.assertEqual(len(params["list"]), 49)
+            self.assertEqual(names["cfg.save"]["id"], 34)           # same ids as src/params.h
             tlm = await wait_for(ws, lambda m: m["t"] == "tlm")
             self.assertEqual(tlm["mode"], lp.MODE_IDLE)
             self.assertFalse(tlm["status"] & lp.TLM_ARMED)          # boots disarmed
@@ -75,7 +75,11 @@ class TestBridgeWithSim(unittest.TestCase):
             self.assertIn("bal_p", tlm)
             self.assertGreater(b.parser.bytes_dropped, 10)          # plain boot text skipped (resync)
             self.assertFalse(b.status()["remote_seen"])
-            await wait_for(ws, lambda m: m["t"] == "ranges" and len(m["pts"]) > 0)
+            rm = await wait_for(ws, lambda m: m["t"] == "ranges" and len(m["pts"]) > 0)
+            self.assertEqual(len(rm["pts"][0]), 11)                  # ... sensor_id, sensor_angle_deg, range_mm
+            self.assertEqual(hello["range_geom"]["fwd_mm"], 26.0)
+            st = await wait_for(ws, lambda m: m["t"] == "status" and min(m["rng_hz"]) > 5)
+            self.assertLess(max(st["rng_hz"]), 20)                   # ~12.5/s per sensor while sweeping
 
             # no remote: SET_MODE != IDLE arms; the controller engages and reports P/I/D
             ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_STATION}))

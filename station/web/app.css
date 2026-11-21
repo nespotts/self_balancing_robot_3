@@ -73,7 +73,7 @@ svg .fill { fill: currentColor; stroke: none; }
 main { flex: 1; position: relative; min-height: 0; margin-bottom: calc(var(--tabh) + env(safe-area-inset-bottom)); }
 .view { position: absolute; inset: 0; display: none; overflow: auto; }
 body[data-view="map"] #view-map, body[data-view="drive"] #view-drive, body[data-view="plots"] #view-plots,
-body[data-view="tune"] #view-tune, body[data-view="logs"] #view-logs { display: block; }
+body[data-view="tune"] #view-tune, body[data-view="logs"] #view-logs, body[data-view="sensors"] #view-sensors { display: block; }
 
 @media (max-width: 420px) {
   .pill { padding: 0 8px; font-size: 12px; gap: 5px; }
@@ -94,6 +94,10 @@ body[data-view="tune"] #view-tune, body[data-view="logs"] #view-logs { display: 
   .view { position: relative; inset: auto; grid-column: 1; grid-row: 1; }
   #view-drive { display: flex !important; flex-direction: column; gap: 12px; grid-column: 2; border-left: 1px solid var(--line); background: var(--surface); }
   body[data-view="drive"] #view-map { display: block; }
+}
+@media (min-width: 900px) and (max-width: 1180px) {   /* six tabs: icons only (names in the tooltip) */
+  .tabs button span { display: none; }
+  .tabs button { padding: 8px 12px; }
 }
 
 /* ---------- map ---------- */
@@ -181,6 +185,72 @@ body[data-view="plots"] #view-plots { display: flex; flex-direction: column; gap
 .plot .legend .title { font-weight: 700; color: var(--text); }
 .plot .legend span { color: var(--text-2); font-variant-numeric: tabular-nums; }
 .plot .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+
+/* ---------- sensors (issue #19) ---------- */
+:root { --s0: #c98500; --s1: #d55181; }
+.sens-key { margin-left: auto; font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
+.sens-key i, .sens-card .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.sens-key i.s0 { background: var(--s0); } .sens-key i.s1 { background: var(--s1); margin-left: 6px; }
+#view-sensors { padding: 10px; }
+.sens { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
+.sens-bar { position: relative; display: flex; align-items: center; gap: 8px; min-height: 40px; }
+.sens-status { flex: 1; min-width: 0; font-size: 14px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sens-pause { min-width: 76px; }
+#sens-more { font-size: 20px; padding: 4px 12px; }
+.sens-menu { top: 46px; right: 0; width: min(360px, calc(100vw - 20px)); max-height: calc(100vh - var(--toph) - var(--tabh) - 70px);
+  overflow: auto; gap: 2px; padding: 10px 12px; }
+.sens-menu h4 { margin: 0 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.sens-menu .srow { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; }
+.sens-menu .srow + .srow { border-top: 1px solid #30302d; }
+.sens-menu .sl { display: flex; justify-content: space-between; font-size: 14px; }
+.sens-menu .sl b { font-variant-numeric: tabular-nums; }
+.sens-menu .sctl { display: flex; align-items: center; gap: 8px; }
+.sens-menu input[type=range] { flex: 1; width: 100%; accent-color: var(--blue); height: 28px; }
+.sens-menu .nudge { width: 40px; padding: 6px 0; text-align: center; font-size: 16px; }
+.sens-menu .seg { display: flex; }
+.sens-menu .seg button { flex: 1; padding: 9px 4px; font-size: 13px; text-align: center; }
+.sens-menu .stog { flex-direction: row !important; align-items: center; gap: 10px !important; font-size: 14px; cursor: pointer; }
+.sens-menu .more-link { align-self: flex-start; margin-top: 4px; color: #9fd0ff; border-color: transparent; padding-left: 0; }
+.sens-hand { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--r); font-size: 14px;
+  background: #1d3550; border: 1px solid var(--blue); }
+.sens-hand span { flex: 1; }
+.sens-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.sens-card { position: relative; padding: 10px 12px; border-top: 3px solid var(--sc); transition: box-shadow .15s, background .15s; }
+.sc-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: 14px; }
+.sc-head .sw { background: var(--sc); align-self: center; }
+.sc-head .muted { font-size: 11px; flex-basis: 100%; }
+.sc-badge { position: absolute; top: 8px; right: 8px; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 700;
+  background: var(--sc); color: #111; opacity: 0; transform: scale(.8); transition: opacity .15s, transform .15s; }
+.sens-card.hit { background: #2a2620; box-shadow: 0 0 0 2px var(--sc), 0 0 18px var(--sc); }
+.sens-card.hit .sc-badge { opacity: 1; transform: none; animation: blink .5s ease-in-out infinite alternate; }
+@keyframes blink { to { opacity: .55; } }
+.sc-range { margin: 4px 0 2px; display: flex; align-items: baseline; gap: 6px; }
+.sc-range b { font-size: 38px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.sc-range .unit { color: var(--muted); font-size: 14px; }
+.sc-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.sc-ok::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; background: var(--muted); }
+.sc-ok.good::before { background: var(--good); }
+.sc-ok.bad::before { background: var(--warn); }
+.sens-card.stale .sc-range b { color: var(--muted); }
+.sp-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.sp-bar h3 { margin: 0; flex: 1; }
+.sp-scale button { padding: 5px 10px; font-size: 13px; }
+.sp-note { font-size: 12px; }
+.sens-polar { padding: 10px 10px 6px; }
+#sens-polar { display: block; width: 100%; aspect-ratio: 1; max-height: 70vh; touch-action: pan-y; }
+.sens-time { padding: 10px 10px 4px; }
+.sens-time canvas { display: block; width: 100%; height: 118px; touch-action: pan-y; }
+@media (min-width: 900px) {
+  #view-sensors { padding: 12px; }
+  .sens { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); grid-template-rows: auto auto auto 1fr; height: 100%;
+    grid-template-areas: "bar bar" "hand hand" "polar cards" "polar time"; align-content: start; }
+  .sens-bar { grid-area: bar; } .sens-hand { grid-area: hand; } .sens-cards { grid-area: cards; }
+  .sens-polar { grid-area: polar; display: flex; flex-direction: column; min-height: 0; }
+  #sens-polar { flex: 1; aspect-ratio: auto; max-height: none; min-height: 300px; }
+  .sens-time { grid-area: time; display: flex; flex-direction: column; }
+  .sens-time canvas { flex: 1; min-height: 120px; height: auto; }
+  .sc-range b { font-size: 46px; }
+}
 
 /* ---------- tune ---------- */
 #view-tune { padding: 12px; }
