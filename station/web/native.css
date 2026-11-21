@@ -1,0 +1,46 @@
+/* Android app only (body.native, added by js/native.js): tilt dead-man, input switch, gamepad chip, menu extras. */
+.drive-opts { flex-wrap: wrap; justify-content: center; }
+.tilt-hint { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; pointer-events: none; color: var(--text-2); text-align: center; }
+.tilt-hint b { font-size: 30px; letter-spacing: .04em; color: var(--text); }
+.tilt-hint span { font-size: 14px; }
+.joy.tilt:not(.held):not(.locked) .tilt-hint { display: flex; }
+.joy.tilt .joy-ring { background: radial-gradient(circle, #20262c 0, #1b1d20 70%); }
+.joy.tilt:not(.held) .joy-knob, .joy.tilt:not(.held) .joy-ring::before, .joy.tilt:not(.held) .joy-ring::after { opacity: 0; }
+.joy.tilt.held .joy-ring { border-color: var(--good); box-shadow: 0 0 0 6px rgba(34, 164, 71, .22); }
+.joy.tilt.held .joy-knob { background: var(--good); box-shadow: 0 4px 16px rgba(34, 164, 71, .45); }
+.pad-chip { display: inline-flex; align-items: center; gap: 6px; padding: 8px 10px; color: var(--text-2); }
+.pad-chip svg { color: var(--good); }
+.native-menu { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line); padding-top: 8px; margin-top: 2px; }
+.native-menu > .muted { font-size: 12px; padding: 0 4px; }
+.native-orient { display: flex; }
+.native-orient button { flex: 1; text-align: center; padding: 8px 6px; font-size: 13px; }
+/* Landscape phone (the app): controller layout - readouts, modes and options on the left, the pad on the right.
+   Works for both the phone layout (< 900 px wide, tabs at the bottom) and the side-panel layout (>= 900 px). */
+@media (orientation: landscape) and (max-height: 520px) {
+  body.native { --tabh: 48px; }
+  body.native .tabs button { gap: 1px; font-size: 11px; }
+  body.native[data-view="drive"] #view-drive { display: grid; }
+  body.native #view-drive { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto auto 1fr;
+    grid-template-areas: "tiles joy" "arm joy" "modes joy" "opts joy"; gap: 8px 14px; padding: 8px 12px; align-content: start; }
+  body.native .tiles { grid-area: tiles; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  body.native .tile { padding: 4px 2px; }
+  body.native .tile b { font-size: 18px; }
+  body.native .tile span { font-size: 10px; }
+  body.native .arm-box { grid-area: arm; }
+  body.native button.arm { padding: 10px; font-size: 15px; }
+  body.native .modes { grid-area: modes; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  body.native .modes button { padding: 9px 2px; font-size: 11px; }
+  body.native .joy-wrap { display: contents; }
+  body.native .joy { grid-area: joy; width: min(320px, calc(100vh - var(--toph) - var(--tabh) - 20px)); align-self: center; }
+  body.native .drive-opts { grid-area: opts; align-self: start; justify-content: flex-start; gap: 6px; }
+  body.native .drive-opts .seg button { padding: 8px 10px; font-size: 13px; }
+  body.native .keys-hint { display: none; }
+  body.native #drive-menu { bottom: 8px; left: 12px; transform: none; }
+  body.native .tilt-hint b { font-size: 24px; }
+}
+@media (orientation: landscape) and (max-height: 520px) and (min-width: 900px) {
+  body.native main { grid-template-columns: minmax(0, 1fr) min(640px, 64vw); }
+  body.native #view-drive { display: grid !important; }
+  body.native .joy { width: min(320px, calc(100vh - var(--toph) - 20px)); }
+}
