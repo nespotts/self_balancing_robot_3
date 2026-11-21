@@ -53,6 +53,34 @@ The RC remote is optional. With none, the phone (this page / the Android app) is
 | Joystick / tilt released, or no `cmd_vel` for 300 ms | speed and turn ramp to 0, keeps balancing | bridge + firmware |
 | Robot link silent | Disarm / mode buttons answer "robot link down - not sent"; the firmware's own failsafes act | bridge |
 
+## Virtual walls and zones
+
+```mermaid
+flowchart LR
+  Z[walls / no-go / fence / slow<br>on the map] --> P[planner: obstacles,<br>inflated like real walls]
+  Z --> W{bridge watchdog<br>25 Hz}
+  W -- "GOTO / EXPLORE: footprint in a no-go zone,<br>out of the fence, at / across a wall" --> H["cmd_vel 0 + HOLD<br>(keeps balancing) → replan"]
+  W -- "joystick (MANUAL / STATION):<br>would enter within 0.3 s" --> J[speed 0, turning still works]
+  W -- "in a slow zone" --> S[speed capped]
+```
+
+**The firmware only knows real range obstacles.** Virtual walls and zones are enforced by the bridge on the Pi:
+
+| | |
+|---|---|
+| GOTO / EXPLORE | robot footprint (planner radius − 20 mm) touches a no-go zone, the fence or a virtual / maze wall, or crossed a wall since the last frame: `cmd_vel 0` + `SET_MODE HOLD`, then the planner replans after 1.5 s (gives up after 3 stops in one job). Again only if it gets 25 mm deeper in. Never IDLE, never arms, nothing while E-stopped or disarmed |
+| Joystick (MANUAL / STATION, phone or PC) | speed that would take the footprint further into a zone / across a wall within 0.3 s is sent as 0; turning on the spot and driving back out are allowed. ⋯ → Map & route settings → **Joystick can't drive into zones** (`zones_block_manual`, default on) |
+| Slow zone | joystick speed capped; GOTO / EXPLORE: `nav.max_speed` lowered (RAM only) from 150 mm before the zone, put back after (and before any **Save to robot**) |
+| Goals | a goto / place inside a no-go zone or outside the fence is refused |
+
+Limits:
+- **The bridge must be running** and linked. The RC remote's MANUAL driving and the robot's own GO_HOME straight line (no map) do not pass through it.
+- **Pose drift**: zones are tied to the odometry (+ map correction). After drift or a pose reset they sit in the wrong place: re-check them after **Reset robot pose**.
+- Inside a no-go zone the planner has no route: drive it out by hand (allowed).
+- 25 Hz telemetry: at 0.5 m/s the robot moves 20 mm between checks.
+
+Tests: `station/bridge/tests/test_zones.py`.
+
 Tests: `station/bridge/tests/test_phone_remote.py` (Disarm with and without a remote, STOP latch / release, tab closed, silent phone),
 `test_phone_ui.py` (the Control screen), `test_app_stop.py`, `station/sim/tests/test_nav.py` (no clients -> no motion).
 Back: [firmware index](firmware.md).

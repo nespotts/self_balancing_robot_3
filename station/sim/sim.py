@@ -132,15 +132,22 @@ def _box(cx, cy, w, h):
 class Room:
     """Walls as line segments (world mm). The robot starts at (0, 0) facing +X."""
 
-    def __init__(self):
+    def __init__(self, empty=False):
+        """empty: only the outer walls (sim --maze, #70)."""
         s = []
         s += _box(1500, 250, 5000, 3500)          # outer walls: x -1000..4000, y -1500..2000
-        s += _box(1500, 900, 600, 400)            # box
-        s += _box(2900, -800, 450, 450)           # box
-        s += _box(700, -1300, 1000, 400)          # couch against the wall
-        s.append((2300, 2000, 2300, 1100))        # partition wall
-        s.append((-1000, 1200, -300, 2000))       # angled corner cabinet
-        self.segs = s
+        if not empty:
+            s += _box(1500, 900, 600, 400)            # box
+            s += _box(2900, -800, 450, 450)           # box
+            s += _box(700, -1300, 1000, 400)          # couch against the wall
+            s.append((2300, 2000, 2300, 1100))        # partition wall
+            s.append((-1000, 1200, -300, 2000))       # angled corner cabinet
+        self.base = s
+        self.segs = list(s)
+
+    def set_extra(self, segs):
+        """Extra real walls on top of the room: the map's virtual walls and mazes (sim --maze, #70)."""
+        self.segs = self.base + [tuple(float(v) for v in s[:4]) for s in segs]
 
     def raycast(self, ox, oy, ang_rad, max_d=RANGE_MAX * 1.5):
         dx, dy = math.cos(ang_rad), math.sin(ang_rad)

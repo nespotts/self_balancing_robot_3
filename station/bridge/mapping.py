@@ -23,6 +23,7 @@ import time
 
 from .occgrid import MAX_CELLS, Grid
 from .places import HOME, Places
+from .zones import Zones
 from . import scanmatch
 
 SENSOR_FWD_MM = 26.0
@@ -77,6 +78,9 @@ class Mapper:
         self.extra_listeners = []        # callables(): the map changed (planner, #12 follow-up)
         self.places = Places()           # saved places (#53), map frame; stored as <map>.places.json
         self.places_pending = False      # broadcast the places on the next poll
+        self.zones = Zones()             # virtual walls / no-go / fence / slow / mazes (#70), <map>.zones.json
+        self.zones_pending = False
+        self.zone_listeners = []         # callables(zones): the layers changed (the sim mirrors maze walls)
 
     # ------------------------------------------------------------ settings
     def _settings_path(self):
@@ -220,6 +224,7 @@ class Mapper:
             self.grid.take_dirty()
             out.append(self.full_msg())
             self.places_pending = True
+            self.zones_pending = True
         else:
             dirty = self.grid.take_dirty()
             if dirty:
@@ -231,6 +236,9 @@ class Mapper:
         if self.places_pending:
             self.places_pending = False
             out.append(self.places_msg())
+        if self.zones_pending:
+            self.zones_pending = False
+            out.append(self.zones_msg())
         if now - self.last_autosave >= AUTOSAVE_S:
             self.last_autosave = now
             if self.changed_since_save and self.n["used"]:
@@ -278,9 +286,9 @@ class Mapper:
                 png = p[:-5] + ".png"
                 if os.path.exists(png):
                     os.remove(png)
-                pp = self.places_path(str(m.get("name")))
-                if pp and os.path.exists(pp):
-                    os.remove(pp)
+                for pp in (self.places_path(str(m.get("name"))), self.zones_path(str(m.get("name")))):
+                    if pp and os.path.exists(pp):
+                        os.remove(pp)
             return {"t": "map_list", "maps": self.list()}
         if act == "list":
             return {"t": "map_list", "maps": self.list()}
@@ -298,6 +306,8 @@ class Mapper:
         self.matcher.reset()
         self.name = None
         self.places = Places()          # places belong to a map; the saved map keeps its own
+        self.zones = Zones()            # ... and so do the zones (#70)
+        self._zones_notify()
         self.version += 1
         self.full_pending = True
         self.last_send = 0.0
@@ -377,6 +387,82 @@ class Mapper:
         self.places_changed()
         return None
 
+    # ------------------------------------------------------------ zones (#70)
+    def zones_path(self, name):
+        return os.path.join(self.dir, name + ".zones.json") if NAME_RE.match(name or "") else None
+
+    def save_zones(self, name=None):
+        name = name or self.name or AUTOSAVE_NAME
+        p = self.zones_path(name)
+        if not p or (not self.zones.items and not os.path.exists(p)):
+            return
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            Zones.write(p, self.zones)
+        except OSError:
+            pass
+
+    def _zones_notify(self):
+        self.zones_pending = True
+        for f in self.zone_listeners:
+            f(self.zones)
+
+    def zones_changed(self):
+        self.save_zones()
+        self._zones_notify()
+        for f in self.extra_listeners:       # the planner checks its route again
+            f()
+
+    def zones_msg(self):
+        return json.dumps({"t": "zones", "map": self.name, "items": self.zones.items,
+                           "undo": len(self.zones.history)}, separators=(",", ":"))
+
+    def zones_command(self, m, who="?", robot_xy=None):
+        """{"t": "zones", "action": ...}, points in the odometry frame (like places / goto), stored in the map frame:
+          add     kind wall|nogo|fence|slow, pts [[x, y], ...], speed (slow, mm/s)   (a new fence replaces the old)
+          update  id, pts and / or speed            delete  id          clear  [kind]        undo
+          maze    x, y (centre), w, h (mm), cell (mm), seed (optional): a random maze, entrance facing the robot
+          list    (everyone gets the layers again)
+        robot_xy: the robot's odometry position (the maze entrance faces it).
+        -> error reply or None; the layers reach every browser with the next poll."""
+        act = m.get("action")
+        Z = self.zones
+
+        def to_map(pts):
+            if not isinstance(pts, list):
+                raise ValueError("pts: a list of [x, y]")
+            return [list(self.map_pose(float(p[0]), float(p[1]), 0.0)[:2]) if isinstance(p, (list, tuple)) and len(p) >= 2
+                    else None for p in pts]
+        try:
+            if act == "add":
+                zid = Z.add(m.get("kind"), to_map(m.get("pts")), m.get("speed"))
+                self.say("%s: added %s %s" % (who, m.get("kind"), zid))
+            elif act == "update":
+                Z.update(str(m.get("id")), to_map(m["pts"]) if m.get("pts") is not None else None, m.get("speed"))
+            elif act == "delete":
+                self.say("%s: deleted zone %s" % (who, Z.delete(str(m.get("id")))))
+            elif act == "clear":
+                Z.clear(m.get("kind") or None)
+                self.say("%s: cleared %s" % (who, m.get("kind") or "all zones"))
+            elif act == "undo":
+                Z.undo()
+            elif act == "maze":
+                cx, cy = self.map_pose(float(m.get("x")), float(m.get("y")), 0.0)[:2]
+                toward = self.map_pose(robot_xy[0], robot_xy[1], 0.0)[:2] if robot_xy else None
+                kw = {k: m[k] for k in ("w", "h", "cell", "seed") if m.get(k) is not None}
+                zid = Z.add_maze(cx, cy, toward=toward, **kw)
+                it = Z.find(zid)
+                self.say("%s: maze %s, %d x %d cells of %d mm" % (who, zid, it["cols"], it["rows"], it["cell"]))
+            elif act == "list":
+                self.zones_pending = True
+                return None
+            else:
+                return {"t": "error", "text": "unknown zones action %r" % act}
+        except (TypeError, ValueError, KeyError) as e:
+            return {"t": "error", "text": "zones: %s" % e}
+        self.zones_changed()
+        return None
+
     # ------------------------------------------------------------ files
     def path(self, name):
         return os.path.join(self.dir, name + ".json") if NAME_RE.match(name or "") else None
@@ -392,6 +478,7 @@ class Mapper:
         with open(p[:-5] + ".png", "wb") as f:        # preview to look at (not read back)
             f.write(self.grid.png())
         self.save_places(name)
+        self.save_zones(name)
         if not quiet:
             self.name = name
             self.changed_since_save = False
@@ -405,6 +492,8 @@ class Mapper:
         self.grid = g
         self.corr = [float(c) for c in g.meta.get("corr", [0, 0, 0])][:3]
         self.places = Places.read(self.places_path(name))
+        self.zones = Zones.read(self.zones_path(name))
+        self._zones_notify()
         self.matcher.reset()
         self.name = name
         self.version += 1

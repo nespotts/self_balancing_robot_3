@@ -164,6 +164,33 @@ flowchart LR
 | remote's **Go home** | the robot starts a straight line; the bridge swaps it for a planned route to Home when the robot is armed and a map exists. It never arms the robot |
 
 Browser API and the GO_HOME rules: [api.md](api.md#saved-places).
+
+### Walls, zones and mazes
+
+<p>
+<img src="../station/docs/screenshots/phone-zones-draw.png" width="25%">
+<img src="../station/docs/screenshots/phone-maze.png" width="25%">
+<img src="../station/docs/screenshots/phone-maze-solve.png" width="25%">
+</p>
+<p><img src="../station/docs/screenshots/desktop-zones-draw.png" width="48%"> <img src="../station/docs/screenshots/desktop-maze-solve.png" width="48%"></p>
+
+⋯ → **Draw walls, zones, maze…** Pick a tool, draw, **✓**. Tap a shape to select it: drag its white handles, **Delete**. **Undo** steps back. **Done** leaves.
+
+| Tool | Looks | Robot |
+|---|---|---|
+| **Wall** (tap points) | thick dark red line | never crosses it |
+| **No-go** (▭ drag, or ✎ tap corners) | red hatch | never enters |
+| **Fence** (one) | green dashes | never leaves |
+| **Slow** | amber, `≤ 120 mm/s` (tap it to change) | speed capped inside |
+| **Maze** | tap a spot: W × H m, cell width (≥ 400 mm, default 700) → **Generate** | tap it: **Solve ▶** (timer, best time kept), **New maze**, **Clear** |
+| **Delete** | tap a shape | |
+
+- Saved with the map (`<map>.zones.json`), like places. **Clear map** clears them too.
+- Planner + Explore: walls and zone edges are walls, kept off by robot radius + margin like real ones (narrow-gap squeeze plans too); outside the fence / inside no-go = blocked, no frontier there; slow zones cost 5× (routes go round when they can). A goal inside a no-go zone or outside the fence is refused.
+- The bridge enforces them while driving: [safety](safety.md#virtual-walls-and-zones) (stop + HOLD + replan; joystick blocked; limits).
+- **Solve**: drive to the exit cell, the exit gap counted as a wall, so the route goes in at the entrance (the planner knows the maze: it is not a blind solve). With real maze walls keep cells ≥ 700 mm: the robot stops 300 mm (`rng.obstacle_mm`) before a wall ahead, so each corner needs ~350 mm.
+- Sim: `python -m station.sim --maze [WxH]` = an empty room, a random maze ahead of the robot, and every virtual wall / maze built as a real wall as you draw.
+- API: [api.md](api.md#zones).
 Pi cost: 0.2 ms per reading (range weighting +10 %, growing: one copy of the grid, a few ms) (< 1 % of a core at 50/s); a route or frontier search 0.1-0.3 s in a worker thread.
 Offline: `python -m station.tools.mapbuild ~/sbr3-logs/<session>.jsonl -o map.png`.
 Drift correction (scan-to-map matching) is off by default: in the sim it does not beat plain odometry yet.

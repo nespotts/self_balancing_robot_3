@@ -2,7 +2,7 @@
 import { state, on, send, connect, modeName, flag, robotAlive } from "./conn.js";
 import { remotePresent } from "./drive.js";
 import { toast } from "./ui.js";
-import { invalidate as mapInvalidate } from "./map.js";
+import { invalidate as mapInvalidate, mapDebug } from "./map.js";
 import { places, openSheet } from "./places.js";
 import "./drive.js";
 import "./native.js";   // Android app extras (tilt, gamepad); no-op in browsers
@@ -127,4 +127,4 @@ on("conn", (up) => { updateTop(); if (!up) toast("Connection to the bridge lost 
 updateTop();
 
 connect();
-window.sbr3 = { state, send, show, openPlace: (n) => openSheet(places.items.find((p) => p.name === n)) };   // for debugging from the console + screenshots
+window.sbr3 = { state, send, show, map: mapDebug, openPlace: (n) => openSheet(places.items.find((p) => p.name === n)) };   // for debugging from the console + screenshots

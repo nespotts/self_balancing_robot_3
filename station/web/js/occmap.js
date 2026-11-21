@@ -139,7 +139,7 @@ on("map_list", (m) => {
 });
 
 $("map-reset").onclick = () => {
-  if (!confirm("Clear the map and its places? (Saved maps are kept.)")) return;
+  if (!confirm("Clear the map, its places and its walls / zones? (Saved maps are kept.)")) return;
   cmd({ t: "map", action: "reset" });
   $("map-menu").hidden = true;
 };
@@ -158,6 +158,7 @@ for (const [id, t, key] of NUM) {
   };
 }
 $("set-correct").onchange = (e) => cmd({ t: "map", action: "set", settings: { correct: e.target.checked } });
+$("set-zblock").onchange = (e) => cmd({ t: "plan", action: "set", settings: { zones_block_manual: e.target.checked } });
 
 function syncSettings() {
   for (const [id, t, key] of NUM) {
@@ -165,6 +166,7 @@ function syncSettings() {
     if (src && key in src && document.activeElement !== el) el.value = src[key];
   }
   if (occ.settings && "correct" in occ.settings) $("set-correct").checked = occ.settings.correct;
+  if (plan.settings && "zones_block_manual" in plan.settings) $("set-zblock").checked = plan.settings.zones_block_manual;
   const st = occ.stats || {};
   $("map-stats").textContent = st.readings != null
     ? `${occ.name ? occ.name + " · " : ""}${st.used} of ${st.readings} readings used · ${st.tilt} tilted · bridge CPU ${st.cpu_pct}%`
