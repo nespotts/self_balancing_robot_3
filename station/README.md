@@ -37,6 +37,10 @@ Options: `--remote` (RC remote on: its ARMED switch rules), `--remote-disarmed`,
 Tests: `python -m unittest discover -s station -t .` (protocol vs the C header, plus a full sim + bridge + browser-API run).
 Screenshots: `python -m station.tools.screenshots --url http://localhost:8080/ --prep`
 
+## Android app
+
+[android/](android/README.md): full-screen app for the phone. Finds the robot on the Wi-Fi, tilt-to-drive (hold-to-drive dead-man), Bluetooth gamepad, haptics.
+
 ## Use it
 
 | | |

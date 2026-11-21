@@ -106,13 +106,15 @@ def split_runs(items):
         f = it[2].split(",")
         kind = f[1] if len(f) > 1 else ""
         if kind == "begin":
-            cur = {"test": f[2], "status": "running", "a": [], "b": [], "c": [], "sum": [], "begin": it[2],
-                   "cfg": parse_cfg(it[2])}
+            cur = {"test": f[2], "status": "running", "a": [], "ad": [], "b": [], "c": [], "l": [], "sum": [],
+                   "begin": it[2], "cfg": parse_cfg(it[2])}
             runs.append(cur)
         elif cur is None:
             continue
-        elif kind in ("a", "b", "c"):
+        elif kind in ("a", "ad", "b", "c"):
             cur[kind].append(f)
+        elif kind == "l":
+            cur["l"].append(it[2])
         elif kind == "sum":
             cur["sum"].append(it[2])
         elif kind == "end":
@@ -210,6 +212,9 @@ def analyze(runs, params, a, cfg):
         if v is not None and V_OK[0] <= v <= V_OK[1]:
             return v
         if a.vbatt:
+            if not S.get("vb_note"):
+                S["vb_note"] = True
+                print("NOTE: pack reading invalid (%s V, balance lead not connected?): volts use --vbatt %.2f V" % (s, a.vbatt))
             return a.vbatt
         warn.append("battery reading %s V invalid; volts unknown (use --vbatt)" % s)
         return None
@@ -237,6 +242,16 @@ def analyze(runs, params, a, cfg):
                                                        fmt(t[1]), fmt(e.get("vb"))))
                 S.setdefault("start_v", []).append(s[1])
                 S.setdefault("stop_v", []).append(t[1])
+
+    # ---------------- test 1 ramp down while turning (mt,ad: wheel,dir,duty,volts,vbatt,speed)
+    AD = {}
+    if ra:
+        for f in ra["ad"]:
+            v, sp = volts(num(f[4]), f[6]), num(f[7])
+            if v is not None and sp is not None:
+                AD.setdefault((f[2], f[3]), []).append((v, abs(sp)))
+        for (w, d), pts in sorted(AD.items()):
+            print("ramp down while turning %s %s: %s" % (w, d, "  ".join("%.2fV:%.0f" % p for p in sorted(pts)[::3])))
 
     # ---------------- test b
     B, fits, taus = {}, {}, {}
@@ -269,8 +284,14 @@ def analyze(runs, params, a, cfg):
             fit = linfit([v for v, _ in moving], [s for _, s in moving])
             if fit and fit[0] > 0:
                 k, c, res = fit
+                # speed vs volts while turning: test-1 ramp down (mt,ad) below the first steady step that moved
+                vmove = min((v for v, s in pts if s > MOVE_MMS), default=None)
+                low = sorted((v, s) for v, s in AD.get((w, d), []) if vmove is None or v < vmove - 0.3)
+                if low:
+                    low = [(low[0][0] - 0.25, 0.0)] + low
+                    S.setdefault("kin", {})[(w, d)] = low
                 fits[(w, d)] = {"k": k, "v0": -c / k, "res": res, "top": max(s for _, s in pts),
-                                "pts": sorted([(0.0, 0.0)] + pts)}
+                                "pts": sorted([(0.0, 0.0)] + low + [p for p in pts if vmove is None or p[0] >= vmove])}
         if signs:
             warn.append("encoder sign opposite to the command on: %s (check ENC direction / motor wiring)" % ", ".join(signs))
         print("\nlinear fit above the dead zone: speed = k * (V - V0)")
@@ -328,8 +349,29 @@ def analyze(runs, params, a, cfg):
         print("stop = command -> wheel at its turning point; rev = until 2 deg back; dwell = rev - stop")
         print("(the encoder is on the gearbox output: free play shows up as dwell, not as an angle)")
 
+    # ---------------- tests 5-7: tracking (mt,l lines; newest run that has them)
+    rl = pick(runs, "l")
+    if rl:
+        T = {}
+        for ln in rl["l"]:
+            f = ln.split(",")
+            m = re.search(r"rms=([-0-9.]+)", ln)
+            fl = re.search(r"flips=([-0-9.]+)", ln)
+            t63 = re.search(r"t63u=([-0-9.]+),t63d=([-0-9.]+)", ln)
+            T.setdefault((f[2], f[3]), {})[f[4]] = (float(m.group(1)) if m else None, float(fl.group(1)) if fl else None,
+                                                     t63.groups() if t63 else None)
+        print("\n== tracking: rms speed error (mm/s), output sign flips/s        run status: %s" % rl["status"])
+        segs = ("r+", "r-", "s0", "s150", "st")
+        print("%-5s %-6s " % ("ctl", "wheel") + " ".join("%7s" % s for s in segs) + "  flips s0   t63 up/down ms")
+        for (ctl, w), d in sorted(T.items()):
+            st = d.get("st", (None, None, None))
+            print("%-5s %-6s " % (ctl, w) + " ".join("%7s" % fmt(d.get(s, (None,))[0], "%.0f") for s in segs) +
+                  "  %9s   %s" % (fmt(d.get("s0", (None, None))[1], "%.1f"), "/".join(st[2]) if st[2] else "-"))
+            S.setdefault("track", {}).setdefault(ctl, []).extend(d[s][0] for s in segs if s in d and d[s][0] is not None)
+        print("ol0 = open loop model 0 (v3 curve), ol1 = open loop model 1 (volts), cl = closed-loop speed loop")
+
     # ---------------- proposal
-    if not fits and not A:
+    if not fits and not A and not rl:
         for w_ in warn:
             print("WARNING: " + w_)
         return S
@@ -482,16 +524,18 @@ def compare(summaries):
     """One row per drive config: dead zone, linearity, time constant, reversal."""
     print("\n" + "=" * 100)
     print("=== comparison (means over wheels and directions; volts = duty / 4095 * pack V)")
-    print("%-9s %8s %8s %8s %10s %8s %9s %9s %9s" % ("config", "start V", "stop V", "fit V0", "k mm/s/V",
-                                                     "resid", "tau L/R", "top mm/s", "dwell ms"))
+    print("%-9s %8s %8s %8s %10s %8s %9s %9s %9s  %s" % ("config", "start V", "stop V", "fit V0", "k mm/s/V",
+                                                         "resid", "tau L/R", "top mm/s", "dwell ms", "track rms ol0/ol1/cl"))
     for S in summaries:
         def m(key):
             xs = [x for x in S.get(key, []) if x is not None]
             return sum(xs) / len(xs) if xs else None
         tau = "/".join(fmt(S.get("tau", {}).get(w), "%.0f") for w in WHEELS)
-        print("%-9s %8s %8s %8s %10s %7s%% %9s %9s %9s" % (
+        tr = S.get("track", {})
+        trs = "/".join(fmt(sum(tr[c]) / len(tr[c]) if tr.get(c) else None, "%.0f") for c in ("ol0", "ol1", "cl"))
+        print("%-9s %8s %8s %8s %10s %7s%% %9s %9s %9s  %s" % (
             cfg_name(S["cfg"]), fmt(m("start_v")), fmt(m("stop_v")), fmt(m("v0")), fmt(m("k"), "%.1f"),
-            fmt(m("resid"), "%.1f"), tau, fmt(m("top"), "%.0f"), fmt(m("dwell"), "%.0f")))
+            fmt(m("resid"), "%.1f"), tau, fmt(m("top"), "%.0f"), fmt(m("dwell"), "%.0f"), trs))
     print("lower start/stop V and V0 = smaller dead zone; lower resid = straighter speed vs volts above it;")
     print("drive 0 = PWM on EN (coast in the off-time), drive 1 = PWM on IN (brake in the off-time)")
 

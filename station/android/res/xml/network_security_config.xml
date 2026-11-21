@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The bridge is plain http on the LAN. Android's config can only list exact hosts, not IP ranges, and the robot's
+  address comes from a subnet scan, so cleartext is allowed here and limited in code instead:
+    - the WebView only navigates to / trusts private-LAN hosts (MainActivity.isTrusted, Lan.isPrivateHost)
+    - every other http request from the page is answered 403 (MainActivity.shouldInterceptRequest)
+    - the finder only probes private IPv4 addresses (Lan.scanList / Finder.probe)
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

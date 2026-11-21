@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="420" viewBox="0 0 720 420" font-family="system-ui,Segoe UI,Arial,sans-serif" font-size="13">
+<title>Wheel speed vs motor volts</title>
+<rect width="100%" height="100%" fill="#fcfcfb"/>
+<text x="70" y="22" fill="#0b0b0b" font-size="15" font-weight="600">Right wheel speed vs motor volts while turning</text>
+<line x1="70.0" y1="46" x2="70.0" y2="370" stroke="#e4e3df"/>
+<text x="70.0" y="390" fill="#52514e" text-anchor="middle">0 V</text>
+<line x1="160.0" y1="46" x2="160.0" y2="370" stroke="#e4e3df"/>
+<text x="160.0" y="390" fill="#52514e" text-anchor="middle">2 V</text>
+<line x1="250.0" y1="46" x2="250.0" y2="370" stroke="#e4e3df"/>
+<text x="250.0" y="390" fill="#52514e" text-anchor="middle">4 V</text>
+<line x1="340.0" y1="46" x2="340.0" y2="370" stroke="#e4e3df"/>
+<text x="340.0" y="390" fill="#52514e" text-anchor="middle">6 V</text>
+<line x1="430.0" y1="46" x2="430.0" y2="370" stroke="#e4e3df"/>
+<text x="430.0" y="390" fill="#52514e" text-anchor="middle">8 V</text>
+<line x1="520.0" y1="46" x2="520.0" y2="370" stroke="#e4e3df"/>
+<text x="520.0" y="390" fill="#52514e" text-anchor="middle">10 V</text>
+<line x1="610.0" y1="46" x2="610.0" y2="370" stroke="#e4e3df"/>
+<text x="610.0" y="390" fill="#52514e" text-anchor="middle">12 V</text>
+<line x1="70" y1="370.0" x2="610" y2="370.0" stroke="#e4e3df"/>
+<text x="62" y="374.0" fill="#52514e" text-anchor="end">0</text>
+<line x1="70" y1="316.0" x2="610" y2="316.0" stroke="#e4e3df"/>
+<text x="62" y="320.0" fill="#52514e" text-anchor="end">250</text>
+<line x1="70" y1="262.0" x2="610" y2="262.0" stroke="#e4e3df"/>
+<text x="62" y="266.0" fill="#52514e" text-anchor="end">500</text>
+<line x1="70" y1="208.0" x2="610" y2="208.0" stroke="#e4e3df"/>
+<text x="62" y="212.0" fill="#52514e" text-anchor="end">750</text>
+<line x1="70" y1="154.0" x2="610" y2="154.0" stroke="#e4e3df"/>
+<text x="62" y="158.0" fill="#52514e" text-anchor="end">1000</text>
+<line x1="70" y1="100.0" x2="610" y2="100.0" stroke="#e4e3df"/>
+<text x="62" y="104.0" fill="#52514e" text-anchor="end">1250</text>
+<line x1="70" y1="46.0" x2="610" y2="46.0" stroke="#e4e3df"/>
+<text x="62" y="50.0" fill="#52514e" text-anchor="end">1500</text>
+<text x="30" y="36" fill="#52514e">mm/s</text>
+<path d="M340.0,362.2 L351.2,354.6 L362.5,339.7 L373.8,324.7 L385.0,324.0 L407.5,279.3 L441.2,236.8 L475.0,192.1 L508.7,147.0 L542.5,107.2 L576.2,90.0 L610.0,88.7" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="407.5" cy="279.3" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="441.2" cy="236.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="475.0" cy="192.1" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="508.7" cy="147.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="542.5" cy="107.2" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="576.2" cy="90.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="610.0" cy="88.7" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M238.8,361.8 L250.0,351.7 L261.2,345.9 L272.5,331.2 L283.8,325.8 L295.0,314.9 L306.2,305.8 L317.5,297.5 L328.8,288.7 L340.0,280.2 L351.2,269.6 L362.5,260.8 L373.8,254.1 L385.0,249.2 L441.2,208.7 L475.0,189.1 L508.7,169.6 L542.5,131.5 L576.2,101.6 L610.0,85.3" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="441.2" cy="208.7" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="475.0" cy="189.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="508.7" cy="169.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="542.5" cy="131.5" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="576.2" cy="101.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="610.0" cy="85.3" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M182.5,359.7 L193.8,348.3 L205.0,331.6 L216.2,323.3 L227.5,309.9 L238.8,300.4 L250.0,288.4 L261.2,277.5 L272.5,265.8 L283.8,256.3 L295.0,243.9 L306.2,239.7 L317.5,228.1 L328.8,220.0 L340.0,214.1 L351.2,207.0 L362.5,205.4 L407.5,169.2 L441.2,156.6 L475.0,137.0 L508.7,125.9 L542.5,115.6 L576.2,98.0 L610.0,68.5" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="407.5" cy="169.2" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="441.2" cy="156.6" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="475.0" cy="137.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="508.7" cy="125.9" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="542.5" cy="115.6" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="576.2" cy="98.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="610.0" cy="68.5" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M126.2,361.5 L137.5,347.4 L148.8,328.8 L160.0,306.6 L171.2,288.3 L182.5,266.0 L193.8,248.3 L205.0,236.9 L216.2,232.1 L272.5,173.9 L306.3,148.4 L340.1,130.4 L373.7,122.5 L407.5,113.4 L441.2,99.4 L475.0,96.2 L508.7,93.0 L542.5,90.3 L576.2,83.2 L610.0,73.5" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="272.5" cy="173.9" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="306.3" cy="148.4" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="340.1" cy="130.4" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="373.7" cy="122.5" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="407.5" cy="113.4" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="441.2" cy="99.4" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="475.0" cy="96.2" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="508.7" cy="93.0" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="542.5" cy="90.3" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="576.2" cy="83.2" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="610.0" cy="73.5" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M103.8,365.3 L115.0,355.9 L126.2,338.5 L137.5,326.9 L148.8,318.4 L160.0,305.8 L171.2,305.0 L193.7,288.9 L218.4,270.8 L243.0,256.3 L267.8,243.7 L292.6,229.8 L317.3,210.3 L341.9,205.0 L366.7,179.9 L391.5,169.9 L416.2,153.9 L440.8,143.7 L465.6,127.4" fill="none" stroke="#e87ba4" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="193.7" cy="288.9" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="218.4" cy="270.8" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="243.0" cy="256.3" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="267.8" cy="243.7" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="292.6" cy="229.8" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="317.3" cy="210.3" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="341.9" cy="205.0" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="366.7" cy="179.9" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="391.5" cy="169.9" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="416.2" cy="153.9" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="440.8" cy="143.7" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="465.6" cy="127.4" r="4" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<text x="288.6" y="217.8" fill="#0b0b0b" text-anchor="end" stroke="#fcfcfb" stroke-width="4" paint-order="stroke">brake 1 kHz</text>
+<text x="620.0" y="72.5" fill="#0b0b0b" stroke="#fcfcfb" stroke-width="4" paint-order="stroke">coast 4 kHz</text>
+<text x="620.0" y="88.5" fill="#0b0b0b" stroke="#fcfcfb" stroke-width="4" paint-order="stroke">coast 1 kHz</text>
+<text x="620.0" y="104.5" fill="#0b0b0b" stroke="#fcfcfb" stroke-width="4" paint-order="stroke">coast 10 kHz</text>
+<text x="620.0" y="120.5" fill="#0b0b0b" stroke="#fcfcfb" stroke-width="4" paint-order="stroke">coast 36.6 kHz</text>
+<text x="70" y="412" fill="#52514e" font-size="12">dots: steady 1.2 s steps from rest (test 2); line below the first dot: slow ramp down while still turning (test 1)</text></svg>
