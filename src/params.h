@@ -57,7 +57,7 @@
   X(RNG_SERVO_MAX,   "rng.servo_max_deg",  175.0f,    90.0f,   180.0f)   \
   X(RNG_SERVO_SCALE, "rng.servo_deg_per_cmd", 1.0f,   0.5f,    1.5f)  \
   /* motor test + correction (issue #16, see motors.h / motor_test.h) */ \
-  X(MOT_TEST,        "mot.test",           0.0f,      0.0f,    4.0f)     \
+  X(MOT_TEST,        "mot.test",           0.0f,      0.0f,    7.0f)     \
   X(MOT_TEST_MAX,    "mot.test_max",       4095.0f,   500.0f,  4095.0f)  \
   X(MOT_MODEL,       "mot.model",          0.0f,      0.0f,    1.0f)     \
   X(MOT_VCOMP,       "mot.vcomp",          0.0f,      0.0f,    1.0f)     \
@@ -71,7 +71,20 @@
   X(RNG_IDLE_OFF,    "rng.idle_off",       1.0f,      0.0f,    1.0f)     \
   /* L298N drive experiments (issue #22, see motors.h); applied while the motors are off */ \
   X(MOT_PWM_HZ,      "mot.pwm_hz",         36621.09f, 100.0f,  50000.0f) \
-  X(MOT_DRIVE_MODE,  "mot.drive_mode",     0.0f,      0.0f,    0.0f)  /* LOCKED to 0: mode 1 (PWM on IN) smoked the L298N, issue #23 */
+  /* drive_mode 1 (PWM on IN, brake decay): only at mot.pwm_hz <= mot.brake_max_hz, else mode 0   */ \
+  /* (issue #23: the smoke was the binding left motor at 36.6 kHz; #26)                           */ \
+  X(MOT_DRIVE_MODE,  "mot.drive_mode",     0.0f,      0.0f,    1.0f)     \
+  /* motor profile (issue #26, see motor_test.h / motor_model.h) */      \
+  X(MOT_TEST_WHEELS, "mot.test_wheels",    0.0f,      0.0f,    2.0f)     \
+  X(MOT_BRAKE_MAX_HZ, "mot.brake_max_hz",  2000.0f,   100.0f,  10000.0f) \
+  X(MOT_BRAKE_DUTY_MAX, "mot.brake_duty_max", 3000.0f, 500.0f, 4095.0f)  \
+  X(MOT_SPEED_LOOP,  "mot.speed_loop",     0.0f,      0.0f,    1.0f)     \
+  X(MOT_SL_KP,       "mot.sl_kp",          0.006f,    0.0f,    0.1f)     \
+  X(MOT_SL_KI,       "mot.sl_ki",          0.08f,     0.0f,    2.0f)     \
+  X(MOT_SL_IMAX,     "mot.sl_imax",        3.0f,      0.0f,    12.0f)    \
+  X(MOT_SL_BAND,     "mot.sl_band",        0.3f,      0.0f,    3.0f)     \
+  X(MOT_K_L,         "mot.k_l",            200.0f,    10.0f,   2000.0f)  \
+  X(MOT_K_R,         "mot.k_r",            200.0f,    10.0f,   2000.0f)
 
 enum ParamId : uint16_t {
 #define PARAM_ENUM(id, name, def, mn, mx) P_##id,

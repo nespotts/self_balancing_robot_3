@@ -342,6 +342,7 @@ static void controlStep() {
   if (t - enc_last_us >= ENCODER_PERIOD_US) {
     enc_last_us = t;
     odom.update(t, imu.heading());
+    if (odom.ok()) motors_speed_feedback(odom.leftCounts(), odom.rightCounts(), t);
   }
   // range sweep: a bounded slice of I2C work (a quarter of the step period), long before the next sample
   if (sweep.started())
@@ -367,9 +368,9 @@ static void sendOutput(uint32_t now_us) {
   while (sweep.peekFrame(rf) && link.send(MSG_RANGE, &rf, sizeof(rf))) sweep.popFrame();
 }
 
-// Motor test (issue #16): own safety interlocks inside MotorTest; here only the wiring.
+// Motor test (issues #16, #26): own safety interlocks inside MotorTest; here only the wiring.
 static void motorTestPoll(uint32_t now_us, uint32_t now_ms) {
-  static bool drove = false, echo = false;
+  static bool drove = false, echo = false, first = true;
   static float last_l = 0, last_r = 0;
   const ImuSample& s = imu.sample();
   MtIn in;
@@ -391,17 +392,43 @@ static void motorTestPoll(uint32_t now_us, uint32_t now_ms) {
   in.speed_r = odom.right_mms;
   in.vbatt = batt.packV();
   in.max_duty = P(P_MOT_TEST_MAX);
-  in.pwm_hz = motors_pwm_hz();  // in use (a changed param applies only with the motors off)
-  in.drive_mode = motors_drive_mode();
+  in.wheels = (uint8_t)lroundf(P(P_MOT_TEST_WHEELS));
+  // drive config the test will use: applied by motors_test_begin() when it starts
+  in.pwm_hz = P(P_MOT_PWM_HZ);
+  in.drive_mode = P(P_MOT_DRIVE_MODE) >= 0.5f ? 1 : 0;
+  in.brake_max_hz = P(P_MOT_BRAKE_MAX_HZ);
+  in.brake_duty_max = P(P_MOT_BRAKE_DUTY_MAX);
+  in.curve_exp = P(P_MOT_CURVE_EXP);
+  in.knee_in = P(P_MOT_KNEE_IN);
+  in.knee_out = P(P_MOT_KNEE_OUT);
+  in.v_ref = P(P_MOT_V_REF);
+  in.dz_band = P(P_MOT_DZ_BAND);
+  in.dz[0][0] = P(P_MOT_DZ_L_FWD);
+  in.dz[0][1] = P(P_MOT_DZ_L_REV);
+  in.dz[1][0] = P(P_MOT_DZ_R_FWD);
+  in.dz[1][1] = P(P_MOT_DZ_R_REV);
+  in.k[0] = P(P_MOT_K_L);
+  in.k[1] = P(P_MOT_K_R);
+  in.sl.kp = P(P_MOT_SL_KP);
+  in.sl.ki = P(P_MOT_SL_KI);
+  in.sl.i_max = P(P_MOT_SL_IMAX);
+  in.sl.band = P(P_MOT_SL_BAND);
   mtest.step(in);
+  if (mtest.driving() && !drove) {
+    // test start: both motors off, then its drive config (refused: mode 1 above mot.brake_max_hz)
+    if (motors_test_begin(mtest.driveMode(), mtest.pwmHz())) drove = true;
+    else mtest.abort("drive_config_refused", now_us);
+    first = true;
+  }
   if (mtest.driving()) {
-    if (!drove || mtest.left() != last_l || mtest.right() != last_r) motors_set_raw(mtest.left(), mtest.right());
+    if (first || mtest.left() != last_l || mtest.right() != last_r)
+      motors_test_drive(mtest.left(), mtest.right(), mtest.wheels());
     last_l = mtest.left();
     last_r = mtest.right();
-    drove = true;
+    first = false;
   } else if (drove) {
     drove = false;
-    if (!motors_active) motors_stop();
+    motors_test_end();  // both off, back to the params' drive config
   }
   if (mtest.takeDone()) {
     g_param[P_MOT_TEST] = 0;
@@ -435,12 +462,12 @@ static void background() {
   uint8_t ev;
   while (modes.takeEvent(ev)) handleEvent(ev);
   motorTestPoll(now_us, now_ms);
-  // mot.pwm_hz / mot.drive_mode: applied only while both motors are off (issue #22)
+  // mot.pwm_hz / mot.drive_mode: applied only while both motors are off (issue #22); mode 1 only up to mot.brake_max_hz
   motors_service();
   static bool cfg_log = false;
   if (motors_take_config_changed()) cfg_log = true;
   if (cfg_log && link.log("mot: drive_mode %u (%s), pwm %.0f Hz", (unsigned)motors_drive_mode(),
-                          motors_drive_mode() ? "IN PWM, brake decay" : "EN PWM, coast decay",
+                          motors_drive_mode() ? "IN PWM, brake decay" : (motors_drive_mode_refused() ? "EN PWM, coast decay; drive_mode 1 refused above mot.brake_max_hz" : "EN PWM, coast decay"),
                           (double)motors_pwm_hz()))
     cfg_log = false;
 
@@ -460,6 +487,7 @@ static void background() {
     if (now_us - enc_last_us >= 10000) {
       enc_last_us = now_us;
       odom.update(now_us, imu.heading());
+      if (odom.ok()) motors_speed_feedback(odom.leftCounts(), odom.rightCounts(), now_us);
     }
     if (now_us - last_tlm_us >= 100000 && !tlm_fresh) buildTelemetry(now_us);
     static uint32_t sweep_us = 0;
