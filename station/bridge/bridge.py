@@ -12,7 +12,7 @@ from .httpws import HttpServer, Response
 from .session_log import SessionLog, to_csv
 from .transport import LinkError, open_link
 
-BRIDGE_VERSION = "sbr3-bridge 1"
+BRIDGE_VERSION = "sbr3-bridge 2"
 # NavStatusFrame.state is robot-defined; these are the names the simulator uses (and a
 # suggestion for the firmware). Unknown values show as "state N" in the UI.
 NAV_STATE_NAMES = ["idle", "turning", "driving", "blocked", "arrived"]
@@ -23,8 +23,24 @@ ROBOT_SILENT_S = 1.0     # no telemetry for this long -> robot shown as not resp
 RANGE_RING = 4000
 RANGE_ON_CONNECT = 2500
 TILT_DEG = 10.0          # range points taken while pitched more than this are flagged
+                         # (IMU pitch, which reads about -3 deg when balanced)
+SENSOR_FWD_MM = 26.0     # range-sensor servo axis, forward of the axle (CAD)
 WS_SLOW_BYTES = 256 * 1024
 POLLER_TIMEOUT_S = 3.0
+# Flashing: while this file exists the bridge lets go of the serial port (checked 4x a second).
+# A file older than RELEASE_STALE_S is ignored (the flash script died without removing it);
+# touch it again to hold the port longer. See README.md "Flashing while the bridge runs".
+DEFAULT_RELEASE_FILE = "/tmp/sbr3-bridge.release" if os.name == "posix" else \
+    os.path.join(tempfile.gettempdir(), "sbr3-bridge.release")
+RELEASE_STALE_S = 15 * 60
+LINK_POLL_S = 0.25
+DEFAULT_LOG_MAX_MB = 2048
+PRUNE_EVERY_S = 60.0
+# Tuning stream: every telemetry frame (up to tlm.hz = 400) batched per tick, for subscribed clients.
+TUNE_COLS = ["rt", "pitch_deg", "balance_target_deg", "bal_p", "bal_i", "bal_d", "motor_left", "motor_right",
+             "steer_out", "vel_out_deg", "step"]
+TUNE_BUF_MAX = 4000
+CFG_ACTIONS = {"save": "cfg.save", "defaults": "cfg.defaults"}
 
 
 def _now():
@@ -52,12 +68,15 @@ def _round_dict(d):
 
 class Bridge:
     def __init__(self, port, web_dir, log_dir, http_host="0.0.0.0", http_port=8080, baud=115200,
-                 release_file=None, log_max_mb=1000, quiet=False):
+                 release_file=None, log_max_mb=DEFAULT_LOG_MAX_MB, quiet=False):
         self.port = port
         self.baud = baud
         self.web_dir = web_dir
         self.http_host, self.http_port = http_host, http_port
-        self.release_file = release_file or os.path.join(tempfile.gettempdir(), "sbr3-bridge.release")
+        self.release_file = release_file or DEFAULT_RELEASE_FILE
+        self.release_stale_warned = False
+        self.last_open_try = -10.0
+        self.last_prune = _now()
         self.quiet = quiet
         self.log = SessionLog(log_dir, log_max_mb)
         self.t_start = _now()
@@ -72,6 +91,11 @@ class Bridge:
         self.params = {}                # id -> dict
         self.params_dirty = False
         self.last_get_params = -10.0
+        self.get_params_at = None       # re-request the param list at this time (after cfg.defaults)
+        self.remote_seen = False        # RC remote reported live at least once since connecting
+        self.tune_clients = set()
+        self.tune_buf = []
+        self.rt_offset = None           # robot t_us (ms) -> Pi ms
         self.tlm = None
         self.tlm_seq = 0
         self.tlm_sent_seq = 0
@@ -125,8 +149,21 @@ class Bridge:
         return len(self.clients) + sum(1 for t in self.pollers.values() if now - t < POLLER_TIMEOUT_S)
 
     # ------------------------------------------------------------------ link
+    def release_file_active(self):
+        try:
+            age = time.time() - os.stat(self.release_file).st_mtime
+        except OSError:
+            self.release_stale_warned = False
+            return False
+        if age > RELEASE_STALE_S:
+            if not self.release_stale_warned:
+                self.release_stale_warned = True
+                self.say("ignoring stale %s (%d min old)" % (self.release_file, age // 60))
+            return False
+        return True
+
     def released(self):
-        return self.released_api or os.path.exists(self.release_file)
+        return self.released_api or self.release_file_active()
 
     async def link_task(self):
         while True:
@@ -136,7 +173,8 @@ class Bridge:
                     self.link.close()
                     self._on_lost(quiet=True)
                 self._set_link_state("released")
-            elif not self.link:
+            elif not self.link and _now() - self.last_open_try >= 1.0:
+                self.last_open_try = _now()
                 try:
                     self.link = await open_link(self.port, self._on_data, self._on_lost, self.baud)
                 except LinkError as e:
@@ -147,12 +185,14 @@ class Bridge:
                 else:
                     self.link_error = ""
                     self.parser = lp.FrameParser()
+                    self.remote_seen = False
+                    self.rt_offset = None
                     self._set_link_state("connected")
                     self.log.start()
                     self.say("connected to %s, session %s" % (self.port, self.log.name))
                     self.send(lp.encode_get_params())
                     self.last_get_params = _now()
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(LINK_POLL_S)
 
     def _set_link_state(self, s):
         if s != self.link_state:
@@ -191,6 +231,11 @@ class Bridge:
             self.tlm_count += 1
             self.tlm_time = _now()
             self.log.tlm(d)
+            if d["radio_ok"] and not self.remote_seen:
+                self.remote_seen = True
+                self.push_status()
+            if self.tune_clients:
+                self._add_tune(d)
             last = self.track[-1] if self.track else None
             if last is None or abs(d["x_mm"] - last[0]) + abs(d["y_mm"] - last[1]) > 20:
                 self.track.append([int(d["x_mm"]), int(d["y_mm"])])
@@ -237,14 +282,28 @@ class Bridge:
                 self.send(lp.encode_get_params())
                 self.last_get_params = _now()
 
+    def _add_tune(self, d):
+        # robot time (exact step spacing) mapped onto the Pi clock the browser plots use
+        ms = d["t_us"] / 1000.0
+        pi = self.pi_ms()
+        if self.rt_offset is None or abs(ms + self.rt_offset - pi) > 500:   # first sample / reboot / wrap
+            self.rt_offset = pi - ms
+        row = [round(ms + self.rt_offset, 1)] + [round(d[k], 3) for k in TUNE_COLS[1:-1]] + [d["step"]]
+        self.tune_buf.append(row)
+        if len(self.tune_buf) > TUNE_BUF_MAX:
+            del self.tune_buf[:len(self.tune_buf) - TUNE_BUF_MAX]
+
     def _add_range(self, d):
         r = d["range_mm"]
-        a = math.radians(d["heading_deg"] + d["sensor_angle_deg"])
+        h = math.radians(d["heading_deg"])
+        ox = d["x_mm"] + SENSOR_FWD_MM * math.cos(h)    # sensor position (servo axis)
+        oy = d["y_mm"] + SENSOR_FWD_MM * math.sin(h)
+        a = h + math.radians(d["sensor_angle_deg"])
         rr = r if (d["valid"] and r < 8000) else 2000
-        hx = d["x_mm"] + rr * math.cos(a)
-        hy = d["y_mm"] + rr * math.sin(a)
+        hx = ox + rr * math.cos(a)
+        hy = oy + rr * math.sin(a)
         tilt = 1 if abs(d["pitch_deg"]) > TILT_DEG else 0
-        self.ranges.append([self.range_next, int(hx), int(hy), int(d["x_mm"]), int(d["y_mm"]),
+        self.ranges.append([self.range_next, int(hx), int(hy), int(ox), int(oy),
                             int(d["valid"]), tilt, self.pi_ms()])
         self.range_next += 1
         for f in self.range_listeners:
@@ -287,6 +346,21 @@ class Bridge:
             while self.estop_repeats and now >= self.estop_repeats[0]:
                 self.estop_repeats.pop(0)
                 self.send(lp.encode_set_mode(lp.MODE_IDLE))
+            if self.get_params_at is not None and now >= self.get_params_at:
+                self.get_params_at = None
+                self.send(lp.encode_get_params())
+                self.last_get_params = now
+        if self.tune_buf:
+            rows, self.tune_buf = self.tune_buf, []
+            text = json.dumps({"t": "tune", "cols": TUNE_COLS, "rows": rows}, separators=(",", ":"))
+            for c in list(self.tune_clients):
+                if c.closed:
+                    self.tune_clients.discard(c)
+                elif c.buffered() < WS_SLOW_BYTES:
+                    c.send(text)
+        if now - self.last_prune >= PRUNE_EVERY_S:
+            self.last_prune = now
+            self.log.prune()
         # browsers: latest telemetry, new range points, params
         if self.tlm_seq != self.tlm_sent_seq and self.tlm:
             self.tlm_sent_seq = self.tlm_seq
@@ -317,7 +391,7 @@ class Bridge:
             "robot_alive": now - self.tlm_time < ROBOT_SILENT_S, "tlm_hz": round(self.tlm_hz, 1),
             "crc_errors": self.parser.crc_errors, "frames": self.parser.frames_ok,
             "clients": self.client_count(), "session": self.log.name if self.log.f else None,
-            "estop": self.estop, "cmd_active": self.cmd_active,
+            "estop": self.estop, "cmd_active": self.cmd_active, "remote_seen": self.remote_seen,
             "uptime_s": int(now - self.t_start), "release_file": self.release_file,
         }
 
@@ -366,10 +440,24 @@ class Bridge:
             if pid not in self.params:
                 return {"t": "error", "text": "unknown param %s" % pid}
             p = self.params[pid]
+            if p["name"].startswith("cfg."):    # actions (read back 0): use {"t": "cfg"}
+                return self.handle_command({"t": "cfg", "action": p["name"][4:]}, who) \
+                    if _num(m.get("value")) >= 0.5 else None
             v = _num(m.get("value"), p["value"], p["min"], p["max"])
             self.send(lp.encode_set_param(pid, v))
             p["value"] = v  # optimistic; a ParamInfo echo from the robot overrides it
             self.params_dirty = True
+        elif t == "cfg":
+            # {"t": "cfg", "action": "save"}     -> cfg.save = 1 (EEPROM write, waits for motors off)
+            # {"t": "cfg", "action": "defaults"} -> cfg.defaults = 1 (defaults, not saved)
+            name = CFG_ACTIONS.get(m.get("action"))
+            pid = next((i for i, p in self.params.items() if p["name"] == name), None) if name else None
+            if pid is None:
+                return {"t": "error", "text": "robot has no %s param" % (name or m.get("action"))}
+            self.send(lp.encode_set_param(pid, 1.0))
+            if name == "cfg.defaults":
+                self.get_params_at = _now() + 0.5   # the robot re-streams; ask again in case frames were lost
+            self.say("%s: %s" % (who, "save params to EEPROM" if name == "cfg.save" else "restore default params"))
         elif t == "get_params":
             self.send(lp.encode_get_params())
             self.last_get_params = _now()
@@ -457,6 +545,12 @@ class Bridge:
                         if m.get("t") == "hi" and m.get("name"):
                             who = "%s@%s" % (str(m["name"])[:20], ws.peer[0] if ws.peer else "?")
                             continue
+                        if m.get("t") == "sub":   # {"t": "sub", "tune": true} -> full-rate "tune" batches
+                            if m.get("tune"):
+                                self.tune_clients.add(ws)
+                            else:
+                                self.tune_clients.discard(ws)
+                            continue
                         reply = self.handle_command(m, who)
                         if reply:
                             ws.send(json.dumps(reply))
@@ -464,6 +558,7 @@ class Bridge:
                     ws.send(json.dumps({"t": "error", "text": "bad message: %s" % e}))
         finally:
             self.clients.discard(ws)
+            self.tune_clients.discard(ws)
             # a driving client went away: stop immediately rather than waiting for the timeout
             if self.cmd_active:
                 self.cmd_active = False

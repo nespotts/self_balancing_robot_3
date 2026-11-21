@@ -4,7 +4,7 @@ import asyncio
 import os
 import sys
 
-from .bridge import Bridge
+from .bridge import DEFAULT_LOG_MAX_MB, DEFAULT_RELEASE_FILE, Bridge
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_WEB = os.path.join(os.path.dirname(HERE), "web")
@@ -19,9 +19,10 @@ def build_parser():
     ap.add_argument("--http-port", type=int, default=int(os.environ.get("SBR3_HTTP_PORT", "8080")))
     ap.add_argument("--web", default=DEFAULT_WEB, help="web app directory")
     ap.add_argument("--log-dir", default=os.environ.get("SBR3_LOG_DIR", "~/sbr3-logs"))
-    ap.add_argument("--log-max-mb", type=float, default=1000, help="delete oldest sessions above this total")
+    ap.add_argument("--log-max-mb", type=float, default=DEFAULT_LOG_MAX_MB,
+                    help="delete the oldest sessions above this total (default 2048 = 2 GB)")
     ap.add_argument("--release-file", default=None,
-                    help="while this file exists the serial port is released (default <tmp>/sbr3-bridge.release)")
+                    help="while this file exists the serial port is released (default %s)" % DEFAULT_RELEASE_FILE)
     ap.add_argument("--quiet", action="store_true")
     return ap
 

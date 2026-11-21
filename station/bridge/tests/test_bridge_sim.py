@@ -66,14 +66,24 @@ class TestBridgeWithSim(unittest.TestCase):
             names = {p["name"]: p for p in params["list"]}
             self.assertEqual(names["bal.kp"]["value"], 250.0)
             self.assertEqual(names["vel.kd"]["value"], 0.00007)
+            self.assertEqual(len(params["list"]), 35)
+            self.assertEqual(names["cfg.save"]["id"], 33)
             tlm = await wait_for(ws, lambda m: m["t"] == "tlm")
             self.assertEqual(tlm["mode"], lp.MODE_IDLE)
+            self.assertFalse(tlm["status"] & lp.TLM_ARMED)          # boots disarmed
+            self.assertTrue(tlm["status"] & lp.TLM_FAILSAFE)        # no remote -> failsafe bit is always set
+            self.assertIn("bal_p", tlm)
+            self.assertGreater(b.parser.bytes_dropped, 10)          # plain boot text skipped (resync)
+            self.assertFalse(b.status()["remote_seen"])
             await wait_for(ws, lambda m: m["t"] == "ranges" and len(m["pts"]) > 0)
 
-            # drive in STATION
+            # no remote: SET_MODE != IDLE arms; the controller engages and reports P/I/D
             ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_STATION}))
-            await wait_for(ws, lambda m: m["t"] == "tlm" and m["mode"] == lp.MODE_STATION)
+            await wait_for(ws, lambda m: m["t"] == "tlm" and m["mode"] == lp.MODE_STATION
+                           and m["status"] & lp.TLM_ARMED)
             await wait_for(ws, lambda m: m["t"] == "tlm" and m["status"] & lp.TLM_UPRIGHT)
+            m = await wait_for(ws, lambda m: m["t"] == "tlm" and m["bal_i"] != 0 and m["step"] > 0)
+            self.assertLess(abs(m["bal_p"] + m["bal_i"] + m["bal_d"]), 4096)
             for _ in range(25):
                 ws.send(json.dumps({"t": "cmd_vel", "speed": 300, "turn": 0}))
                 await asyncio.sleep(0.05)
@@ -92,6 +102,34 @@ class TestBridgeWithSim(unittest.TestCase):
             ws.send(json.dumps({"t": "set_param", "id": pid, "value": 260}))
             await wait_for(ws, lambda m: m["t"] == "params" and
                            any(p["id"] == pid and p["value"] == 260 for p in m["list"]))
+
+            # full-rate tuning stream: tlm.hz 400 + {"t": "sub", "tune": true}
+            ws.send(json.dumps({"t": "set_param", "id": names["tlm.hz"]["id"], "value": 400}))
+            ws.send(json.dumps({"t": "sub", "tune": True}))
+            await wait_for(ws, lambda m: m["t"] == "tune")
+            rows, end = [], time.monotonic() + 1.0
+            while time.monotonic() < end:
+                m = json.loads(await asyncio.wait_for(ws.recv(), 2))
+                if m["t"] == "tune":
+                    rows += m["rows"]
+                    cols = m["cols"]
+            self.assertGreater(len(rows), 250)                       # ~400 per second
+            steps = [r[cols.index("step")] for r in rows]
+            self.assertLessEqual(max(b - a for a, b in zip(steps, steps[1:])), 3)
+            ws.send(json.dumps({"t": "sub", "tune": False}))
+            ws.send(json.dumps({"t": "set_param", "id": names["tlm.hz"]["id"], "value": 100}))
+
+            # cfg.save waits for the motors to be off; cfg.defaults restores (and the list is re-sent)
+            ws.send(json.dumps({"t": "cfg", "action": "save"}))
+            await wait_for(ws, lambda m: m["t"] == "log" and "save waits" in m["text"])
+            ws.send(json.dumps({"t": "cfg", "action": "defaults"}))
+            await wait_for(ws, lambda m: m["t"] == "params" and
+                           any(p["id"] == pid and p["value"] == 250 for p in m["list"]))
+            ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_IDLE}))      # no remote: IDLE disarms
+            await wait_for(ws, lambda m: m["t"] == "log" and m["text"] == "params: saved")
+            await wait_for(ws, lambda m: m["t"] == "tlm" and not m["status"] & lp.TLM_ARMED)
+            ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_STATION}))
+            await wait_for(ws, lambda m: m["t"] == "tlm" and m["status"] & lp.TLM_UPRIGHT)
 
             # goto
             ws.send(json.dumps({"t": "goto", "points": [[600, 0], [600, 400]], "replace": True, "go": True}))
@@ -136,6 +174,17 @@ class TestBridgeWithSim(unittest.TestCase):
             await loop.run_in_executor(None, http_get, "/api/serial?release=0", b"")
             await asyncio.sleep(1.3)
             self.assertEqual(b.link_state, "connected")
+
+            # the release file (what the Pi flash script uses), and a stale one is ignored
+            rel = os.path.join(self.tmp, "release")
+            open(rel, "w").close()
+            await asyncio.sleep(0.6)
+            self.assertEqual(b.link_state, "released")
+            old = time.time() - 3600
+            os.utime(rel, (old, old))
+            await asyncio.sleep(1.5)
+            self.assertEqual(b.link_state, "connected")
+            os.remove(rel)
             ws.close()
         finally:
             for t in tasks + [phys]:

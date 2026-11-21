@@ -26,7 +26,7 @@ def _r(v):
 
 
 class SessionLog:
-    def __init__(self, log_dir, max_total_mb=1000):
+    def __init__(self, log_dir, max_total_mb=2048):
         self.dir = os.path.abspath(os.path.expanduser(log_dir))
         os.makedirs(self.dir, exist_ok=True)
         self.max_bytes = int(max_total_mb * 1024 * 1024)
@@ -102,16 +102,22 @@ class SessionLog:
         p = os.path.join(self.dir, name)
         return p if os.path.isfile(p) else None
 
-    def _prune(self):
+    def prune(self):
+        """Delete the oldest sessions while the total is above the cap (the active one is kept)."""
         files = sorted(self.list(), key=lambda d: d["name"])
         total = sum(f["size"] for f in files)
-        while files and total > self.max_bytes:
-            f = files.pop(0)
+        for f in files:
+            if total <= self.max_bytes:
+                break
+            if f["active"]:
+                continue
             try:
                 os.remove(os.path.join(self.dir, f["name"]))
             except OSError:
                 pass
             total -= f["size"]
+
+    _prune = prune
 
     def flush(self):
         if self.f:

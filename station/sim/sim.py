@@ -16,8 +16,10 @@ import time
 
 from station.bridge import link_protocol as lp
 
-TRACK_MM = 200.0          # wheel separation
-ROBOT_RADIUS = 140.0
+# Geometry and mass from the Fusion CAD (cad/robot_model.json on master)
+TRACK_MM = 126.8          # wheel separation (firmware odometry param says 123)
+ROBOT_RADIUS = 90.0       # collision radius: footprint ~152 x 90 mm
+SENSOR_FWD_MM = 26.0      # range-sensor servo axis is this far forward of the axle
 RANGE_MAX = 2000.0
 SERVO_STEPS = 16
 SERVO_STEP_DEG = 180.0 / SERVO_STEPS   # 11.25 deg: 16 steps x 2 sensors = 32 directions
@@ -25,9 +27,13 @@ SERVO_STEP_S = 0.060
 ARRIVE_MM = 80.0          # sim-only navigation constants
 OBSTACLE_MM = 300.0
 
-# Physics (made up but plausible for the robot: 12 V pack, TT gear motors, ~10 cm to the centre of mass)
+# Physics. Pendulum from the CAD: body 0.77 kg, axle -> CoM 84.5 mm, pitch inertia 0.0073 kg m^2 about
+# the axle -> theta'' = (m g l / I) sin(theta) - (m l / I) a cos(theta), fall time constant 0.107 s.
+# Motors are made up but plausible (12 V pack, TT gear motors).
 G = 9.81
-COM_M = 0.10              # axle -> centre of mass
+BODY_KG, COM_M, I_AXLE = 0.77, 0.0845, 0.0073
+PEND_G = BODY_KG * G * COM_M / I_AXLE     # 1/s^2  (~87, tau = 0.107 s)
+PEND_A = BODY_KG * COM_M / I_AXLE         # 1/m    (wheel acceleration coupling)
 IMU_MOUNT_DEG = -3.15     # IMU reads this when the robot is truly upright (= -bal.offset_deg default)
 LIE_DEG = 55.0            # true lean when lying on the floor (beyond bal.cutoff_deg)
 MOTOR_FULL = 4095.0
@@ -557,7 +563,7 @@ class SimRobot:
         # inverted pendulum + a hand that stands the robot up when it is armed but lying down
         lying = abs(self.theta) >= math.radians(LIE_DEG) - 1e-6
         hand = self.mode != lp.MODE_IDLE and (not o["active"] or now - self.engaged_at < 0.35)
-        th_acc = (G / COM_M) * math.sin(self.theta) - (acc / COM_M) * math.cos(self.theta)
+        th_acc = PEND_G * math.sin(self.theta) - PEND_A * acc * math.cos(self.theta)
         th_acc += rng.gauss(0, 6.0)               # floor bumps, backlash, air
         if hand:
             th_acc = -60.0 * self.theta - 14.0 * self.theta_rate
@@ -669,7 +675,9 @@ class SimRobot:
         })
 
     def _range(self, sid, sensor_ang, x, y, th, pitch):
-        d = self.room.raycast(self.X, self.Y, math.radians(self.TH + sensor_ang))
+        h = math.radians(self.TH)
+        d = self.room.raycast(self.X + SENSOR_FWD_MM * math.cos(h), self.Y + SENSOR_FWD_MM * math.sin(h),
+                              math.radians(self.TH + sensor_ang))
         valid = 1
         if d is None or d > RANGE_MAX or self.rng.random() < 0.03:
             valid, r = 0, 8190
