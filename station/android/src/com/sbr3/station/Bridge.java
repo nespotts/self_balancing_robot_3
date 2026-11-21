@@ -1,9 +1,6 @@
 package com.sbr3.station;
 
 import android.os.Build;
-import android.os.VibrationEffect;
-import android.os.Vibrator;
-import android.os.VibratorManager;
 import android.content.Context;
 import android.webkit.JavascriptInterface;
 import org.json.JSONObject;
@@ -66,31 +63,6 @@ final class Bridge {
     @JavascriptInterface public String gamepads() { return ok() ? act.pads.listJson() : "{\"list\":[]}"; }
 
     // ---------------------------------------------------------------- phone
-
-    /** "[0,80,60,80]" = off/on/off/on ms (Vibrator waveform), max 10 s total. */
-    @JavascriptInterface public void vibrate(String pattern) {
-        if (!ok() || pattern == null) return;
-        String[] parts = pattern.replaceAll("[\\[\\]\\s]", "").split(",");
-        int n = Math.min(parts.length, 32);
-        long[] t = new long[n];
-        long total = 0;
-        try {
-            for (int i = 0; i < n; i++) { t[i] = Math.max(0, Math.min(2000, Long.parseLong(parts[i]))); total += t[i]; }
-        } catch (NumberFormatException e) {
-            return;
-        }
-        if (n == 0 || total == 0 || total > 10000) return;
-        Vibrator v;
-        if (Build.VERSION.SDK_INT >= 31) {
-            VibratorManager vm = (VibratorManager) act.getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
-            v = vm == null ? null : vm.getDefaultVibrator();
-        } else {
-            v = (Vibrator) act.getSystemService(Context.VIBRATOR_SERVICE);
-        }
-        if (v == null || !v.hasVibrator()) return;
-        if (n == 1) v.vibrate(VibrationEffect.createOneShot(t[0], VibrationEffect.DEFAULT_AMPLITUDE));
-        else v.vibrate(VibrationEffect.createWaveform(t, -1));
-    }
 
     @JavascriptInterface public void keepAwake(boolean on) {
         if (ok()) act.runOnUiThread(() -> act.keepScreenOn(on));
