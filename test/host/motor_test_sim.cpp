@@ -3,6 +3,7 @@
 // the safety interlocks. Build + run (any g++, e.g. on the Pi):
 //   g++ -std=c++17 -O2 -Wall -Wextra -I src test/host/motor_test_sim.cpp src/motor_test.cpp -o /tmp/mt && /tmp/mt
 //   /tmp/mt --log > mt.log && python3 tools/motor_fit.py mt.log      (full test 4 log -> fit)
+//   /tmp/mt --log 7 > mt7.log                                          (tracking tests 5 + 6)
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -120,10 +121,10 @@ struct Sim {
   }
 };
 
-static void testFull(bool print) {
+static void testFull(bool print, uint8_t test = 4) {
   Sim s;
   s.print = print;
-  s.in.request = 4;
+  s.in.request = test;
   s.run(500);
   CHECK(!s.mt.driving());  // 1 s still-hold before the motors move
   s.run(700);
@@ -151,7 +152,7 @@ static void testAbort(const char* name, void (*poke)(Sim&), const char* expect) 
 
 int main(int argc, char** argv) {
   if (argc > 1 && !strcmp(argv[1], "--log")) {
-    testFull(true);
+    testFull(true, argc > 2 ? (uint8_t)atoi(argv[2]) : 4);
     return g_fail ? 1 : 0;
   }
   testFull(false);

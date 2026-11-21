@@ -245,6 +245,7 @@ Drive mode 1 runs: duty capped at `mot.brake_duty_max`, motors off 60 s between 
 ```
 mt,begin,<test>,max=<duty>,vb=<V>,pitch=<deg>,hz=<mot.pwm_hz>,drive=<mot.drive_mode>   (sum/end lines end with hz=,drive= too)
 mt,a,<left|right>,<fwd|rev>,<start|stop>,<duty>,<volts>,<vbatt>,<speed mm/s>     (-1 = never moved)
+mt,ad,<wheel>,<dir>,<duty>,<volts>,<vbatt>,<speed mm/s>       test 1 ramp down while still turning (every 60 duty)
 mt,b,<wheel>,<dir>,<duty>,<volts>,<vbatt>,<speed mm/s>,<t63 ms>
 mt,c,<wheel>,<new dir>,<rep>,<duty>,<volts>,<vbatt>,<to turning point ms>,<until 2° back ms>,<coast deg>
 mt,sum,<a|b|c>,...      mt,end,<test>,ok,<s>,vb=<min>..<max>      mt,abort,<reason>,...

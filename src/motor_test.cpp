@@ -34,6 +34,7 @@ constexpr uint32_t kBrakeCoolPartMs = 60000, kBrakeCoolDirMs = 10000, kBrakeCool
 // test a
 constexpr float kAStep = 10.0f;                // duty counts per tick
 constexpr uint32_t kATickUs = 50000;
+constexpr float kAdStep = 60.0f;               // ramp-down speed sample every 60 duty (~0.18 V at 12 V)
 // test b
 constexpr uint8_t kBLevels = 16;
 constexpr uint32_t kBHoldUs = 1200000, kBMeasUs = 500000, kBDropRefUs = 600000;
@@ -475,12 +476,18 @@ void MotorTest::runA(const MtIn& in, bool new_enc) {
           emit("mt,a,%s,%s,start,%.0f,%.3f,%.2f,%.0f", kWheel[w], dirName(dir_), (double)a_duty_[w],
                (double)a_start_v_[w][d], (double)in.vbatt, (double)sp);
           a_st_[w] = 1;
+          a_ad_next_[w] = a_duty_[w] - kAdStep;
         } else if (a_duty_[w] >= max_duty_) {
           emit("mt,a,%s,%s,start,-1,-1,%.2f,%.0f", kWheel[w], dirName(dir_), (double)in.vbatt, (double)sp);
           emit("mt,a,%s,%s,stop,-1,-1,%.2f,%.0f", kWheel[w], dirName(dir_), (double)in.vbatt, (double)sp);
           a_st_[w] = 2;
         }
       } else if (a_st_[w] == 1) {
+        if (a_duty_[w] <= a_ad_next_[w] && fabsf(sp) >= kStopMms) {  // speed while turning, ramping down
+          a_ad_next_[w] -= kAdStep;
+          emit("mt,ad,%s,%s,%.0f,%.3f,%.2f,%.0f", kWheel[w], dirName(dir_), (double)a_duty_[w],
+               (double)volts(a_duty_[w], in), (double)in.vbatt, (double)sp);
+        }
         if (fabsf(sp) < kStopMms || a_duty_[w] <= 0.0f) {
           a_stop_[w][d] = a_duty_[w];
           a_stop_v_[w][d] = volts(a_duty_[w], in);

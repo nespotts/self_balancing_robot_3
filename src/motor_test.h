@@ -153,6 +153,7 @@ class MotorTest {
   int8_t dir_ = 1;
   uint8_t a_st_[2] = {};      // 0 up, 1 down, 2 done
   float a_duty_[2] = {};
+  float a_ad_next_[2] = {};   // next ramp-down duty to report the speed at (mt,ad)
   uint32_t a_tick_us_ = 0;
   float a_start_[2][2] = {{-1, -1}, {-1, -1}};  // [wheel][dir 0 fwd 1 rev], duty, -1 = none
   float a_stop_[2][2] = {{-1, -1}, {-1, -1}};
