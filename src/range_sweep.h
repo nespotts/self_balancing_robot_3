@@ -9,6 +9,9 @@
 // at a + 180. Servo command = 90 + rng.servo_trim_deg + rng.servo_dir * a / rng.servo_deg_per_cmd,
 // clamped to rng.servo_min_deg..rng.servo_max_deg (off the end stops); reported angles use the
 // clamped command, so they stay true.
+// Idle off (issue #20): motors not allowed + sweeping (hold -1) + rng.idle_off 1 -> head to centre,
+// 400 ms to settle, then no servo pulses (quiet, no holding current); sensors keep ranging at 0/180.
+// On arm the pulses restart at centre and the sweep resumes from the position nearest centre.
 // See docs/firmware.md "Range sweep".
 #pragma once
 #include <stdint.h>
@@ -27,7 +30,8 @@ class RangeSweep {
   bool sensorOk(uint8_t i) const { return i < 2 && ok_[i]; }
 
   // Right after a balance step: bounded slice of work (I2C, servo). budget_us = time it may use.
-  void service(uint32_t now_us, uint32_t budget_us, const RangePose& pose);
+  // motors_allowed = false (disarmed / E-stop): idle off, see above.
+  void service(uint32_t now_us, uint32_t budget_us, const RangePose& pose, bool motors_allowed);
   // Background, may block a few ms when motors_off: late enable, sensor reconfig, status log.
   // Returns a status text to log (or nullptr).
   const char* serviceSlow(uint32_t now_ms, bool motors_off);
@@ -48,7 +52,10 @@ class RangeSweep {
   };
 
   void configure(uint8_t i);  // timing budget + long range (blocking)
-  void commandServo(float head_deg, uint32_t now_us);
+  float servoCmd(float head_deg) const;  // clamped servo command for a head angle
+  // attach = false: a servo stopped by idle off stays stopped unless the command changes
+  void commandServo(float head_deg, uint32_t now_us, bool attach = true);
+  int centreIndex() const;  // sweep position nearest straight ahead
   float positionAngle(int k) const;
   void nextPosition();
   void queue(uint8_t kind, uint8_t sensor, uint8_t reg = 0, uint8_t val = 0);
@@ -63,6 +70,9 @@ class RangeSweep {
   // sweep position
   int k_ = 0, dir_ = 1;
   float last_cmd_ = -1e9f;   // servo command last written, deg
+  bool servo_on_ = false;    // pulses running
+  bool parked_ = false;      // idle off wanted at the last service() (issue #20)
+  uint32_t t_cmd_us_ = 0;    // when the pulse last changed
   float cur_head_deg_ = 0;   // head angle the current measurement is taken at
   bool pending_[2] = {false, false}, ready_[2] = {false, false};
   bool int_ok_[2] = {true, true};

@@ -100,6 +100,7 @@ Gains are br3ttb units: ki per second, kd seconds.
 | mot.v_ref | 12 V | model 1: u = 1 → this many volts; vcomp reference |
 | mot.dz_l_fwd / l_rev / r_fwd / r_rev | 2.0 V | model 1 dead zone per wheel + direction |
 | mot.dz_band | 0.01 | model 1: below this \|u\| ramp 0 → dead zone (no kick on noise) |
+| rng.idle_off | 1 | 1 = servo off while disarmed / E-stop (sweep only): head to centre, 0.4 s, then no pulses |
 
 ¹ applied between readings, only while the motors are off. Everything else applies at once.
 
@@ -133,6 +134,7 @@ Boot: ~1 s until samples. Status line in the log 3 s after boot and on IMU healt
 | Servo command | `90 + trim + servo_dir × head_angle ÷ deg_per_cmd`, clamped to `servo_min_deg … servo_max_deg` |
 | Sweep | head −85 … +85 and back (16 steps); sensor 1 covers the other half → 32 points / 360° |
 | Hold | `rng.servo_hold_deg` = servo command (trim still added); head angle = `servo_dir × deg_per_cmd × (hold − 90)` |
+| Idle off | disarmed / E-stop + `hold` −1 + `rng.idle_off` 1 → centre, settle 0.4 s, no pulses (quiet); still ranges at 0° / 180°; arm → pulses back at centre, sweep resumes (hold ≥ 0 always holds) |
 | Reported angle | from the command actually sent (after clamping), so clipped positions are still reported truly |
 | RangeFrame | every reading: pose + pitch when it finished, `sensor_angle_deg` = head angle (+180 for sensor 1), `valid` 0 = no target / > `rng.max_mm` / timeout |
 | Radio telemetry | `range_front_mm` / `range_rear_mm` = latest reading within half a step of 0° / 180° (0 = none for 2 s) |

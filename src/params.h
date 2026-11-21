@@ -66,7 +66,9 @@
   X(MOT_DZ_L_REV,    "mot.dz_l_rev",       2.0f,      0.0f,    8.0f)     \
   X(MOT_DZ_R_FWD,    "mot.dz_r_fwd",       2.0f,      0.0f,    8.0f)     \
   X(MOT_DZ_R_REV,    "mot.dz_r_rev",       2.0f,      0.0f,    8.0f)     \
-  X(MOT_DZ_BAND,     "mot.dz_band",        0.01f,     0.0f,    0.2f)
+  X(MOT_DZ_BAND,     "mot.dz_band",        0.01f,     0.0f,    0.2f)     \
+  /* range sweep idle off (issue #20, see range_sweep.h) */             \
+  X(RNG_IDLE_OFF,    "rng.idle_off",       1.0f,      0.0f,    1.0f)
 
 enum ParamId : uint16_t {
 #define PARAM_ENUM(id, name, def, mn, mx) P_##id,
