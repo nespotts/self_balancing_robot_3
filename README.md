@@ -1,43 +1,45 @@
-# Self-balancing robot 3 - firmware v4 (Teensy 4.1)
+# Self-balancing robot 3
 
-Details: [docs/firmware.md](docs/firmware.md)
+Two-wheel balancing robot: a Teensy 4.1 keeps it upright, an Orange Pi serves a web app to drive, map and tune it.
 
-## Upload over Wi-Fi (default)
+<img src="cad/img/iso.png" width="45%">
 
 ```mermaid
 flowchart LR
-  PC["PC<br/>PlatformIO build"] -- "scp .hex<br/>(Wi-Fi, ssh robot)" --> PI["Orange Pi<br/>tools/pi_flash.sh"]
-  PI -- "USB<br/>teensy_loader_cli" --> T["Teensy 4.1"]
+  T["Teensy 4.1<br>firmware v4"] -- "USB<br>link v4" --> P["Orange Pi<br>bridge :8080"]
+  P -- "Wi-Fi" --> W["phone / PC<br>browser or Balance Bot app"]
+  R["RC remote<br>nRF24"] -. "radio" .-> T
+  S["simulator<br>python -m station.sim"] -. "same protocol" .-> P
 ```
 
-PlatformIO **Upload** button, or:
+`HELLO link v4 radio v2 params 94`
 
-| Do | Command |
+## Quick start (30 s)
+
+| | |
 |---|---|
-| Build + flash | `pio run -t upload` |
-| Checks only, no flash | `$env:ROBOT_FLASH_DRY_RUN=1; pio run -t upload` |
-| Other robot / IP | `$env:ROBOT_HOST="orangepi@192.168.0.209"` |
+| **Simulator** | `python -m station.sim`, then open http://localhost:8080 |
+| **Real robot** | open http://192.168.0.209:8080, or install the **Balance Bot** app (it finds the robot) |
+| **Drive** | tap **Arm & Balance** twice (or flip the remote's ARMED switch), then use the joystick |
+| **Stop** | **STOP** disarms and **latches**; press **Release E-stop**, then arm again |
 
-`pi_flash.sh` on the Pi: checks hex + Teensy -> stops if VirtualHere / evesec use the Teensy ->
-asks the station bridge to let go of `/dev/ttyACM0` -> flashes (soft reboot, no button) ->
-waits for the Teensy to come back. No sudo. Needs `ssh robot` to work without a password.
+<p>
+<img src="station/docs/screenshots/desktop-map.png" width="64%">
+<img src="station/docs/screenshots/phone-drive.png" width="25%">
+</p>
 
-## USB fallback
+Also in the app: **Find balance point** (Tune), **Falls** (Logs: every tip-over recorded).
 
-Teensy plugged into the PC: `pio run -e teensy41 -t upload`.
-Nothing happens? Press the Teensy's button once.
+## Where to find what
 
-## Console (Teensy serial, over Wi-Fi)
-
-```powershell
-tools\robot_console.ps1                # read-only: boot text, HELLO, telemetry summary
-tools\robot_console.ps1 --seconds 5
-tools\robot_console.ps1 --release      # bridge running? make it let go while the console runs
-tools\robot_console.ps1 --get-params   # also list params (sends one request)
-```
-
-```
-02:17:52  HELLO link v4 radio v2 params 94 firmware 'v4 2026-11-20 abc1234'
-02:17:52  [log] imu ok
-02:17:52  tlm BALANCE ARMED,UPRIGHT    pitch +2.5  speed +150 mm/s  bat 11.80 V  loop 500 Hz
-```
+| I want to... | Go to |
+|---|---|
+| See the app, tab by tab | [station/README.md](station/README.md) |
+| Use the Android app | [station/android/README.md](station/android/README.md) |
+| Flash the firmware, open the console | [docs/flashing.md](docs/flashing.md) |
+| Understand stop / arm / falls | [docs/safety.md](docs/safety.md) |
+| Know the modes | [docs/modes.md](docs/modes.md) |
+| Look up a param | [docs/params.md](docs/params.md) |
+| Falls, tuning, map details | [docs/station-features.md](docs/station-features.md) |
+| Script the bridge (API) | [docs/api.md](docs/api.md) |
+| Firmware internals | [docs/firmware.md](docs/firmware.md) |
