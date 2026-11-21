@@ -82,7 +82,7 @@ class Mapper:
             pass
 
     def apply_settings(self, s, save=True):
-        for k, v in (s or {}).items():
+        for k, v in (s if isinstance(s, dict) else {}).items():
             if k not in DEFAULTS:
                 continue
             if isinstance(DEFAULTS[k], bool):

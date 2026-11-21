@@ -19,7 +19,6 @@ import urllib.request
 
 from station.bridge import link_protocol as lp
 from station.bridge.bridge import Bridge
-from station.bridge.httpws import HttpServer
 from station.sim.sim import SimRobot, SimServer
 
 WEB = os.path.join(os.path.dirname(__file__), "..", "..", "web")
@@ -69,8 +68,7 @@ class TestAppStop(unittest.TestCase):
         b = Bridge("tcp://127.0.0.1:%d" % srv.sockets[0].getsockname()[1], WEB, self.tmp, "127.0.0.1", 0,
                    release_file=os.path.join(self.tmp, "release"), quiet=True, map_dir=os.path.join(self.tmp, "maps"),
                    preset_dir=os.path.join(self.tmp, "presets"))
-        routes = [("GET", "/api/state", b.api_state), ("*", "/api/cmd", b.api_cmd), ("GET", "/api/status", b.api_status)]
-        hs = await HttpServer(WEB, routes, "/ws", b.ws_handler).start("127.0.0.1", 0)
+        hs = await b.build_http().start("127.0.0.1", 0)     # real server incl. Origin / Host checks: AppStop sends no Origin
         port = hs.sockets[0].getsockname()[1]
         tasks = [asyncio.ensure_future(b.link_task()), asyncio.ensure_future(b.tick_task())]
         loop = asyncio.get_running_loop()

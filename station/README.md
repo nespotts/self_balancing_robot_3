@@ -153,3 +153,36 @@ and for the Tune tools `presets`, `score_state`, `score_runs`, `motor_state`, `m
 No WebSocket (old Kindle): `GET /api/state`, `GET|POST /api/cmd`.
 The Android app uses `POST /api/cmd` when it is left: `cmd_vel 0`, `{"t":"plan","action":"stop"}`, and `set_mode` BALANCE if the
 robot is armed + upright in GOTO / EXPLORE (`plan stop` alone leaves the robot in GOTO / EXPLORE with its waypoints).
+
+### Who may command the robot
+
+`/ws` and every `/api/*` request are checked (`httpws.check_origin`), so a web page you happen to open on the same Wi-Fi cannot drive the robot:
+
+| Request | |
+|---|---|
+| the web app / Kindle page / Android WebView (same origin as the bridge) | allowed |
+| curl, `tools/tune.py`, the app's native stop (no `Origin` header) | allowed |
+| another site (`Origin` / `Referer` elsewhere, `Sec-Fetch-Site: cross-site`, `Origin: null`) | 403 |
+| `Host` that is not an IP, `localhost`, a bare or `.local` / `.lan` name (DNS rebinding) | 403 |
+| `POST /api/cmd` that is not `Content-Type: application/json` | 415 |
+
+Relax it only if you must: `--allow-any-origin` (or `SBR3_ALLOW_ANY_ORIGIN=1`), `--allow-host pi.example.org`, `--allow-origin http://tablet.example:3000`.
+
+Bad input never kills a client: any command that fails comes back as `{"t":"error","text":...}`. While the bridge has no link
+to the robot, commands that need it (`set_mode`, `set_param`, `cfg`, `goto`, `event`, preset apply, motor test, plan goto / explore)
+answer `{"t":"error","code":"no_link","text":"robot not connected ..."}` and change nothing; `estop` still latches but says
+the STOP may not have arrived. The web app greys the Drive readouts and Sensors cards with a **no data** badge when
+telemetry is older than 1 s:
+
+<p>
+<img src="docs/screenshots/phone-live-drive.png" width="30%">
+<img src="docs/screenshots/phone-stale-drive.png" width="30%">
+<img src="docs/screenshots/phone-stale-sensors.png" width="30%">
+</p>
+
+GOTO and EXPLORE in the Drive mode grid need a second tap (like Arm & Balance). **Full rate** on the Tune page (`tlm.hz` 400)
+is temporary: when the last Tune page closes (tab closed, phone asleep, app killed) the bridge puts `tlm.hz` back after 10 s,
+unless you used **Save to robot** while it was raised (then that is the new default) or set it from `tools/tune.py`.
+Half-open phones are dropped (WebSocket ping every 15 s, closed after 45 s of silence or a few MB of unsent data). Log CSV
+exports and big downloads run in a worker thread, so they cannot stall the robot's 500 ms heartbeat; if the event loop is ever
+blocked for more than 0.2 s the Logs tab says so.

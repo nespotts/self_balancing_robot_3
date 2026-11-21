@@ -5,7 +5,7 @@ function emit(type, m) { for (const fn of listeners[type] || []) { try { fn(m); 
 
 export const state = {
   connected: false,
-  hello: null, robot: null, status: null, tlm: null, nav: null,
+  hello: null, robot: null, status: null, tlm: null, tlmAt: 0, nav: null,
   params: [], paramsFirst: {},     // id -> first value seen this page load (for "revert")
   waypoints: [],                   // sent to the robot (from the bridge)
   ranges: [],                      // [i, hx, hy, rx, ry, valid, tilt, t_ms, sensor_id, sensor_angle_deg, range_mm]
@@ -13,6 +13,8 @@ export const state = {
   logs: [],
   grid: null,                      // occupancy grid layer (issue #12), filled by a future "grid" message
 };
+// Telemetry older than this is not shown as live (the robot is silent: flashing, unplugged, reset).
+export const STALE_MS = 1000;
 const MAX_RANGES = 6000, MAX_TRACK = 6000, MAX_LOGS = 400;
 
 let ws = null, retry = 0;
@@ -28,6 +30,9 @@ export function flag(name) {
   return !!(state.tlm && bit && (state.tlm.status & bit));
 }
 export function robotAlive() { return state.connected && state.status?.link === "connected" && state.status?.robot_alive; }
+export function tlmAge() { return state.tlmAt ? performance.now() - state.tlmAt : Infinity; }
+// true while the numbers on screen are current; false -> grey them out and say "no data"
+export function tlmFresh() { return robotAlive() && tlmAge() < STALE_MS; }
 
 function handle(m) {
   switch (m.t) {
@@ -40,7 +45,7 @@ function handle(m) {
     case "robot": state.robot = m.robot; break;
     case "status": state.status = m; break;
     case "tlm": {
-      state.tlm = m;
+      state.tlm = m; state.tlmAt = performance.now();
       const tr = state.track, last = tr[tr.length - 1];
       if (!last || Math.hypot(m.x_mm - last[0], m.y_mm - last[1]) > 15) {
         tr.push([m.x_mm, m.y_mm]);
