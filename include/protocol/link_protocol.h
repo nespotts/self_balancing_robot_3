@@ -11,7 +11,8 @@
 #pragma once
 #include <stdint.h>
 
-#define LINK_PROTOCOL_VERSION 1
+// v2: TelemetryFrame gained bal_p .. step at the end (balance tuning data).
+#define LINK_PROTOCOL_VERSION 2
 #define LINK_SYNC1 0xA5
 #define LINK_SYNC2 0x5A
 #define LINK_MAX_PAYLOAD 200
@@ -22,7 +23,7 @@
 
 enum LinkMsgType : uint8_t {
   // Teensy -> Pi
-  MSG_TELEMETRY = 0x01,   // TelemetryFrame, 100 Hz
+  MSG_TELEMETRY = 0x01,   // TelemetryFrame, param tlm.hz (default 100; up to one per balance step)
   MSG_RANGE = 0x02,       // RangeFrame, one per range reading, tagged with the pose at that instant
   MSG_LOG = 0x03,         // UTF-8 text, no terminator (len = text length)
   MSG_PARAM_INFO = 0x04,  // ParamInfoFrame, sent for every param in reply to MSG_GET_PARAMS
@@ -45,6 +46,7 @@ struct __attribute__((packed)) HelloFrame {
   char firmware[24];      // build id, e.g. "v4 2026-11-20 abc1234", zero padded
 };
 
+// Everything below is a snapshot of ONE balance step (t_us = that step's IMU sample time).
 struct __attribute__((packed)) TelemetryFrame {
   uint32_t t_us;
   uint8_t mode;             // RobotMode
@@ -66,7 +68,16 @@ struct __attribute__((packed)) TelemetryFrame {
   float motor_left, motor_right;  // -1..1 normalised output
   float battery_v;
   float loop_hz;
-};
+  // v2 additions: balance PID contributions in motor counts (-4095..4095), out = p + i + d
+  float bal_p, bal_i, bal_d;
+  float steer_out;          // heading PID output, counts (left -= , right +=)
+  float vel_out_deg;        // velocity loop output (lean added to the balance target)
+  uint32_t step;            // balance step counter (gaps = steps not sent)
+};  // 104 bytes
+
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(TelemetryFrame) == 104, "TelemetryFrame size changed - bump LINK_PROTOCOL_VERSION");
+#endif
 
 struct __attribute__((packed)) RangeFrame {
   uint32_t t_us;

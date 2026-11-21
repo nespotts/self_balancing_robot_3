@@ -1,211 +1,460 @@
+// Self-balancing robot v4 firmware (Teensy 4.1). See docs/firmware.md.
+//
+// loop():  fresh IMU sample?  -> controlStep()  (balance, then encoders if due)
+//          otherwise          -> background()   (radio, Pi link, telemetry, battery, ...)
+// Every background task is short and checks imu.dataReady() so a new sample is never left waiting.
 #include <Arduino.h>
-#include "Wire.h"
-#include "battery_monitor.h"
-BatteryMonitor battery;
-#include "Helpers/reboot.h"
-// #include "Beeper/beeper_controller.h"
-// BalanceBeeper beeper;
-#include "Helpers/helper_3dmath.h"
-#include "Helpers/helper_functions.h"
-#include "Lidar/Lidar_scan.h"
-#include "NRF_radio.h"
-NRF_Radio radio;
-#include "IMU/IMU.h"
-IMU imu;
-#include "Odometry/Odometry.h"
-Odometry odom;
-#include "Motors/motor_controls.h"
-#include "Motors/PID_controls.h"
-PID_Manager pids;
-#include "functions.h"
-#include "control_logic.h"
-Automation automation;
-#include "Plotter.h"
+#include <SPI.h>
+#include <Wire.h>
+#include <math.h>
+#include <string.h>
 
-// #include <jled.h>
-// // breathe LED for 5 times, LED is connected to pin 9 (PWM capable) gpio
-// // can't use pin 13 because that is SCK for SPI 0
-// // auto led = JLed(13).Breathe(2000).Forever();
+#include "Lidar/sweep_api.h"
+#include "battery.h"
+#include "config.h"
+#include "controller.h"
+#include "imu.h"
+#include "mode_manager.h"
+#include "motors.h"
+#include "odometry.h"
+#include "params.h"
+#include "pi_link.h"
+#include "protocol/link_protocol.h"
+#include "protocol/radio_protocol.h"
+#include "reboot_button.h"
+#include "remote_radio.h"
 
-Plotter p;
-Reset reset;
+static Imu imu;
+static Odometry odom;
+static Controller ctl;
+static ModeManager modes;
+static RemoteRadio radio;
+static PiLink link;
+static Battery batt;
+static RebootButton button;
 
+// waypoints (navigation itself is issue #8)
+static float wp_x[WAYPOINT_MAX], wp_y[WAYPOINT_MAX];
+static uint8_t wp_count = 0;
+
+// control step state
+static bool have_step = false, motors_active = false;
+static uint32_t last_step_us = 0, enc_last_us = 0, step_count = 0;
+static float trim_deg = 0;
+
+// rates / telemetry
+static float loop_hz = 0;
+static uint32_t rate_t0_ms = 0, rate_steps0 = 0;
+static TelemetryFrame tlm;            // snapshot of the last balance step
+static bool tlm_fresh = false;
+static uint32_t last_tlm_us = 0;
+static bool hello_pending = true;
+static uint16_t param_stream = P_COUNT;  // next ParamInfo to send (P_COUNT = idle)
+static bool save_wait_logged = false;
+
+// ------------------------------------------------------------------ helpers
+
+static void logImuStatus() {
+  char s[2 * LINK_MAX_PAYLOAD];
+  int n = imu.debugString(s, sizeof(s));
+  link.log("%.180s", s);
+  if (n > 180) link.log("  ..%s", s + 180);
+}
+
+static float wrap180(float a) {
+  a = fmodf(a, 360.0f);
+  if (a > 180.0f) a -= 360.0f;
+  if (a <= -180.0f) a += 360.0f;
+  return a;
+}
+
+static int16_t clamp16(float v) {
+  if (isnan(v)) return 0;
+  if (v > 32767.0f) return 32767;
+  if (v < -32768.0f) return -32768;
+  return (int16_t)lroundf(v);
+}
+
+static uint16_t clampU16(float v) {
+  if (isnan(v) || v < 0) return 0;
+  if (v > 65535.0f) return 65535;
+  return (uint16_t)lroundf(v);
+}
+
+static ModeLimits limits() {
+  ModeLimits l;
+  l.max_speed = P(P_DRV_MAX_SPEED);
+  l.max_turn = P(P_DRV_MAX_TURN);
+  l.turn_deadband = P(P_DRV_TURN_DB);
+  return l;
+}
+
+static uint8_t statusBits(uint32_t now_ms) {
+  uint8_t st = 0;
+  if (modes.armed()) st |= TLM_ARMED;
+  if (ctl.last().upright) st |= TLM_UPRIGHT;
+  if (!modes.radioLive(now_ms)) st |= TLM_FAILSAFE;
+  if (modes.piLive(now_ms)) st |= TLM_PI_LINK;
+  if (batt.low()) st |= TLM_LOW_BATT;
+  return st;
+}
+
+static uint8_t errorCode(uint32_t now_ms) {
+  if (!imu.initialised()) return ERR_IMU_INIT;
+  if (!imu.healthy(micros())) return ERR_IMU_STALE;
+  if (!odom.leftOk()) return ERR_ENC_LEFT;
+  if (!odom.rightOk()) return ERR_ENC_RIGHT;
+  if (!radio.chipOk()) return ERR_RADIO_CHIP;
+  if (radio.versionMismatch(now_ms)) return ERR_RADIO_VERSION;
+  return ERR_OK;
+}
+
+static void buildTelemetry(uint32_t t_us) {
+  const uint32_t now_ms = millis();
+  const ImuSample& s = imu.sample();
+  const CtlOut& o = ctl.last();
+  TelemetryFrame& f = tlm;
+  f.t_us = t_us;
+  f.mode = modes.mode();
+  f.status = statusBits(now_ms);
+  f.error_code = errorCode(now_ms);
+  f.radio_ok = modes.radioLive(now_ms) ? 1 : 0;
+  f.pitch_deg = s.pitch_deg;
+  f.pitch_rate_dps = s.pitch_rate_dps;
+  f.roll_deg = s.roll_deg;
+  f.heading_deg = imu.heading();
+  f.yaw_rate_dps = s.yaw_rate_dps;
+  f.x_mm = odom.x_mm;
+  f.y_mm = odom.y_mm;
+  f.speed_mms = odom.speed_mms;
+  f.turn_rate_dps = odom.turn_rate_dps;
+  f.cmd_speed_mms = o.speed_sp;
+  f.cmd_turn_dps = o.turn_sp;
+  f.wheel_left_mms = odom.left_mms;
+  f.wheel_right_mms = odom.right_mms;
+  f.balance_target_deg = o.balance_target;
+  f.motor_left = motors_left() / MOTOR_FULL;
+  f.motor_right = motors_right() / MOTOR_FULL;
+  f.battery_v = batt.packV();
+  f.loop_hz = loop_hz;
+  f.bal_p = o.bal_p;
+  f.bal_i = o.bal_i;
+  f.bal_d = o.bal_d;
+  f.steer_out = o.steer;
+  f.vel_out_deg = o.vel_out;
+  f.step = step_count;
+  tlm_fresh = true;
+}
+
+static TelemetryPacket buildRadioTelemetry(uint8_t ack_seq) {
+  const uint32_t now_ms = millis();
+  TelemetryPacket t = {};
+  t.version = RADIO_PROTOCOL_VERSION;
+  t.ack_seq = ack_seq;
+  t.mode = modes.mode();
+  t.status = statusBits(now_ms);
+  t.battery_mv = clampU16(batt.packV() * 1000.0f);
+  t.min_cell_mv = clampU16(batt.minCellV() * 1000.0f);
+  t.pitch_cdeg = clamp16(imu.sample().pitch_deg * 100.0f);
+  t.heading_ddeg = clamp16(wrap180(imu.heading()) * 10.0f);
+  t.x_cm = clamp16(odom.x_mm / 10.0f);
+  t.y_cm = clamp16(odom.y_mm / 10.0f);
+  t.speed_mms = clamp16(odom.speed_mms);
+  t.range_front_mm = 0;  // lidar sweep: issue #7
+  t.range_rear_mm = 0;
+  t.waypoint_count = wp_count;
+  t.nav_index = 0;
+  t.error_code = errorCode(now_ms);
+  t.loop_khz_x10 = (uint8_t)fminf(255.0f, loop_hz / 100.0f + 0.5f);  // balance loop rate
+  return t;
+}
+
+static bool sendParam(uint16_t id) {
+  const ParamDef& d = params_def(id);
+  ParamInfoFrame f = {};
+  f.id = id;
+  f.value = g_param[id];
+  f.min = d.min;
+  f.max = d.max;
+  strncpy(f.name, d.name, sizeof(f.name) - 1);
+  return link.send(MSG_PARAM_INFO, &f, sizeof(f));
+}
+
+static bool sendHello() {
+  HelloFrame h = {};
+  h.link_version = LINK_PROTOCOL_VERSION;
+  h.radio_version = RADIO_PROTOCOL_VERSION;
+  h.param_count = P_COUNT;
+  snprintf(h.firmware, sizeof(h.firmware), "%s", FIRMWARE_ID);
+  return link.send(MSG_HELLO, &h, sizeof(h));
+}
+
+static void sendNavStatus() {
+  NavStatusFrame n = {};
+  n.state = 0;  // idle (navigation: issue #8)
+  n.waypoint_count = wp_count;
+  link.send(MSG_NAV_STATUS, &n, sizeof(n));
+}
+
+static void addWaypoint(float x, float y) {
+  if (wp_count < WAYPOINT_MAX) {
+    wp_x[wp_count] = x;
+    wp_y[wp_count] = y;
+    wp_count++;
+  }
+}
+
+static void handleEvent(uint8_t ev) {
+  switch (ev) {
+    case EVT_MARK_WAYPOINT:
+      addWaypoint(odom.x_mm, odom.y_mm);
+      sendNavStatus();
+      break;
+    case EVT_CLEAR_WAYPOINTS:
+      wp_count = 0;
+      sendNavStatus();
+      break;
+    case EVT_RESET_POSE: {
+      const float h_old = imu.heading();
+      odom.resetPose();
+      imu.resetHeading();
+      ctl.shiftHeading(-h_old);  // keep the heading target where it physically was
+      link.log("pose reset");
+      break;
+    }
+    case EVT_GO_HOME:
+      link.log("GO_HOME: navigation not implemented yet (#8)");
+      break;
+    case EVT_START_SCAN:
+      link.log("START_SCAN: sweep not implemented yet (#7)");
+      break;
+    default:
+      break;
+  }
+}
+
+// ------------------------------------------------------------------ Pi link input
+
+static void onLinkFrame(uint8_t type, const uint8_t* p, uint8_t len) {
+  const uint32_t now_ms = millis();
+  switch (type) {
+    case MSG_HEARTBEAT:
+      if (len >= sizeof(HeartbeatFrame)) modes.onPiHeartbeat(now_ms);
+      break;
+    case MSG_CMD_VEL:
+      if (len >= sizeof(CmdVelFrame)) {
+        CmdVelFrame c;
+        memcpy(&c, p, sizeof(c));
+        modes.onPiCmdVel(c.speed_mms, c.turn_dps, now_ms);
+      }
+      break;
+    case MSG_SET_MODE:
+      if (len >= sizeof(SetModeFrame)) modes.onPiSetMode(p[0], now_ms);
+      break;
+    case MSG_SET_PARAM:
+      if (len >= sizeof(SetParamFrame)) {
+        SetParamFrame s;
+        memcpy(&s, p, sizeof(s));
+        if (params_set(s.id, s.value)) sendParam(s.id);  // echo the value actually applied
+      }
+      break;
+    case MSG_GET_PARAMS:
+      hello_pending = true;
+      param_stream = 0;
+      break;
+    case MSG_GOTO:
+      if (len >= 2) {
+        const uint8_t count = p[1];
+        if (count <= 16 && len == 2 + count * 8) {
+          GotoFrame g = {};
+          memcpy(&g, p, len);
+          if (g.replace) wp_count = 0;
+          for (uint8_t i = 0; i < count; i++) addWaypoint(g.points[i].x_mm, g.points[i].y_mm);
+          sendNavStatus();
+        }
+      }
+      break;
+    case MSG_EVENT:
+      if (len >= sizeof(EventFrame)) handleEvent(p[0]);
+      break;
+    default:
+      break;
+  }
+}
+
+// ------------------------------------------------------------------ control step
+
+static void controlStep() {
+  const ImuSample& s = imu.sample();
+  const uint32_t now_ms = millis();
+  float dt = have_step ? (float)(s.t_us - last_step_us) * 1e-6f : imu.nominalDt();
+  if (dt <= 0.0f || dt > 0.05f) dt = imu.nominalDt();
+  have_step = true;
+  last_step_us = s.t_us;
+
+  modes.update(now_ms, true, limits());
+  if (modes.takeModeChanged()) ctl.onModeChange();
+
+  CtlIn in;
+  in.dt = dt;
+  in.now_ms = now_ms;
+  in.pitch = s.pitch_deg;
+  in.pitch_rate = s.pitch_rate_dps;
+  in.roll = s.roll_deg;
+  in.heading = imu.heading();
+  in.yaw_rate = s.yaw_rate_dps;
+  in.speed_mms = odom.speed_mms;
+  in.speed_ok = odom.ok();
+  in.target_speed = modes.targetSpeed();
+  in.target_turn = modes.targetTurn();
+  in.trim_deg = trim_deg;
+  in.enable = modes.motorsAllowed();
+  const CtlOut& o = ctl.step(in);
+  if (o.active) motors_set(o.left, o.right);
+  else motors_stop();
+  motors_active = o.active;
+  step_count++;
+
+  // encoders right after the step, when there's the most time before the next sample
+  const uint32_t t = micros();
+  if (t - enc_last_us >= ENCODER_PERIOD_US) {
+    enc_last_us = t;
+    odom.update(t, imu.heading());
+  }
+  buildTelemetry(s.t_us);
+}
+
+// ------------------------------------------------------------------ background
+
+static void sendOutput(uint32_t now_us) {
+  if (hello_pending && sendHello()) hello_pending = false;
+  while (!hello_pending && param_stream < P_COUNT && sendParam(param_stream)) param_stream++;
+
+  const float hz = P(P_TLM_HZ);
+  const uint32_t period = (uint32_t)(1e6f / (hz < 1.0f ? 1.0f : hz));
+  if (tlm_fresh && now_us - last_tlm_us >= period) {
+    if (link.send(MSG_TELEMETRY, &tlm, sizeof(tlm))) {
+      last_tlm_us = now_us;
+      tlm_fresh = false;
+    }
+  }
+}
+
+static void background() {
+  const uint32_t now_us = micros();
+  const uint32_t now_ms = millis();
+
+  // Safety: no balance step for IMU_STALE_US -> the motors must not keep their last command.
+  if (motors_active && now_us - last_step_us > IMU_STALE_US) {
+    motors_stop();
+    motors_active = false;
+  }
+
+  ControlPacket pkt;
+  if (radio.poll(pkt, now_ms)) {
+    modes.onRadioPacket(pkt, now_ms);
+    trim_deg = ((float)pkt.knob_left - 127.5f) / 127.5f * P(P_BAL_KNOB_TRIM);
+    radio.setAck(buildRadioTelemetry(pkt.seq));
+  }
+  modes.update(now_ms, imu.healthy(now_us), limits());
+  if (!modes.motorsAllowed() && motors_active) {  // E-stop / disarm: don't wait for the next step
+    motors_stop();
+    motors_active = false;
+  }
+  uint8_t ev;
+  while (modes.takeEvent(ev)) handleEvent(ev);
+
+  if (imu.dataReady()) return;
+  link.poll(onLinkFrame, 256);
+  if (imu.dataReady()) return;
+
+  if (link.hostConnected()) hello_pending = true;
+  sendOutput(now_us);
+
+  batt.update(now_ms);
+  button.update();
+
+  // no IMU steps (IMU fault): keep odometry and telemetry going at a low rate
+  if (now_us - last_step_us > 20000) {
+    if (now_us - enc_last_us >= 10000) {
+      enc_last_us = now_us;
+      odom.update(now_us, imu.heading());
+    }
+    if (now_us - last_tlm_us >= 100000 && !tlm_fresh) buildTelemetry(now_us);
+  }
+
+  // IMU status line: 3 s after boot, whenever its health changes, and every 60 s
+  static uint32_t imu_log_ms = 0;
+  static int8_t imu_was = -1;
+  const int8_t imu_now = imu.healthy(now_us) ? 1 : 0;
+  if ((imu_now != imu_was && now_ms > 3000) || now_ms - imu_log_ms >= 60000) {
+    imu_was = imu_now;
+    imu_log_ms = now_ms;
+    logImuStatus();
+  }
+
+  if (now_ms - rate_t0_ms >= 500) {
+    loop_hz = (float)(step_count - rate_steps0) * 1000.0f / (float)(now_ms - rate_t0_ms);
+    rate_t0_ms = now_ms;
+    rate_steps0 = step_count;
+  }
+
+  // things that may block for a few ms: only with the motors off
+  if (imu.dataReady()) return;
+  const bool motors_off = !motors_active;
+  imu.service(now_ms, motors_off);
+  radio.service(now_ms, motors_off);
+  if (g_param_defaults_requested) {
+    g_param_defaults_requested = false;
+    params_reset_defaults();
+    param_stream = 0;
+    link.log("params: defaults restored (not saved)");
+  }
+  if (g_param_save_requested) {
+    if (motors_off) {
+      g_param_save_requested = false;
+      save_wait_logged = false;
+      link.log(params_save() ? "params: saved" : "params: SAVE FAILED");
+    } else if (!save_wait_logged) {
+      save_wait_logged = link.log("params: save waits until the motors are off");
+    }
+  }
+}
+
+// ------------------------------------------------------------------ setup / loop
 
 void setup() {
-	Serial.begin(115200);
-	SPI.begin();
-	Wire.begin();
-	Wire1.begin();
-	odom.setup();
-	imu.setup();
-	// servo pin, num subdivisions
-	scan_setup(2, 16);
-	radio.setup(3);
-	pids.setup();
-
-	battery.setup();
-	p.Begin();
-	p.AddXYGraph("Test", 100000, "Right Motor Speed", left_motor.motor_speed_input, "Right Angular Velocity", odom.left_encoder.angular_velocity_deg);
-	p.AddXYGraph("Test", 100000, "speed input", left_motor.motor_speed_input, "speed output", left_motor.motor_speed_output);
-	// p.AddXYGraph("Test", 5000, "X", odom.cent.x, "Y", odom.cent.y);
-	// p.AddTimeGraph("Test", 5000, "test", x, "test2", y);
-	// p.AddTimeGraph("IMU", 5000, "Absolute Yaw 1", imu.absolute_yaw, "yaw", imu.ypr.yaw);
-	// p.AddTimeGraph("PIDs", 5000, "left motor", pids.control.leftoutput, "right motor", pids.control.rightoutput);
-	// p.AddTimeGraph("Angular Velocity", 5000, "Velocity", odom.cent.total_distance);
-	// p.AddTimeGraph("Angular Velocity", 5000, "Velocity", odom.pose.inst_angle_rad);
-	// p.AddTimeGraph("Left Encoder Deg", 2500, "Position", odom.left_wheel.encoder->angle_deg, "Velocity", odom.left_wheel.encoder->angular_velocity_deg, "Acceleration", odom.left_wheel.encoder->angular_acceleration_deg);
-	// p.AddTimeGraph("Left Encoder", 5000, "Distance", odom.left_wheel.linear_distance, "Velocity", odom.left_wheel.linear_velocity, "Acceleration", odom.left_wheel.linear_acceleration);
-	// p.AddTimeGraph("Left Encoder Rate", 5000, "Rate", odom.left_wheel.encoder->actual_rate);
-	// p.AddTimeGraph("Left Encoder Rate", 5000, "Rate", odom.pose.theta_rad);
-	// p.AddTimeGraph("Left Encoder", 5000, "Angular Position", odom.wheel.enc1.angle_deg, "Angular Velocity", odom.wheel.enc1.angular_velocity_deg, "Angular Acceleration", odom.wheel.enc1.angular_acceleration_deg);
-	// p.AddTimeGraph("Right Encoder", 5000, "Angular Position", odom.right_encoder.angle_rad);
-	// p.AddTimeGraph("IMU Orientation", 5000, "Yaw", imu.ypr.yaw, "Pitch", imu.ypr.pitch, "Roll", imu.ypr.roll);
-	// p.AddTimeGraph("IMU Linear Acceleration", 5000, "z", imu.lin_acc.z, "y", imu.lin_acc.y, "x", imu.lin_acc.x);
-	// p.AddTimeGraph("IMU Angular Velocity", 5000, "z", imu.ang_vel_deg.z, "y", imu.ang_vel_deg.y, "x", imu.ang_vel_deg.x);
-	// p.AddTimeGraph("IMU Angular Acceleration", 5000, "z", imu.angular_acceleration_deg.z, "y", imu.angular_acceleration_deg.y, "x", imu.angular_acceleration_deg.x);
-	// p.AddTimeGraph("IMU Rates", 5000, "Pose", imu.pose_rate, "Linear Acceleration", imu.lin_acc_rate, "Angular Velocity", imu.ang_vel_rate);
+  motors_begin();  // H-bridge pins driven low first
+  // Deselect every SPI chip before anything talks on the bus (a floating IMU CS breaks the nRF24 init).
+  pinMode(pins::IMU_CS, OUTPUT);
+  digitalWriteFast(pins::IMU_CS, HIGH);
+  pinMode(pins::RADIO_CSN, OUTPUT);
+  digitalWriteFast(pins::RADIO_CSN, HIGH);
+  Serial.begin(115200);
+  const bool loaded = params_load();
+  SPI.begin();
+  Wire.begin();
+  Wire1.begin();
+  batt.begin();
+  button.begin();
+  // VL53L0X + servo: only with rng.enable = 1 (applies at boot; sensors unplugged for now).
+  // Their init may re-begin Wire, so the clocks are set after it.
+  if (P(P_RNG_ENABLE) >= 0.5f) lidar_sweep_setup();
+  Wire.setClock(I2C_CLOCK_HZ);
+  Wire1.setClock(I2C_CLOCK_HZ);
+  odom.begin();
+  while (millis() < 150) {}  // nRF24 needs ~100 ms after power-up before it takes its config
+  radio.begin();
+  imu.begin();
+  link.log("boot %s, params %s, imu %s, radio %s", FIRMWARE_ID, loaded ? "from EEPROM" : "DEFAULTS",
+           imu.initialised() ? "ok" : "FAIL", radio.chipOk() ? "ok" : "FAIL");
+  rate_t0_ms = millis();
 }
-
-uint32_t plot_timer;
-uint32_t interval = 50;
-uint32_t cycles_past = 0;
-float loop_rate;
 
 void loop() {
-	cycles_past++;
-	reset.run();
-	// left_motor.exp_factor = (float)receive_data.left_knob / 50.0;
-	// left_motor.interval = (float)receive_data.right_knob / 100.0;
-
-	// left_motor.config_motor_run();
-	odom.run();
-	imu.run();
-	// scan_run();
-	radio.run();
-	pids.run();
-	battery.run();
-	// beeper.loop();
-	automation.run();
-
-	if (millis() - plot_timer >= interval) {
-		loop_rate = (float)cycles_past / (((float)millis() - (float)plot_timer) / 1000.0);
-		cycles_past = 0;
-		// Serial.println(loop_rate);
-
-		// control plot interval to a manageable rate
-		// p.Plot();
-		// Serial.print(left_motor.motor_speed_input); 
-		// Serial.print("\t");
-		// Serial.print(left_motor.motor_speed_output);
-		// Serial.print("\t");
-		// Serial.print(left_motor.exp_factor);
-		// Serial.println();
-
-		Serial.print("Act X: ");
-		Serial.print(odom.cent.x); 
-		Serial.print("\tAct Y: ");
-		Serial.print(odom.cent.y);
-		Serial.print("\tOdom Theta: ");
-		Serial.print(odom.pose.angle_deg);
-		Serial.print("\tdelta X:");
-		Serial.print(automation.deltaX);
-		Serial.print("\tdelta Y:");
-		Serial.print(automation.deltaY);
-		Serial.print("\tDistance Remain:");
-		Serial.print(automation.dist_remaining);
-		Serial.print("\tTarget Theta:");
-		Serial.print(automation.target_theta);
-		Serial.print("\tDelta Theta:");
-		Serial.print(automation.delta_theta);
-		Serial.print("\tAbs Targ. Theta:");
-		Serial.print(automation.absolute_target_theta);
-		Serial.println();
-
-		plot_timer = millis();
-	}
+  if (imu.poll()) {
+    controlStep();
+    return;
+  }
+  background();
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// TEST CODE TO SHOW IMU BLOCKING ISSUE
-
-// #include <Arduino.h>
-// #include <Adafruit_BNO08x.h>
-
-// // For SPI mode, we need a CS pin
-// #define BNO08X_CS 10
-// #define BNO08X_INT 30
-// #define BNO08X_RESET 33
-
-
-// Adafruit_BNO08x  bno08x(BNO08X_RESET);
-// sh2_SensorValue_t sensorValue;
-
-
-// sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
-// long reportIntervalUs = 5000;
-
-// void setReports(sh2_SensorId_t reportType, long report_interval) {
-// 	Serial.println("Setting desired reports");
-// 	if (!bno08x.enableReport(reportType, report_interval)) {
-// 		Serial.println("Could not enable stabilized remote vector");
-// 	}
-// }
-
-// void setup(void) {
-
-// 	Serial.begin(115200);
-// 	while (!Serial) delay(10);     // will pause Zero, Leonardo, etc until serial console opens
-
-// 	Serial.println("Adafruit BNO08x test!");
-
-// 	// Try to initialize!
-// 	if (!bno08x.begin_SPI(BNO08X_CS, BNO08X_INT)) {
-// 		Serial.println("Failed to find BNO08x chip");
-// 		while (1) { delay(10); }
-// 	}
-// 	Serial.println("BNO08x Found!");
-
-// 	setReports(reportType, reportIntervalUs);
-
-// 	Serial.println("Reading events");
-// 	delay(100);
-// }
-
-
-// uint32_t timer;
-// uint32_t interval = 50;
-// uint32_t cycles_past = 0;
-// double loop_rate;
-
-// void loop() {
-// 	cycles_past++;
-
-// 	if (bno08x.wasReset()) {
-// 		Serial.print("sensor was reset ");
-// 		setReports(reportType, reportIntervalUs);
-// 	}
-
-// 	// comment this line out for inscreased loop_rate
-// 	// if it is uncommented, the loop_rate exactly matches the event rate
-// 	bno08x.getSensorEvent(&sensorValue);
-
-// 	if (micros() - timer >= interval) {
-// 		loop_rate = (double)cycles_past / (((double)micros() - (double)timer) / 1000000.0);
-// 		cycles_past = 0;
-// 		Serial.println(loop_rate);
-// 		timer = micros();
-// 	}
-// }
