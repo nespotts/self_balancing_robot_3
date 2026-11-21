@@ -238,6 +238,13 @@ void RangeSweep::finishReading(uint8_t i, uint16_t mm, bool valid, uint32_t t_us
   f.sensor_id = i;
   f.valid = valid ? 1 : 0;
   pushFrame(f);
+  // copy for the navigator's obstacle check (consumed every balance step, so 8 is plenty)
+  if (nav_n_ == 8) {
+    nav_head_ = (nav_head_ + 1) % 8;
+    nav_n_--;
+  }
+  nav_[(nav_head_ + nav_n_) % 8] = f;
+  nav_n_++;
 
   // front / rear: latest reading within half a sweep step of straight ahead / behind
   const float win = P(P_RNG_SERVO_HOLD) >= 0.0f ? 5.0f : fmaxf(0.5f * stepDeg() + 0.5f, 3.0f);
@@ -266,6 +273,14 @@ void RangeSweep::pushFrame(const RangeFrame& f) {
 bool RangeSweep::peekFrame(RangeFrame& f) const {
   if (out_n_ == 0) return false;
   f = out_[out_head_];
+  return true;
+}
+
+bool RangeSweep::takeNavReading(RangeFrame& f) {
+  if (nav_n_ == 0) return false;
+  f = nav_[nav_head_];
+  nav_head_ = (nav_head_ + 1) % 8;
+  nav_n_--;
   return true;
 }
 

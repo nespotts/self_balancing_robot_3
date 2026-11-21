@@ -23,8 +23,7 @@ class DriftRobot(SimRobot):
     """SimRobot whose reported odometry drifts: heading gains drift_deg_min degrees per minute
     (gyro bias) and distances read drift_scale too long (wheel size)."""
 
-    def __init__(self, *a, drift_deg_min=0.0, drift_scale=0.0, explore_waypoints=True, **kw):
-        self.explore_waypoints = explore_waypoints
+    def __init__(self, *a, drift_deg_min=0.0, drift_scale=0.0, **kw):
         self.drift_rate = drift_deg_min / 60.0
         self.drift_scale = drift_scale
         self.dx_o = self.dy_o = self.dth_o = 0.0
@@ -53,16 +52,7 @@ class DriftRobot(SimRobot):
         finally:
             room.raycast = rc
 
-    def _targets(self, now):
-        # firmware contract (nav work): EXPLORE follows the MSG_GOTO waypoints like GOTO (the station
-        # plans them to frontiers); sim.py's own EXPLORE is a random wander
-        if self.mode == lp.MODE_EXPLORE and self.explore_waypoints:
-            self.mode = lp.MODE_GOTO
-            try:
-                return super()._targets(now)
-            finally:
-                self.mode = lp.MODE_EXPLORE
-        return super()._targets(now)
+    # (EXPLORE follows the MSG_GOTO waypoints like GOTO natively in sim.py's Navigator, as the firmware)
 
     def drifting(self):
         return bool(self.drift_rate or self.drift_scale)
@@ -98,6 +88,24 @@ class DriftRobot(SimRobot):
         return math.hypot(ox - x, oy - y), oth - th
 
 
+_HB = lp.encode_heartbeat(0, 1)[4:-2]
+
+
+def heartbeat(robot):
+    """The Pi's 10 Hz heartbeat: GOTO / EXPLORE only move while supervised (remote or Pi link)."""
+    robot.on_frame(lp.MSG_HEARTBEAT, _HB)
+
+
+def set_list(robot, points, replace=True):
+    """What a MSG_GOTO does in the firmware (src/main.cpp): fill the navigator's list."""
+    nav = robot.nav
+    if replace:
+        nav.clear_list()
+    for x, y in points:
+        nav.add(float(x), float(y))
+    nav.list_changed(replace)
+
+
 def drive_offline(robot, on_range, points=TOUR, max_s=240.0, on_step=None):
     """No network, as fast as the CPU goes: arm, stand up, follow the waypoints once; every RangeFrame
     goes to on_range(decoded dict). Returns simulated seconds used (max_s if it never arrived)."""
@@ -112,22 +120,31 @@ def drive_offline(robot, on_range, points=TOUR, max_s=240.0, on_step=None):
     robot.set_mode(lp.MODE_BALANCE)
     t_end = robot.t + 2.5
     while robot.t < t_end:
+        if robot.step_n % 40 == 0:
+            heartbeat(robot)
         robot.step()
     pump()
-    robot.waypoints, robot.nav_index = [tuple(p) for p in points], 0
+    todo = [tuple(p) for p in points]
+    set_list(robot, todo)
     robot.set_mode(lp.MODE_GOTO)
     start, blocked = robot.t, 0.0
+    nav = robot.nav
     while robot.t - start < max_s:
+        heartbeat(robot)
         for _ in range(40):
             robot.step()
         pump()
         if on_step:
             on_step(robot)
-        if robot.nav_state == 4 and robot.nav_index >= len(robot.waypoints):
+        if nav.state == lp.NAV_ARRIVED and nav.idx >= len(nav.wp):
             return robot.t - start
-        blocked = blocked + 0.1 if robot.nav_state == 3 else 0.0
-        if blocked > 4.0 and robot.nav_index < len(robot.waypoints):    # skip a blocked leg
-            robot.nav_index += 1
+        blocked = blocked + 0.1 if nav.state == lp.NAV_BLOCKED else 0.0
+        if blocked > 4.0:                                   # skip a blocked leg
+            rest = todo[todo.index(nav.wp[nav.idx]) + 1:] if nav.wp[nav.idx] in todo else []
+            if not rest:
+                return robot.t - start
+            todo = rest
+            set_list(robot, todo)
             blocked = 0.0
     return max_s
 
@@ -157,11 +174,10 @@ class OfflineBridge:
     def handle_command(self, m, who="?"):
         r = self.robot
         if m["t"] == "goto":
-            r.waypoints = [tuple(p) for p in m["points"]]
-            r.nav_index = 0
-            if r.nav_state == NAV_ARRIVED_STATE:
-                r.nav_state = 0
-            self.waypoints = r.waypoints
+            pts = [(float(x), float(y)) for x, y in m["points"]]
+            replace = m.get("replace", True)
+            set_list(r, pts, replace)
+            self.waypoints = pts if replace else self.waypoints + pts
         elif m["t"] == "set_mode":
             r.set_mode(m["mode"])
 
@@ -170,10 +186,7 @@ class OfflineBridge:
         x, y, th = r.odom()
         self.tlm = {"x_mm": x, "y_mm": y, "heading_deg": th, "mode": r.mode}
         self.tlm_time = r.t
-        self.nav = {"state": r.nav_state, "waypoint_count": len(r.waypoints), "nav_index": r.nav_index}
-
-
-NAV_ARRIVED_STATE = 4
+        self.nav = r.nav.status()
 
 
 def plan_offline(robot, mapper, command, max_s=300.0, on_step=None):
@@ -191,6 +204,8 @@ def plan_offline(robot, mapper, command, max_s=300.0, on_step=None):
     robot.set_mode(lp.MODE_BALANCE)
     t_end = robot.t + 2.5
     while robot.t < t_end:
+        if robot.step_n % 40 == 0:
+            heartbeat(robot)
         robot.step()
     pump()
     b.update()
@@ -200,6 +215,7 @@ def plan_offline(robot, mapper, command, max_s=300.0, on_step=None):
         raise RuntimeError(err)
     start = robot.t
     while robot.t - start < max_s:
+        heartbeat(robot)
         for _ in range(40):
             robot.step()
         pump()
@@ -233,9 +249,9 @@ async def tour(bridge, points=TOUR, loops=0, quiet=False):
             nav = bridge.nav or {}
             if bridge.tlm and bridge.tlm["mode"] == lp.MODE_IDLE:
                 return                          # STOP pressed
-            if nav.get("state") == 4 and nav.get("nav_index", 0) >= len(todo):
+            if nav.get("state") == lp.NAV_ARRIVED and nav.get("nav_index", 0) >= len(todo):
                 break                           # arrived
-            if nav.get("state") == 3:           # blocked
+            if nav.get("state") == lp.NAV_BLOCKED:
                 blocked_since = blocked_since or asyncio.get_running_loop().time()
                 if asyncio.get_running_loop().time() - blocked_since > 4.0:
                     rest = todo[nav.get("nav_index", 0) + 1:]

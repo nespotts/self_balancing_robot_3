@@ -44,9 +44,14 @@ No sample → radio, Pi link, telemetry, battery, button. Nothing blocks the bal
 | Mode | Drives from |
 |---|---|
 | IDLE | motors off |
-| BALANCE, GOTO, EXPLORE, HOLD | stand still (nav = #8) |
-| MANUAL | remote sticks, if packets < 250 ms old |
-| STATION | `MSG_CMD_VEL`, if heartbeat < 500 ms and cmd < 300 ms |
+| BALANCE | stand still |
+| MANUAL | remote sticks, if packets < 250 ms old (obstacle: flag only) |
+| STATION | `MSG_CMD_VEL`, if heartbeat < 500 ms and cmd < 300 ms; obstacle stop + slow-down |
+| GOTO, EXPLORE | waypoint list (see Navigation), if supervised ¹ |
+| HOLD | hold the position HOLD started at, if supervised ¹ |
+
+¹ supervised = remote packets < 250 ms, or (no remote for 1 s) Pi heartbeat < 500 ms. Else: stand still.
+Speed ≤ `drv.max_speed` × remote speed limit (while the remote is present).
 
 Mode requests act when they change: a remote mode-switch change, or each Pi `SET_MODE`.
 
@@ -116,6 +121,23 @@ Gains are br3ttb units: ki per second, kd seconds.
 | mot.speed_loop | 0 | 1 = closed-loop wheel speed motor layer (experimental, see Wheel speed loop) |
 | mot.sl_kp / sl_ki / sl_imax / sl_band | 0.006 / 0.08 / 3 / 0.3 | speed loop: V per mm/s, V per mm, integrator limit V, dead-zone taper V |
 | mot.k_l / k_r | 200 | mm/s per V above the dead zone (motor_fit.py `k`); speed loop + tracking tests |
+| nav.max_speed / max_turn | 250 mm/s / 90 °/s | GOTO / EXPLORE limits (also ≤ drv.*, × remote speed limit) |
+| nav.speed_kp | 0.6 /s | speed = kp × distance … |
+| nav.min_speed | 40 mm/s | … but at least this (dead zone), also the slowest obstacle slow-down |
+| nav.turn_kp | 2 °/s per ° | turn = kp × bearing error |
+| nav.align_deg | 10 | drive when the error < this; turn in place again above 3× |
+| nav.arrive_mm | 50 | at the waypoint: stop |
+| nav.stop_speed / stop_turn_dps | 50 mm/s / 20 °/s | "stopped" … |
+| nav.dwell_ms | 500 | … this long → next waypoint |
+| nav.end_heading_deg | −1 | ≥ 0: turn to this heading at the last waypoint (pose frame, 0 = +X) |
+| nav.heading_tol_deg | 3 | end heading reached |
+| nav.slow_mm | 800 | obstacle closer → slow down (linear to `rng.obstacle_mm`; 0 = off) |
+| nav.clear_mm | 100 | blocked until nothing inside `rng.obstacle_mm` + this (+ backoff) for `nav.obst_age_ms` |
+| nav.corridor_mm | 220 | width checked ahead / behind |
+| nav.obst_age_ms | 1500 | range points kept this long |
+| nav.floor_mm | 50 | ignore hits lower than this (floor, when leaning) |
+| nav.backoff_mm | 0 | when blocked, back off this far (rear checked too) |
+| nav.hold_kp / hold_max_speed / hold_db_mm | 2 /s / 150 mm/s / 15 mm | HOLD position loop |
 
 ¹ applied between readings, only while the motors are off. ² applied only while both motors are off
 (disarm / IDLE / fallen; log line `mot: drive_mode …, pwm … Hz`). Everything else applies at once.
@@ -178,6 +200,58 @@ suggested `servo_trim_deg` (fit of the readings to a flat wall). Its `servo_deg_
 the sensor's ~25° cone flattens the curve, so measure the travel by eye (step 1).
 
 **3.** `rng.servo_hold_deg` −1, `rng.sweep_deg` 170, `rng.steps` 16, `cfg.save`.
+
+## Navigation (issue #8, `src/navigator.*`)
+
+Waypoints (pose frame): remote MARK_WAYPOINT, or the Pi's `MSG_GOTO` (the planner sends `replace = 1`).
+GOTO and EXPLORE follow the list the same way; HOLD holds the spot it started at.
+
+```
+           new list / mode GOTO, EXPLORE
+                     │
+                     v          |err| < align              dist < arrive_mm
+ ┌────────────> TURNING ─────────────────> DRIVING ─────────────────────> (stop) ──┐
+ │  next point   (turn in place)  <───────  speed = kp·dist                        │ stopped
+ │                               |err| > 3·align  │  ▲                              │ dwell_ms
+ │                                       obstacle │  │ GOTO: clear again            │
+ │                              < rng.obstacle_mm v  │ EXPLORE: new MSG_GOTO list   v
+ │                                             BLOCKED (+ backoff_mm)          more points?
+ └──────────────────────────────────────────────────────────────── yes ───────────┤
+                                                                                 no│
+                          end_heading_deg ≥ 0: TURNING to it ──> ARRIVED <─────────┘
+
+ HOLD:  HOLDING  speed = hold_kp × forward error (deadband hold_db_mm), BLOCKED if an obstacle is in the way
+```
+
+| | |
+|---|---|
+| Obstacles | every valid range reading → a world point (kept `nav.obst_age_ms`); points in a `nav.corridor_mm` strip ahead / behind give the front / rear distance as a sensor range |
+| Floor | lean tips the head; a hit lower than `nav.floor_mm` above the floor is ignored |
+| Slow-down | `nav.slow_mm` → `rng.obstacle_mm`: speed limit falls linearly (≥ `nav.min_speed`) |
+| Applies to | GOTO, EXPLORE, HOLD, STATION. MANUAL: `TLM_OBSTACLE` only |
+| No sweep | `rng.enable 0` → no points → no obstacle stop (log `nav: no range readings …` when a nav mode starts) |
+| Pose reset | clears the list, points and hold point |
+| GO_HOME | list = [first waypoint, or the origin], mode GOTO (never arms) |
+| NavStatusFrame | at once on a change of state / index / count, else 2 Hz in GOTO/EXPLORE/HOLD; `obstacle_mm` = blocking range |
+| Log | `nav: blocked, obstacle at 287 mm (waypoint 2/2)`, `nav: clear …`, `nav: reached 1/3, 12 mm off`, `nav: arrived` |
+
+Simulator: `station/sim/sim.py` `Navigator` is a line-by-line port (same params, states, logs);
+tests `station/sim/tests/test_nav.py`.
+
+## Radio stats (remote issue #3)
+
+Every 10 s while packets arrive (and once when they stop), `MSG_LOG`:
+`radio: 50.0 pkt/s, gaps>100ms 0 (max 32 ms), bad 0, multi 0, ack fail 0, poll max 61 us`
+
+| Field | Meaning |
+|---|---|
+| gaps>100ms | packets that came > 100 ms after the previous one (failsafe trips at 250) |
+| bad | wrong size / version / corrupt |
+| multi | polls that found > 1 packet waiting (background loop late) |
+| ack fail | TX FIFO full when loading the ack (flushed + reloaded) |
+| poll max | longest poll / ack load, µs (the balance loop is never blocked longer) |
+
+The ack payload is reloaded after every poll that read anything (also invalid packets), stale acks flushed.
 
 ## Error codes (telemetry `error_code`)
 

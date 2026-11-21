@@ -1,4 +1,4 @@
-"""Link protocol v2 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
+"""Link protocol v3 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
 
 Frame: 0xA5 0x5A | type u8 | len u8 | payload[len] | crc16 u16 LE
 crc16 = CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over type, len and payload.
@@ -7,7 +7,7 @@ Pure Python, 3.8+.
 """
 import struct
 
-LINK_PROTOCOL_VERSION = 2
+LINK_PROTOCOL_VERSION = 3
 LINK_SYNC1 = 0xA5
 LINK_SYNC2 = 0x5A
 LINK_MAX_PAYLOAD = 200
@@ -55,11 +55,22 @@ TLM_BITS = {"armed": TLM_ARMED, "upright": TLM_UPRIGHT, "failsafe": TLM_FAILSAFE
 
 GOTO_MAX_POINTS = 16
 
+# TelemetryFrame.remote_flags (v3)
+LINK_RF_ESTOP = 0x01      # E-stop latched (from the remote)
+LINK_RF_ARM_WAIT = 0x02   # arming needs the remote's ARMED switch off -> on
+LINK_RF_PRESENT = 0x04    # remote packets in the last second (radio_ok = last 250 ms)
+RF_BITS = {"estop": LINK_RF_ESTOP, "arm_wait": LINK_RF_ARM_WAIT, "present": LINK_RF_PRESENT}
+
+# NavState (NavStatusFrame.state, TelemetryFrame.nav_state)
+NAV_IDLE, NAV_TURNING, NAV_DRIVING, NAV_BLOCKED, NAV_ARRIVED, NAV_HOLDING = range(6)
+NAV_STATE_COUNT = 6
+NAV_STATE_NAMES = ["idle", "turning", "driving", "blocked", "arrived", "holding"]
+
 # ---- struct layouts: (format, field names in C order) ------------------------------------
 HELLO_FMT = "<BBH24s"
 HELLO_FIELDS = ("link_version", "radio_version", "param_count", "firmware")
 
-TELEMETRY_FMT = "<IBBBB23fI"
+TELEMETRY_FMT = "<IBBBB23fIBBBB"
 TELEMETRY_FIELDS = (
     "t_us", "mode", "status", "error_code", "radio_ok",
     "pitch_deg", "pitch_rate_dps", "roll_deg", "heading_deg", "yaw_rate_dps",
@@ -68,8 +79,11 @@ TELEMETRY_FIELDS = (
     "motor_left", "motor_right", "battery_v", "loop_hz",
     # v2: balance tuning data
     "bal_p", "bal_i", "bal_d", "steer_out", "vel_out_deg", "step",
+    # v3: remote E-stop / arm-wait flags, nav state
+    "remote_flags", "nav_state", "nav_index", "reserved2",
 )
-TELEMETRY_V1_SIZE = 80   # v1 frames (no bal_p..step) are still decoded; the new fields read as 0
+TELEMETRY_V1_SIZE = 80   # older frames are still decoded; the missing fields read as 0
+TELEMETRY_V2_SIZE = 104
 
 RANGE_FMT = "<I5fHBB"
 RANGE_FIELDS = ("t_us", "x_mm", "y_mm", "heading_deg", "pitch_deg", "sensor_angle_deg",
@@ -78,9 +92,10 @@ RANGE_FIELDS = ("t_us", "x_mm", "y_mm", "heading_deg", "pitch_deg", "sensor_angl
 PARAM_INFO_FMT = "<H3f24s"
 PARAM_INFO_FIELDS = ("id", "value", "min", "max", "name")
 
-NAV_STATUS_FMT = "<BBBB3f"
+NAV_STATUS_FMT = "<BBBB4f"
 NAV_STATUS_FIELDS = ("state", "waypoint_count", "nav_index", "reserved",
-                     "target_x_mm", "target_y_mm", "distance_mm")
+                     "target_x_mm", "target_y_mm", "distance_mm", "obstacle_mm")
+NAV_STATUS_V2_SIZE = 16  # v2 frames have no obstacle_mm (reads as 0)
 
 HEARTBEAT_FMT = "<IB"
 HEARTBEAT_FIELDS = ("pi_ms", "clients")
@@ -109,11 +124,11 @@ STRUCTS = {  # C struct name -> (format, fields); GotoFrame is variable length (
 }
 
 _S = {name: struct.Struct(fmt) for name, (fmt, _f) in STRUCTS.items()}
-TELEMETRY_SIZE = _S["TelemetryFrame"].size      # 104
+TELEMETRY_SIZE = _S["TelemetryFrame"].size      # 108
 RANGE_SIZE = _S["RangeFrame"].size              # 28
 PARAM_INFO_SIZE = _S["ParamInfoFrame"].size     # 38
 HELLO_SIZE = _S["HelloFrame"].size              # 28
-NAV_STATUS_SIZE = _S["NavStatusFrame"].size     # 16
+NAV_STATUS_SIZE = _S["NavStatusFrame"].size     # 20
 
 
 # ---- CRC-16/CCITT-FALSE --------------------------------------------------------------------
@@ -212,10 +227,17 @@ def decode_hello(p):
     return d
 
 
+def _pad(p, sizes, full):
+    """Older (shorter) frame of a known size -> zero-padded to the current size."""
+    for n in sizes:
+        if n <= len(p) < full:
+            return bytes(p[:n]) + bytes(full - n)
+    return p
+
+
 def decode_telemetry(p):
-    if TELEMETRY_V1_SIZE <= len(p) < TELEMETRY_SIZE:   # older firmware (link v1)
-        p = bytes(p[:TELEMETRY_V1_SIZE]) + bytes(TELEMETRY_SIZE - TELEMETRY_V1_SIZE)
-    return _unpack("TelemetryFrame", p)
+    # older firmware: link v2 (104 bytes), v1 (80 bytes)
+    return _unpack("TelemetryFrame", _pad(p, (TELEMETRY_V2_SIZE, TELEMETRY_V1_SIZE), TELEMETRY_SIZE))
 
 
 def decode_range(p):
@@ -229,7 +251,7 @@ def decode_param_info(p):
 
 
 def decode_nav_status(p):
-    return _unpack("NavStatusFrame", p)
+    return _unpack("NavStatusFrame", _pad(p, (NAV_STATUS_V2_SIZE,), NAV_STATUS_SIZE))
 
 
 def decode_log(p):
@@ -338,6 +360,9 @@ def encode_hello(link_version=LINK_PROTOCOL_VERSION, radio_version=RADIO_PROTOCO
 
 
 def encode_telemetry(d):
+    d = dict(d)
+    for k in ("remote_flags", "nav_state", "nav_index", "reserved2"):   # v3 fields
+        d.setdefault(k, 0)
     return encode_frame(MSG_TELEMETRY, _pack("TelemetryFrame", d))
 
 
@@ -353,6 +378,7 @@ def encode_param_info(pid, value, vmin, vmax, name):
 def encode_nav_status(d):
     d = dict(d)
     d.setdefault("reserved", 0)
+    d.setdefault("obstacle_mm", 0.0)
     return encode_frame(MSG_NAV_STATUS, _pack("NavStatusFrame", d))
 
 

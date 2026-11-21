@@ -29,7 +29,7 @@ constexpr uint32_t I2C_CLOCK_HZ = 400000;     // AS5600 + VL53L0X both support 4
 constexpr uint32_t ENCODER_PERIOD_US = 4000;  // read encoders after a balance step once 4 ms passed (200 Hz at 400 Hz)
 constexpr uint8_t ENCODER_WINDOW = 16;        // speed = position change over 16 reads (80 ms)
 constexpr float WHEEL_DIAMETER_MM = 66.0f;
-constexpr float TRACK_MM = 123.0f;            // wheel separation
+constexpr float TRACK_MM = 126.8f;            // wheel separation, tyre centre to centre (CAD; was 123)
 
 // Control
 constexpr float VEL_LOOP_DT = 0.01f;          // velocity loop 100 Hz

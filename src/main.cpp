@@ -16,6 +16,7 @@
 #include "mode_manager.h"
 #include "motor_test.h"
 #include "motors.h"
+#include "navigator.h"
 #include "odometry.h"
 #include "params.h"
 #include "pi_link.h"
@@ -35,10 +36,7 @@ static PiLink link;
 static Battery batt;
 static RebootButton button;
 static MotorTest mtest;  // wheels-up motor test (mot.test), owns the motors while driving()
-
-// waypoints (navigation itself is issue #8)
-static float wp_x[WAYPOINT_MAX], wp_y[WAYPOINT_MAX];
-static uint8_t wp_count = 0;
+static Navigator nav;    // waypoints, GOTO / EXPLORE / HOLD, obstacle check (issue #8)
 
 // control step state
 static bool have_step = false, motors_active = false;
@@ -92,12 +90,20 @@ static ModeLimits limits() {
   return l;
 }
 
-// Something closer than rng.obstacle_mm straight ahead while driving forward (flag only for now).
-static bool obstacleAhead(uint32_t now_ms) {
-  const uint16_t front = sweep.frontMm(now_ms);
-  const float lim = P(P_RNG_OBSTACLE_MM);
-  const bool forward = ctl.last().speed_sp > 10.0f || odom.speed_mms > 50.0f;
-  return front > 0 && lim > 0.0f && front < lim && forward;
+static NavIn navIn(uint32_t now_ms) {
+  NavIn n;
+  n.now_ms = now_ms;
+  n.mode = modes.mode();
+  n.upright = ctl.last().upright;
+  n.live = modes.supervised(now_ms);
+  n.x = odom.x_mm;
+  n.y = odom.y_mm;
+  n.heading = imu.heading();
+  n.speed = odom.speed_mms;
+  n.yaw_rate = imu.sample().yaw_rate_dps;
+  n.max_speed = P(P_DRV_MAX_SPEED) * modes.speedScale(now_ms);
+  n.max_turn = P(P_DRV_MAX_TURN);
+  return n;
 }
 
 static RangePose rangePose() {
@@ -111,7 +117,11 @@ static RangePose rangePose() {
 
 static uint8_t statusBits(uint32_t now_ms) {
   uint8_t st = 0;
-  if (obstacleAhead(now_ms)) st |= TLM_OBSTACLE;
+  if (nav.obstacle()) st |= TLM_OBSTACLE;  // blocking the current motion (navigator.h)
+  if (modes.mode() == MODE_GOTO || modes.mode() == MODE_EXPLORE) {
+    if (nav.active()) st |= TLM_NAV_ACTIVE;
+    if (nav.done()) st |= TLM_NAV_DONE;
+  }
   if (modes.armed()) st |= TLM_ARMED;
   if (ctl.last().upright) st |= TLM_UPRIGHT;
   if (!modes.radioLive(now_ms)) st |= TLM_FAILSAFE;
@@ -164,6 +174,10 @@ static void buildTelemetry(uint32_t t_us) {
   f.steer_out = o.steer;
   f.vel_out_deg = o.vel_out;
   f.step = step_count;
+  f.remote_flags = (modes.estop() ? LINK_RF_ESTOP : 0) | (modes.armWait() ? LINK_RF_ARM_WAIT : 0) |
+                   (modes.radioPresent(now_ms) ? LINK_RF_PRESENT : 0);
+  f.nav_state = nav.state();
+  f.nav_index = nav.index();
   tlm_fresh = true;
 }
 
@@ -183,8 +197,8 @@ static TelemetryPacket buildRadioTelemetry(uint8_t ack_seq) {
   t.speed_mms = clamp16(odom.speed_mms);
   t.range_front_mm = sweep.frontMm(now_ms);
   t.range_rear_mm = sweep.rearMm(now_ms);
-  t.waypoint_count = wp_count;
-  t.nav_index = 0;
+  t.waypoint_count = nav.count();
+  t.nav_index = nav.index();
   t.error_code = errorCode(now_ms);
   t.loop_khz_x10 = (uint8_t)fminf(255.0f, loop_hz / 100.0f + 0.5f);  // balance loop rate
   return t;
@@ -210,42 +224,46 @@ static bool sendHello() {
   return link.send(MSG_HELLO, &h, sizeof(h));
 }
 
-static void sendNavStatus() {
+static bool sendNavStatus() {
   NavStatusFrame n = {};
-  n.state = 0;  // idle (navigation: issue #8)
-  n.waypoint_count = wp_count;
-  link.send(MSG_NAV_STATUS, &n, sizeof(n));
-}
-
-static void addWaypoint(float x, float y) {
-  if (wp_count < WAYPOINT_MAX) {
-    wp_x[wp_count] = x;
-    wp_y[wp_count] = y;
-    wp_count++;
-  }
+  n.state = nav.state();
+  n.waypoint_count = nav.count();
+  n.nav_index = nav.index();
+  n.target_x_mm = nav.targetX();
+  n.target_y_mm = nav.targetY();
+  n.distance_mm = nav.distance();
+  n.obstacle_mm = nav.obstacleMm();
+  return link.send(MSG_NAV_STATUS, &n, sizeof(n));
 }
 
 static void handleEvent(uint8_t ev) {
   switch (ev) {
     case EVT_MARK_WAYPOINT:
-      addWaypoint(odom.x_mm, odom.y_mm);
-      sendNavStatus();
+      if (nav.add(odom.x_mm, odom.y_mm)) nav.listChanged(false);
+      else link.log("waypoints: list full (%u)", (unsigned)WAYPOINT_MAX);
       break;
     case EVT_CLEAR_WAYPOINTS:
-      wp_count = 0;
-      sendNavStatus();
+      nav.clearList();
+      nav.listChanged(true);
       break;
     case EVT_RESET_POSE: {
       const float h_old = imu.heading();
       odom.resetPose();
       imu.resetHeading();
       ctl.shiftHeading(-h_old);  // keep the heading target where it physically was
-      link.log("pose reset");
+      nav.onPoseReset();         // waypoints / obstacle points / hold point were in the old frame
+      link.log("pose reset (waypoints cleared)");
       break;
     }
-    case EVT_GO_HOME:
-      link.log("GO_HOME: navigation not implemented yet (#8)");
+    case EVT_GO_HOME: {  // list = [first waypoint, or the origin], then GOTO (an event never arms)
+      const float hx = nav.count() ? nav.wpX(0) : 0.0f, hy = nav.count() ? nav.wpY(0) : 0.0f;
+      nav.clearList();
+      nav.add(hx, hy);
+      nav.listChanged(true);
+      modes.requestMode(MODE_GOTO);
+      link.log("GO_HOME: to %.0f, %.0f", (double)hx, (double)hy);
       break;
+    }
     case EVT_START_SCAN:
       link.log(P(P_RNG_ENABLE) >= 0.5f ? "START_SCAN: the sweep runs all the time while rng.enable = 1"
                                        : "START_SCAN: rng.enable is 0");
@@ -290,9 +308,12 @@ static void onLinkFrame(uint8_t type, const uint8_t* p, uint8_t len) {
         if (count <= 16 && len == 2 + count * 8) {
           GotoFrame g = {};
           memcpy(&g, p, len);
-          if (g.replace) wp_count = 0;
-          for (uint8_t i = 0; i < count; i++) addWaypoint(g.points[i].x_mm, g.points[i].y_mm);
-          sendNavStatus();
+          if (g.replace) nav.clearList();
+          uint8_t added = 0;
+          for (uint8_t i = 0; i < count; i++) added += nav.add(g.points[i].x_mm, g.points[i].y_mm) ? 1 : 0;
+          if (added < count)
+            link.log("waypoints: list full (%u), %u dropped", (unsigned)WAYPOINT_MAX, (unsigned)(count - added));
+          nav.listChanged(g.replace != 0);  // also resumes from BLOCKED
         }
       }
       break;
@@ -315,7 +336,23 @@ static void controlStep() {
   last_step_us = s.t_us;
 
   modes.update(now_ms, true, limits());
-  if (modes.takeModeChanged()) ctl.onModeChange();
+  if (modes.takeModeChanged()) {
+    ctl.onModeChange();
+    nav.onModeChange(navIn(now_ms));
+  }
+  // navigation: its command is used by modes.update() from the next step on (2.5 ms later)
+  nav.update(navIn(now_ms));
+  modes.setAutoCmd(nav.speed(), nav.turn(), now_ms);
+  float target_speed = modes.targetSpeed();
+  if (!Navigator::navMode(modes.mode())) {
+    // STATION commands get the obstacle stop / slow-down too; other modes only the TLM_OBSTACLE flag
+    if (modes.mode() == MODE_STATION && target_speed != 0.0f) {
+      target_speed = nav.limitSpeed(target_speed, P(P_DRV_MAX_SPEED), true);
+    } else {
+      const float moving = fabsf(odom.speed_mms) > 50.0f ? odom.speed_mms : 0.0f;
+      nav.limitSpeed(target_speed != 0.0f ? target_speed : moving, P(P_DRV_MAX_SPEED), false);
+    }
+  }
 
   CtlIn in;
   in.dt = dt;
@@ -327,7 +364,7 @@ static void controlStep() {
   in.yaw_rate = s.yaw_rate_dps;
   in.speed_mms = odom.speed_mms;
   in.speed_ok = odom.ok();
-  in.target_speed = modes.targetSpeed();
+  in.target_speed = target_speed;
   in.target_turn = modes.targetTurn();
   in.trim_deg = trim_deg;
   in.enable = modes.motorsAllowed();
@@ -347,6 +384,7 @@ static void controlStep() {
   // range sweep: a bounded slice of I2C work (a quarter of the step period), long before the next sample
   if (sweep.started())
     sweep.service(micros(), (uint32_t)(250000.0f / P(P_CTL_RATE_HZ)), rangePose(), modes.motorsAllowed());
+  for (RangeFrame rf; sweep.takeNavReading(rf);) nav.addRange(rf, now_ms);
   buildTelemetry(s.t_us);
 }
 
@@ -366,6 +404,11 @@ static void sendOutput(uint32_t now_us) {
   }
   RangeFrame rf;
   while (sweep.peekFrame(rf) && link.send(MSG_RANGE, &rf, sizeof(rf))) sweep.popFrame();
+
+  const uint32_t now_ms = millis();
+  if (nav.statusDue(now_ms) && sendNavStatus()) nav.statusSent(now_ms);
+  for (const char* l; (l = nav.peekLog()) != nullptr && link.log("%s", l);) nav.popLog();
+  if (const char* r = radio.stats(now_ms)) link.log("%s", r);
 }
 
 // Motor test (issues #16, #26): own safety interlocks inside MotorTest; here only the wiring.
@@ -494,6 +537,7 @@ static void background() {
     if (sweep.started() && now_us - sweep_us >= 2500) {
       sweep_us = now_us;
       sweep.service(now_us, 600, rangePose(), modes.motorsAllowed());
+      for (RangeFrame rf; sweep.takeNavReading(rf);) nav.addRange(rf, now_ms);
     }
   }
 

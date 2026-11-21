@@ -16,9 +16,8 @@ from .transport import LinkError, open_link
 from .tuning_api import TuningTools
 
 BRIDGE_VERSION = "sbr3-bridge 3"   # 3: ranges carry sensor_id / angle / raw mm, status rng_hz
-# NavStatusFrame.state is robot-defined; these are the names the simulator uses (and a
-# suggestion for the firmware). Unknown values show as "state N" in the UI.
-NAV_STATE_NAMES = ["idle", "turning", "driving", "blocked", "arrived"]
+# NavStatusFrame.state: NavState in link_protocol.h (idle, turning, driving, blocked, arrived, holding)
+NAV_STATE_NAMES = lp.NAV_STATE_NAMES
 TICK_S = 0.04            # 25 Hz: browser telemetry rate and cmd_vel resend rate
 HEARTBEAT_S = 0.1        # 10 Hz MSG_HEARTBEAT
 CMD_TIMEOUT_S = lp.LINK_CMD_VEL_TIMEOUT_MS / 1000.0

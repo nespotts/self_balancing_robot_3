@@ -84,7 +84,29 @@
   X(MOT_SL_IMAX,     "mot.sl_imax",        3.0f,      0.0f,    12.0f)    \
   X(MOT_SL_BAND,     "mot.sl_band",        0.3f,      0.0f,    3.0f)     \
   X(MOT_K_L,         "mot.k_l",            200.0f,    10.0f,   2000.0f)  \
-  X(MOT_K_R,         "mot.k_r",            200.0f,    10.0f,   2000.0f)
+  X(MOT_K_R,         "mot.k_r",            200.0f,    10.0f,   2000.0f) \
+  /* navigation: GOTO / EXPLORE / HOLD (issue #8, see navigator.h) */  \
+  X(NAV_MAX_SPEED,   "nav.max_speed",      250.0f,    0.0f,    1500.0f)  \
+  X(NAV_MAX_TURN,    "nav.max_turn",       90.0f,     0.0f,    720.0f)   \
+  X(NAV_SPEED_KP,    "nav.speed_kp",       0.6f,      0.0f,    10.0f)    \
+  X(NAV_MIN_SPEED,   "nav.min_speed",      40.0f,     0.0f,    300.0f)   \
+  X(NAV_TURN_KP,     "nav.turn_kp",        2.0f,      0.0f,    20.0f)    \
+  X(NAV_ALIGN_DEG,   "nav.align_deg",      10.0f,     1.0f,    60.0f)    \
+  X(NAV_ARRIVE_MM,   "nav.arrive_mm",      50.0f,     5.0f,    500.0f)   \
+  X(NAV_STOP_SPEED,  "nav.stop_speed",     50.0f,     1.0f,    300.0f)   \
+  X(NAV_STOP_TURN,   "nav.stop_turn_dps",  20.0f,     1.0f,    180.0f)   \
+  X(NAV_DWELL_MS,    "nav.dwell_ms",       500.0f,    0.0f,    10000.0f) \
+  X(NAV_END_HEADING, "nav.end_heading_deg", -1.0f,    -1.0f,   360.0f)   \
+  X(NAV_HEADING_TOL, "nav.heading_tol_deg", 3.0f,     0.5f,    45.0f)    \
+  X(NAV_SLOW_MM,     "nav.slow_mm",        800.0f,    0.0f,    3000.0f)  \
+  X(NAV_CLEAR_MM,    "nav.clear_mm",       100.0f,    0.0f,    1000.0f)  \
+  X(NAV_CORRIDOR_MM, "nav.corridor_mm",    220.0f,    50.0f,   1000.0f)  \
+  X(NAV_OBST_AGE_MS, "nav.obst_age_ms",    1500.0f,   100.0f,  10000.0f) \
+  X(NAV_FLOOR_MM,    "nav.floor_mm",       50.0f,     0.0f,    200.0f)   \
+  X(NAV_BACKOFF_MM,  "nav.backoff_mm",     0.0f,      0.0f,    500.0f)   \
+  X(NAV_HOLD_KP,     "nav.hold_kp",        2.0f,      0.0f,    20.0f)    \
+  X(NAV_HOLD_MAX,    "nav.hold_max_speed", 150.0f,    0.0f,    1000.0f)  \
+  X(NAV_HOLD_DB_MM,  "nav.hold_db_mm",     15.0f,     0.0f,    200.0f)
 
 enum ParamId : uint16_t {
 #define PARAM_ENUM(id, name, def, mn, mx) P_##id,

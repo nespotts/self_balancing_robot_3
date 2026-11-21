@@ -67,7 +67,7 @@ class TestBridgeWithSim(unittest.TestCase):
             names = {p["name"]: p for p in params["list"]}
             self.assertEqual(names["bal.kp"]["value"], 250.0)
             self.assertEqual(names["vel.kd"]["value"], 0.00007)
-            self.assertEqual(len(params["list"]), 72)              # src/params.h (with the motor test / profile params)
+            self.assertEqual(len(params["list"]), len(robot.params))   # same table as the firmware
             self.assertEqual(names["cfg.save"]["id"], 34)           # same ids as src/params.h
             tlm = await wait_for(ws, lambda m: m["t"] == "tlm")
             self.assertEqual(tlm["mode"], lp.MODE_IDLE)

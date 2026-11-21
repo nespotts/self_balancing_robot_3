@@ -7,7 +7,8 @@ developed on a PC.
   ctl.rate_hz (400) on a wheeled inverted pendulum with TT-style gear motors (dead zone, lag), so the
   bal_p / bal_i / bal_d telemetry and the effect of a gain change look like the real robot.
 - A virtual room with walls/boxes and the servo-swept twin VL53L0X range sensor.
-- GOTO / EXPLORE / HOLD drive (sim-only preview of issue #8; firmware v4 stands still in those modes).
+- GOTO / EXPLORE / HOLD: Navigator is a line-by-line port of src/navigator.cpp (issue #8): same nav.* params,
+  NavStatus states, obstacle stop from the simulated range sweep.
 """
 import asyncio
 import math
@@ -26,8 +27,6 @@ RANGE_MAX = 2000.0        # VL53L0X reach in long-range mode (1200 without)
 RANGE_MAX_SHORT = 1200.0
 RANGE_IO_S = 0.007        # I2C + start per reading (firmware: ~80 ms per sweep position at settle 40, budget 33)
 RANGE_DROPOUT = 0.03      # chance of a reading with no valid return
-ARRIVE_MM = 80.0          # sim-only navigation constants
-OBSTACLE_MM = 300.0
 
 # Physics. Pendulum from the CAD: body 0.77 kg, axle -> CoM 84.5 mm, pitch inertia 0.0073 kg m^2 about
 # the axle -> theta'' = (m g l / I) sin(theta) - (m l / I) a cos(theta), fall time constant 0.107 s.
@@ -82,10 +81,24 @@ PARAMS = [
     ("mot.brake_duty_max", 3000.0, 500.0, 4095.0), ("mot.speed_loop", 0.0, 0.0, 1.0), ("mot.sl_kp", 0.006, 0.0, 0.1),
     ("mot.sl_ki", 0.08, 0.0, 2.0), ("mot.sl_imax", 3.0, 0.0, 12.0), ("mot.sl_band", 0.3, 0.0, 3.0),
     ("mot.k_l", 200.0, 10.0, 2000.0), ("mot.k_r", 200.0, 10.0, 2000.0),
+    # navigation (issue #8): src/navigator.h, simulated by Navigator below
+    ("nav.max_speed", 250.0, 0.0, 1500.0), ("nav.max_turn", 90.0, 0.0, 720.0),
+    ("nav.speed_kp", 0.6, 0.0, 10.0), ("nav.min_speed", 40.0, 0.0, 300.0), ("nav.turn_kp", 2.0, 0.0, 20.0),
+    ("nav.align_deg", 10.0, 1.0, 60.0), ("nav.arrive_mm", 50.0, 5.0, 500.0), ("nav.stop_speed", 50.0, 1.0, 300.0),
+    ("nav.stop_turn_dps", 20.0, 1.0, 180.0), ("nav.dwell_ms", 500.0, 0.0, 10000.0),
+    ("nav.end_heading_deg", -1.0, -1.0, 360.0), ("nav.heading_tol_deg", 3.0, 0.5, 45.0),
+    ("nav.slow_mm", 800.0, 0.0, 3000.0), ("nav.clear_mm", 100.0, 0.0, 1000.0),
+    ("nav.corridor_mm", 220.0, 50.0, 1000.0), ("nav.obst_age_ms", 1500.0, 100.0, 10000.0),
+    ("nav.floor_mm", 50.0, 0.0, 200.0), ("nav.backoff_mm", 0.0, 0.0, 500.0),
+    ("nav.hold_kp", 2.0, 0.0, 20.0), ("nav.hold_max_speed", 150.0, 0.0, 1000.0), ("nav.hold_db_mm", 15.0, 0.0, 200.0),
 ]
 CELLS = 3
+WAYPOINT_MAX = 32         # src/config.h
 
-NAV_IDLE, NAV_TURNING, NAV_DRIVING, NAV_BLOCKED, NAV_ARRIVED = range(5)
+NAV_IDLE, NAV_TURNING, NAV_DRIVING, NAV_BLOCKED, NAV_ARRIVED, NAV_HOLDING = (
+    lp.NAV_IDLE, lp.NAV_TURNING, lp.NAV_DRIVING, lp.NAV_BLOCKED, lp.NAV_ARRIVED, lp.NAV_HOLDING)
+NAV_MODES = (lp.MODE_GOTO, lp.MODE_EXPLORE, lp.MODE_HOLD)
+SENSOR_HEIGHT_MM = 189.0  # range sensors above the axle
 
 
 def _box(cx, cy, w, h):
@@ -163,6 +176,362 @@ def motor_curve(cmd, exp, knee_in, knee_out):
     else:
         out = knee_out + (MOTOR_FULL - knee_out) / (MOTOR_FULL - knee_in) * (a - knee_in)
     return min(out, MOTOR_FULL)
+
+
+class Navigator:
+    """Line-by-line port of src/navigator.cpp (GOTO / EXPLORE waypoints, HOLD, obstacle check).
+    Same params, states, log lines. Inputs `i`: dict now_ms, mode, upright, live, x, y, heading, speed,
+    yaw_rate, max_speed, max_turn (see NavIn)."""
+    SEEK, STOPPING, END_TURN, DONE = range(4)
+    PTS = 48
+
+    def __init__(self, P, log):
+        self.P, self._log = P, log
+        self.wp = []
+        self.idx = 0
+        self.mode = lp.MODE_IDLE
+        self.phase = self.SEEK
+        self.driving = self.blocked = self.latched = self.backing = False
+        self.back = (0.0, 0.0, 0)
+        self.stop_since = 0
+        self.hold = (0.0, 0.0)
+        self.state = NAV_IDLE
+        self.speed = self.turn = 0.0
+        self.tx = self.ty = self.dist = 0.0
+        self.front = self.rear = self.obst = 0.0
+        self.obst_flag = False
+        self.blk_fwd = self.blk_rev = False
+        self.close = {"fwd": (0, 0.0), "rev": (0, 0.0)}   # last time / range inside the clear distance
+        self.now_ms = 0
+        self.pts = []                 # (x, y, t_ms), newest last, at most PTS
+        self.last_range_ms = 0
+        self.sent = None
+        self.sent_ms = 0
+
+    # ---- list
+    def clear_list(self):
+        self.wp = []
+
+    def add(self, x, y):
+        if len(self.wp) >= WAYPOINT_MAX or not (math.isfinite(x) and math.isfinite(y)):
+            return False
+        self.wp.append((float(x), float(y)))
+        return True
+
+    def list_changed(self, replaced):
+        n = len(self.wp)
+        if replaced or self.idx > n:
+            self.idx, self.phase, self.driving = 0, self.SEEK, False
+        elif self.phase == self.DONE and self.idx < n:
+            self.phase, self.driving = self.SEEK, False
+        if n == 0:
+            self.idx = 0
+        self.blocked = self.latched = self.backing = False
+        self.blk_fwd = self.blk_rev = False
+        self.stop_since = 0
+
+    # ---- inputs
+    def add_range(self, f, now_ms):
+        P = self.P
+        if not f["valid"] or f["range_mm"] == 0:
+            return
+        a = f["sensor_angle_deg"]
+        r = f["range_mm"] + SENSOR_RADIUS_MM
+        lean = f["pitch_deg"] + P("bal.offset_deg")
+        tilt = lean * math.cos(math.radians(a))
+        if tilt > 0.5 and SENSOR_HEIGHT_MM - r * math.sin(math.radians(tilt)) < P("nav.floor_mm"):
+            return
+        h = math.radians(f["heading_deg"])
+        ax, ay = f["x_mm"] + SENSOR_FWD_MM * math.cos(h), f["y_mm"] + SENSOR_FWD_MM * math.sin(h)
+        d = h + math.radians(a)
+        self.pts.append((ax + r * math.cos(d), ay + r * math.sin(d), now_ms))
+        if len(self.pts) > self.PTS:
+            del self.pts[0]
+        self.last_range_ms = now_ms or 1
+
+    def on_mode_change(self, i):
+        self.mode = i["mode"]
+        self.now_ms = i["now_ms"]
+        self.speed = self.turn = 0.0
+        self.blocked = self.latched = self.backing = False
+        self.blk_fwd = self.blk_rev = False
+        self.driving = False
+        self.stop_since = 0
+        n = len(self.wp)
+        if i["mode"] in (lp.MODE_GOTO, lp.MODE_EXPLORE):
+            if self.idx >= n:
+                self.idx = 0
+            self.phase = self.SEEK if n else self.DONE
+        if i["mode"] == lp.MODE_HOLD:
+            self.hold = (i["x"], i["y"])
+        if i["mode"] in NAV_MODES:
+            if not self.last_range_ms or i["now_ms"] - self.last_range_ms > 3000:
+                self.log("nav: no range readings - obstacle stop is off")
+            if i["mode"] != lp.MODE_HOLD:
+                self.log("nav: %u waypoints, going to %u" % (n, self.idx + 1))
+
+    def on_pose_reset(self):
+        self.wp = []
+        self.pts = []
+        self.hold = (0.0, 0.0)
+        self.list_changed(True)
+
+    # ---- obstacles
+    def _update_obstacles(self, i):
+        P = self.P
+        c, s = math.cos(math.radians(i["heading"])), math.sin(math.radians(i["heading"]))
+        half = 0.5 * P("nav.corridor_mm")
+        age = P("nav.obst_age_ms")
+        front = rear = 0.0
+        for px, py, t in self.pts:
+            if i["now_ms"] - t > age:
+                continue
+            dx, dy = px - i["x"], py - i["y"]
+            xr, yr = dx * c + dy * s, -dx * s + dy * c
+            if abs(yr) > half:
+                continue
+            if xr >= SENSOR_FWD_MM:
+                d = max(1.0, xr - SENSOR_FWD_MM - SENSOR_RADIUS_MM)
+                if front == 0 or d < front:
+                    front = d
+            else:
+                d = max(1.0, SENSOR_FWD_MM - SENSOR_RADIUS_MM - xr)
+                if rear == 0 or d < rear:
+                    rear = d
+        self.front, self.rear = front, rear
+
+    def limit_speed(self, v, vmax, apply):
+        P = self.P
+        self.obst_flag = False
+        if abs(v) < 1e-3:
+            self.obst = self.front
+            return v
+        fwd = v > 0
+        d = self.front if fwd else self.rear
+        key = "fwd" if fwd else "rev"
+        blk = self.blk_fwd if fwd else self.blk_rev
+        stop = P("rng.obstacle_mm")
+        if stop <= 0:
+            blk = False
+            self.obst = d
+        else:
+            # blocked until nothing closer than stop + clear (+ backoff) was seen for nav.obst_age_ms
+            clear = stop + P("nav.clear_mm") + P("nav.backoff_mm")
+            if 0 < d < clear:
+                self.close[key] = (self.now_ms or 1, d)
+            close_ms, close_mm = self.close[key]
+            if 0 < d < stop:
+                blk = True
+            elif blk and (d <= 0 or d > clear) and self.now_ms - close_ms >= P("nav.obst_age_ms"):
+                blk = False
+            self.obst = d if d > 0 else (close_mm if blk else 0.0)
+        if fwd:
+            self.blk_fwd = blk
+        else:
+            self.blk_rev = blk
+        if stop <= 0:
+            return v
+        if blk:
+            self.obst_flag = True
+            return 0.0 if apply else v
+        if d <= 0:
+            return v
+        slow = P("nav.slow_mm")
+        if apply and slow > stop and d < slow:
+            lim = max(P("nav.min_speed"), vmax * (d - stop) / (slow - stop))
+            if abs(v) > lim:
+                v = lim if fwd else -lim
+        return v
+
+    # ---- update
+    def _set_target(self, i, x, y):
+        self.tx, self.ty = x, y
+        self.dist = math.hypot(x - i["x"], y - i["y"])
+
+    def update(self, i):
+        self.mode = i["mode"]
+        self.now_ms = i["now_ms"]
+        self.speed = self.turn = 0.0
+        self.obst_flag = False
+        self._update_obstacles(i)
+        if i["mode"] in (lp.MODE_GOTO, lp.MODE_EXPLORE):
+            self._update_goto(i)
+        elif i["mode"] == lp.MODE_HOLD:
+            self._update_hold(i)
+        else:
+            self.state = NAV_IDLE
+            self.obst = self.front
+            if self.wp:
+                self._set_target(i, *self.wp[min(self.idx, len(self.wp) - 1)])
+            else:
+                self.dist = 0.0
+
+    def _start_blocked(self, i):
+        self.blocked = True
+        if i["mode"] == lp.MODE_EXPLORE:
+            self.latched = True
+        self.log("nav: blocked, obstacle at %.0f mm (waypoint %u/%u)" % (self.obst, self.idx + 1, len(self.wp)))
+        if self.P("nav.backoff_mm") > 0:
+            self.backing = True
+            self.back = (i["x"], i["y"], i["now_ms"])
+
+    def _update_goto(self, i):
+        P = self.P
+        n = len(self.wp)
+        if n == 0:
+            self.state = NAV_IDLE
+            self.tx = self.ty = self.dist = 0.0
+            self.obst = self.front
+            return
+        if self.phase == self.DONE and self.idx < n:
+            self.phase = self.SEEK
+        self._set_target(i, *self.wp[min(self.idx, n - 1)])
+        run = i["upright"] and i["live"]      # else paused: stand still, keep the state
+        if self.phase == self.DONE:           # arrived: hold the last point
+            self.state = NAV_ARRIVED
+            self.obst = self.front
+            if run:
+                self.speed = self._hold_speed(i, self.tx, self.ty)
+            return
+        vmax = min(P("nav.max_speed"), i["max_speed"])
+        tmax = min(P("nav.max_turn"), i["max_turn"])
+        arrive = P("nav.arrive_mm")
+        stopped = abs(i["speed"]) < P("nav.stop_speed") and abs(i["yaw_rate"]) < P("nav.stop_turn_dps")
+        if not run:
+            self.stop_since = 0
+            self.obst = self.front
+            return
+
+        if self.phase == self.END_TURN:
+            e = _wrap180(P("nav.end_heading_deg") - i["heading"])
+            self.turn = _clamp(P("nav.turn_kp") * e, tmax)
+            self.speed = self._hold_speed(i, self.tx, self.ty)
+            self.state = NAV_TURNING
+            self.obst = self.front
+            if abs(e) < P("nav.heading_tol_deg") and abs(i["yaw_rate"]) < P("nav.stop_turn_dps"):
+                self.turn = 0.0
+                self.phase, self.idx, self.state = self.DONE, n, NAV_ARRIVED
+                self.log("nav: arrived, heading %.1f" % _wrap180(i["heading"]))
+            return
+
+        if self.phase == self.STOPPING:
+            self.state = NAV_DRIVING
+            self.obst = self.front
+            # hold the point (forward / back, no steering) until it has really stopped
+            self.speed = self._hold_speed(i, self.tx, self.ty)
+            self.obst = self.front
+            if self.dist > 2.0 * arrive:
+                self.phase, self.driving = self.SEEK, False
+            elif not stopped:
+                self.stop_since = 0
+            else:
+                if not self.stop_since:
+                    self.stop_since = i["now_ms"] or 1
+                if i["now_ms"] - self.stop_since >= P("nav.dwell_ms"):
+                    self.log("nav: reached %u/%u, %.0f mm off" % (self.idx + 1, n, self.dist))
+                    self.stop_since = 0
+                    if self.idx + 1 < n:
+                        self.idx += 1
+                        self.phase, self.driving = self.SEEK, False
+                        self._set_target(i, *self.wp[self.idx])
+                        self.state = NAV_TURNING
+                    elif P("nav.end_heading_deg") >= 0:
+                        self.phase, self.state = self.END_TURN, NAV_TURNING
+                    else:
+                        self.phase, self.idx, self.state = self.DONE, n, NAV_ARRIVED
+                        self.log("nav: arrived")
+            return
+
+        # SEEK
+        if self.dist < arrive:
+            self.phase, self.stop_since = self.STOPPING, 0
+            self.blocked = self.latched = self.backing = False
+            self.state = NAV_DRIVING
+            self.obst = self.front
+            return
+        bearing = math.degrees(math.atan2(self.ty - i["y"], self.tx - i["x"]))
+        e = _wrap180(bearing - i["heading"])
+        far = self.dist > 2.0 * arrive
+        align = P("nav.align_deg")
+        if not self.blocked:
+            if not self.driving and abs(e) < align:
+                self.driving = True
+            elif self.driving and far and abs(e) > 3.0 * align:
+                self.driving = False
+        if not self.driving:
+            self.turn = _clamp(P("nav.turn_kp") * e, tmax)
+            self.state = NAV_TURNING
+            self.obst = self.front
+            return
+        v = P("nav.speed_kp") * self.dist * max(0.0, math.cos(math.radians(e)))
+        v = min(max(v, P("nav.min_speed")), vmax)
+        vl = self.limit_speed(v, vmax, True)
+        if self.latched:                      # EXPLORE: stays blocked until a new list
+            self.obst_flag = True
+        if self.obst_flag:
+            if not self.blocked:
+                self._start_blocked(i)
+            obst = self.obst
+            vl = 0.0
+            if self.backing:
+                bx, by, bms = self.back
+                back = math.hypot(i["x"] - bx, i["y"] - by)
+                vb = self.limit_speed(-max(P("nav.min_speed"), 30.0), vmax, True)
+                if self.obst_flag or back >= P("nav.backoff_mm") or i["now_ms"] - bms > 5000:
+                    self.backing = False
+                    vb = 0.0
+                vl = vb
+                self.obst = obst
+                self.obst_flag = True
+            self.speed, self.turn, self.state = vl, 0.0, NAV_BLOCKED
+            return
+        if self.blocked:
+            self.log("nav: clear, going on")
+        self.blocked = self.backing = False
+        self.speed = vl
+        self.turn = _clamp(P("nav.turn_kp") * e, tmax) if far else 0.0
+        self.state = NAV_DRIVING
+
+    def _hold_speed(self, i, x, y):
+        """nav.hold_* position loop on the forward error."""
+        P = self.P
+        h = math.radians(i["heading"])
+        f = (x - i["x"]) * math.cos(h) + (y - i["y"]) * math.sin(h)
+        if abs(f) <= P("nav.hold_db_mm"):
+            return 0.0
+        vmax = min(P("nav.hold_max_speed"), i["max_speed"])
+        return self.limit_speed(_clamp(P("nav.hold_kp") * f, vmax), vmax, True)
+
+    def _update_hold(self, i):
+        self._set_target(i, *self.hold)
+        self.state = NAV_HOLDING
+        self.obst = self.front
+        if not i["upright"] or not i["live"]:
+            return
+        self.speed = self._hold_speed(i, *self.hold)
+        if self.obst_flag:
+            self.state = NAV_BLOCKED
+
+    # ---- status / log
+    def active(self):
+        return self.state in (NAV_TURNING, NAV_DRIVING, NAV_BLOCKED)
+
+    def status_due(self, now_ms):
+        if (self.state, self.idx, len(self.wp)) != self.sent:
+            return True
+        return self.mode in NAV_MODES and now_ms - self.sent_ms >= 500
+
+    def status_sent(self, now_ms):
+        self.sent = (self.state, self.idx, len(self.wp))
+        self.sent_ms = now_ms
+
+    def status(self):
+        return {"state": self.state, "waypoint_count": min(255, len(self.wp)), "nav_index": min(255, self.idx),
+                "target_x_mm": self.tx, "target_y_mm": self.ty, "distance_mm": self.dist,
+                "obstacle_mm": self.obst}
+
+    def log(self, text):
+        self._log(text)
 
 
 class Controller:
@@ -304,16 +673,9 @@ class SimRobot:
         self.cmd = (0.0, 0.0)
         self.cmd_time = -10.0
         self.cmd_valid = False
-        self.waypoints = []           # odom frame
-        self.nav_index = 0
-        self.nav_state = NAV_IDLE
-        self.nav_sent = None
-        self.nav_last_send = 0.0
-        self.hold = (0.0, 0.0)
-        self.obstacle = False
-        self.front_cache = (-1.0, 1e9)
-        self.scan_until = 0.0
-        self.explore_turn = 0.0
+        self.nav = Navigator(self.P, self.log)   # waypoints in the odom frame
+        self.auto = (0.0, 0.0)        # navigator command, used from the next step (ModeManager::setAutoCmd)
+        self.auto_valid = False
         # range sweep (model of src/range_sweep.cpp)
         self.rs_on = self.rs_started = False
         self.rs_k, self.rs_dir = 0, 1
@@ -389,13 +751,13 @@ class SimRobot:
             self.out.append(self.hello())
             self.out += self.param_frames()
         elif t == lp.MSG_GOTO:
-            if d["replace"]:
-                self.waypoints = []
-                self.nav_index = 0
-            self.waypoints += [tuple(pt) for pt in d["points"]]
-            self.log("waypoints: %d" % len(self.waypoints))
-            if self.nav_state == NAV_ARRIVED and self.nav_index < len(self.waypoints):
-                self.nav_state = NAV_IDLE
+            if d["count"] <= lp.GOTO_MAX_POINTS and len(p) == 2 + d["count"] * 8:
+                if d["replace"]:
+                    self.nav.clear_list()
+                added = sum(1 for x, y in d["points"] if self.nav.add(x, y))
+                if added < d["count"]:
+                    self.log("waypoints: list full (%u), %u dropped" % (WAYPOINT_MAX, d["count"] - added))
+                self.nav.list_changed(bool(d["replace"]))   # also resumes from BLOCKED
         elif t == lp.MSG_EVENT:
             self.on_event(d["event"])
 
@@ -420,30 +782,32 @@ class SimRobot:
         self.out += self.param_frames([pid])     # echo = ack
 
     def on_event(self, ev):
+        """handleEvent() in src/main.cpp."""
         x, y, th = self.odom()
         if ev == lp.EVT_MARK_WAYPOINT:
-            self.waypoints.append((x, y))
-            self.log("marked waypoint %d at %.0f,%.0f" % (len(self.waypoints), x, y))
+            if self.nav.add(x, y):
+                self.nav.list_changed(False)
+            else:
+                self.log("waypoints: list full (%u)" % WAYPOINT_MAX)
         elif ev == lp.EVT_CLEAR_WAYPOINTS:
-            self.waypoints = []
-            self.nav_index = 0
-            self.log("waypoints cleared")
-        elif ev == lp.EVT_GO_HOME:
-            home = self.waypoints[0] if self.waypoints else (0.0, 0.0)
-            self.waypoints = [home]
-            self.nav_index = 0
-            self.nav_state = NAV_IDLE
-            self.requested = lp.MODE_GOTO     # an event never arms
-            self.log("going home")
+            self.nav.clear_list()
+            self.nav.list_changed(True)
+        elif ev == lp.EVT_GO_HOME:            # list = [first waypoint or origin], then GOTO (never arms)
+            hx, hy = self.nav.wp[0] if self.nav.wp else (0.0, 0.0)
+            self.nav.clear_list()
+            self.nav.add(hx, hy)
+            self.nav.list_changed(True)
+            self.requested = lp.MODE_GOTO
+            self.log("GO_HOME: to %.0f, %.0f" % (hx, hy))
         elif ev == lp.EVT_RESET_POSE:
+            h_old = th
             self.ox, self.oy, self.oth = self.X, self.Y, self.TH
-            self.waypoints = []
-            self.nav_index = 0
-            self.ctl.heading_sp -= self.TH - self.oth   # keep the heading target where it physically was
-            self.log("pose reset")
+            self.ctl.heading_sp -= h_old   # keep the heading target where it physically was
+            self.nav.on_pose_reset()
+            self.log("pose reset (waypoints cleared)")
         elif ev == lp.EVT_START_SCAN:
-            self.scan_until = self.now() + 2 * self._rs_steps() * 0.08
-            self.log("scan")
+            self.log("START_SCAN: the sweep runs all the time while rng.enable = 1" if self.P("rng.enable") >= 0.5
+                     else "START_SCAN: rng.enable is 0")
 
     def set_mode(self, mode):
         """ModeManager::onPiSetMode."""
@@ -463,87 +827,47 @@ class SimRobot:
             self.log("disarmed")
         self.mode = eff
         self.cmd_valid = False
+        self.auto_valid = False
         self.ctl.on_mode_change()
-        if eff == lp.MODE_HOLD:
-            x, y, _ = self.odom()
-            self.hold = (x, y)
-        if eff == lp.MODE_GOTO:
-            self.nav_state = NAV_IDLE
-            if self.nav_index >= len(self.waypoints):
-                self.nav_index = 0
         self.log("mode %s" % lp.MODE_NAMES[eff])
+        self.nav.on_mode_change(self._nav_in(self.now()))
 
-    # ---------------------------------------------------------------- targets (ModeManager::update + sim nav)
-    def _front_clear(self):
-        now = self.now()
-        if now - self.front_cache[0] > 0.02:
-            d = self.room.raycast(self.X, self.Y, math.radians(self.TH))
-            self.front_cache = (now, d - ROBOT_RADIUS if d is not None else 1e9)
-        return self.front_cache[1]
+    # ---------------------------------------------------------------- targets (ModeManager::update + navigator)
+    def supervised(self):
+        """ModeManager::supervised: remote live, or (no remote) the Pi heartbeat."""
+        return self.remote or self.pi_link
+
+    def _nav_in(self, now):
+        x, y, th = self.odom()
+        return {"now_ms": int(now * 1000.0), "mode": self.mode, "upright": bool(self.ctl.out.get("upright")),
+                "live": self.supervised(), "x": x, "y": y, "heading": th, "speed": self.speed_f,
+                "yaw_rate": math.degrees((self.vr - self.vl) / TRACK_MM),
+                "max_speed": self.P("drv.max_speed"), "max_turn": self.P("drv.max_turn")}
 
     def _targets(self, now):
+        """controlStep() order: ModeManager::update (navigator command from the previous step), then
+        Navigator::update, then the obstacle limit for STATION."""
         max_v, max_w = self.P("drv.max_speed"), self.P("drv.max_turn")
         m = self.mode
-        self.obstacle = False
         v_t = w_t = 0.0
-        if m == lp.MODE_IDLE or not self.ctl.upright:
-            return 0.0, 0.0
         if m == lp.MODE_STATION:
             if self.pi_link and self.cmd_valid and now - self.cmd_time <= lp.LINK_CMD_VEL_TIMEOUT_MS / 1000.0:
                 v_t = _clamp(self.cmd[0], max_v)
                 w_t = _clamp(self.cmd[1], max_w)
-        elif m == lp.MODE_GOTO:
-            v_t, w_t = self._nav(max_v, max_w)
-        elif m == lp.MODE_EXPLORE:
-            front = self._front_clear()
-            if front < OBSTACLE_MM + 150:
-                if self.explore_turn == 0.0:
-                    left = self.room.raycast(self.X, self.Y, math.radians(self.TH + 60)) or 1e9
-                    right = self.room.raycast(self.X, self.Y, math.radians(self.TH - 60)) or 1e9
-                    self.explore_turn = 1.0 if left > right else -1.0
-                v_t, w_t = 0.0, 0.6 * max_w * self.explore_turn
-            else:
-                self.explore_turn = 0.0
-                v_t = 0.5 * max_v
-                w_t = 25.0 * math.sin(now * 0.4)
-            self.nav_state = NAV_DRIVING if v_t else NAV_TURNING
-        elif m == lp.MODE_HOLD:
-            x, y, th = self.odom()
-            ex, ey = self.hold[0] - x, self.hold[1] - y
-            fwd = ex * math.cos(math.radians(th)) + ey * math.sin(math.radians(th))
-            v_t = max(-200.0, min(200.0, 2.0 * fwd))
-        if now < self.scan_until:
-            v_t = w_t = 0.0
-        if v_t > 0 and self._front_clear() < OBSTACLE_MM:   # obstacle stop (forward motion only)
-            v_t = 0.0
-            self.obstacle = True
-            if m == lp.MODE_GOTO:
-                self.nav_state = NAV_BLOCKED
+        elif m in NAV_MODES and self.auto_valid and self.supervised():
+            v_t = _clamp(self.auto[0], max_v)
+            w_t = _clamp(self.auto[1], max_w)
         if abs(w_t) < self.P("drv.turn_deadband"):
             w_t = 0.0
-        return v_t, w_t
-
-    def _nav(self, max_v, max_w):
-        if self.nav_index >= len(self.waypoints):
-            self.nav_state = NAV_ARRIVED if self.waypoints else NAV_IDLE
-            return 0.0, 0.0
-        x, y, th = self.odom()
-        tx, ty = self.waypoints[self.nav_index]
-        dist = math.hypot(tx - x, ty - y)
-        if dist < ARRIVE_MM:
-            self.nav_index += 1
-            self.log("reached waypoint %d" % self.nav_index)
-            if self.nav_index >= len(self.waypoints):
-                self.nav_state = NAV_ARRIVED
-                self.log("arrived")
-            return 0.0, 0.0
-        bearing = _wrap180(math.degrees(math.atan2(ty - y, tx - x)) - th)
-        w_t = max(-max_w, min(max_w, 3.0 * bearing))
-        if abs(bearing) > 30:
-            self.nav_state = NAV_TURNING
-            return 0.0, w_t
-        self.nav_state = NAV_DRIVING
-        v_t = min(max_v, 1.2 * dist + 60.0) * math.cos(math.radians(bearing))
+        nav = self.nav
+        nav.update(self._nav_in(now))
+        self.auto, self.auto_valid = (nav.speed, nav.turn), True
+        if m not in NAV_MODES:
+            if m == lp.MODE_STATION and v_t != 0.0:
+                v_t = nav.limit_speed(v_t, max_v, True)
+            else:
+                moving = self.speed_f if abs(self.speed_f) > 50.0 else 0.0
+                nav.limit_speed(v_t if v_t != 0.0 else moving, max_v, False)
         return v_t, w_t
 
     # ---------------------------------------------------------------- one balance step
@@ -564,8 +888,6 @@ class SimRobot:
             self.log("pi link lost: station commands stopped")
         self._update_mode()
         v_t, w_t = self._targets(now)
-        if self.mode not in (lp.MODE_GOTO, lp.MODE_EXPLORE):
-            self.nav_state = NAV_IDLE
 
         # sensors (what the firmware sees)
         pitch = math.degrees(self.theta) + IMU_MOUNT_DEG + rng.gauss(0, 0.015)
@@ -656,21 +978,11 @@ class SimRobot:
 
         self._range_step(now, pitch)
 
-        # nav status: on change and at 2 Hz while navigating
-        key = (self.nav_state, len(self.waypoints), self.nav_index)
-        navigating = self.mode in (lp.MODE_GOTO, lp.MODE_EXPLORE)
-        if key != self.nav_sent or (navigating and now - self.nav_last_send > 0.5):
-            x, y, th = self.odom()
-            self.nav_sent = key
-            self.nav_last_send = now
-            if self.nav_index < len(self.waypoints):
-                tx, ty = self.waypoints[self.nav_index]
-            else:
-                tx, ty = (self.waypoints[-1] if self.waypoints else (0.0, 0.0))
-            self.out.append(lp.encode_nav_status({
-                "state": self.nav_state, "waypoint_count": min(255, len(self.waypoints)),
-                "nav_index": min(255, self.nav_index), "target_x_mm": tx, "target_y_mm": ty,
-                "distance_mm": math.hypot(tx - x, ty - y)}))
+        # nav status: at once on a change (state, index, count), 2 Hz in GOTO / EXPLORE / HOLD
+        now_ms = int(now * 1000.0)
+        if self.nav.status_due(now_ms):
+            self.out.append(lp.encode_nav_status(self.nav.status()))
+            self.nav.status_sent(now_ms)
 
     # ---------------------------------------------------------------- wheels-up motor test (src/motor_test.cpp)
     def _motor_test_step(self, now, dt, pitch, pitch_rate, stand_pose):
@@ -729,14 +1041,15 @@ class SimRobot:
             status |= lp.TLM_FAILSAFE
         if self.pi_link:
             status |= lp.TLM_PI_LINK
-        if self.obstacle:
+        if self.nav.obst_flag:
             status |= lp.TLM_OBSTACLE
         if batt_v / CELLS < self.P("batt.low_cell"):
             status |= lp.TLM_LOW_BATT
-        if self.mode in (lp.MODE_GOTO, lp.MODE_EXPLORE) and self.nav_state not in (NAV_ARRIVED, NAV_IDLE):
-            status |= lp.TLM_NAV_ACTIVE
-        if self.nav_state == NAV_ARRIVED:
-            status |= lp.TLM_NAV_DONE
+        if self.mode in (lp.MODE_GOTO, lp.MODE_EXPLORE):
+            if self.nav.active():
+                status |= lp.TLM_NAV_ACTIVE
+            if self.nav.state == NAV_ARRIVED:
+                status |= lp.TLM_NAV_DONE
         return lp.encode_telemetry({
             "t_us": self.t_us(), "mode": self.mode, "status": status, "error_code": 0,
             "radio_ok": 1 if self.radio_live() else 0,
@@ -750,6 +1063,8 @@ class SimRobot:
             "battery_v": batt_v + rng.gauss(0, 0.01), "loop_hz": self.loop_hz,
             "bal_p": o["bal_p"], "bal_i": o["bal_i"], "bal_d": o["bal_d"], "steer_out": o["steer"],
             "vel_out_deg": o["vel_out"], "step": self.step_n & 0xFFFFFFFF,
+            "remote_flags": lp.LINK_RF_PRESENT if self.radio_live() else 0,
+            "nav_state": self.nav.state, "nav_index": min(255, self.nav.idx), "reserved2": 0,
         })
 
     # ---------------------------------------------------------------- range sweep (src/range_sweep.cpp)
@@ -812,7 +1127,9 @@ class SimRobot:
         if self.rs_measuring:                 # both sensors finish together (pose at that moment)
             x, y, th = self.odom()
             for sid in (0, 1):
-                self.out.append(self._range(sid, x, y, th, pitch))
+                f = self._range(sid, x, y, th, pitch)
+                self.out.append(lp.encode_range(f))
+                self.nav.add_range(f, int(now * 1000.0))   # RangeSweep::takeNavReading -> Navigator
             self.rs_measuring = False
             self._rs_next_position()
         hold = self.P("rng.servo_hold_deg")
@@ -836,9 +1153,9 @@ class SimRobot:
             noise = (8 + 0.01 * d) * math.sqrt(33.0 / self.P("rng.timing_budget_ms"))
             r = int(max(30, d + self.rng.gauss(0, noise)))
             valid = 1 if r <= self.P("rng.max_mm") else 0
-        return lp.encode_range({"t_us": self.t_us(), "x_mm": x, "y_mm": y, "heading_deg": th,
-                                "pitch_deg": pitch, "sensor_angle_deg": _wrap180(self.rs_head + 180.0 * sid),
-                                "range_mm": r, "sensor_id": sid, "valid": valid})
+        return {"t_us": self.t_us(), "x_mm": x, "y_mm": y, "heading_deg": th,
+                "pitch_deg": pitch, "sensor_angle_deg": _wrap180(self.rs_head + 180.0 * sid),
+                "range_mm": r, "sensor_id": sid, "valid": valid}
 
     def run_until(self, t, max_steps=2000):
         """Advance in balance steps up to simulated time t (catches up after a late wake-up)."""
