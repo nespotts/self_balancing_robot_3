@@ -1,4 +1,4 @@
-"""Link protocol v1 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
+"""Link protocol v2 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
 
 Frame: 0xA5 0x5A | type u8 | len u8 | payload[len] | crc16 u16 LE
 crc16 = CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over type, len and payload.
@@ -7,7 +7,7 @@ Pure Python, 3.8+.
 """
 import struct
 
-LINK_PROTOCOL_VERSION = 1
+LINK_PROTOCOL_VERSION = 2
 LINK_SYNC1 = 0xA5
 LINK_SYNC2 = 0x5A
 LINK_MAX_PAYLOAD = 200
@@ -59,14 +59,17 @@ GOTO_MAX_POINTS = 16
 HELLO_FMT = "<BBH24s"
 HELLO_FIELDS = ("link_version", "radio_version", "param_count", "firmware")
 
-TELEMETRY_FMT = "<IBBBB18f"
+TELEMETRY_FMT = "<IBBBB23fI"
 TELEMETRY_FIELDS = (
     "t_us", "mode", "status", "error_code", "radio_ok",
     "pitch_deg", "pitch_rate_dps", "roll_deg", "heading_deg", "yaw_rate_dps",
     "x_mm", "y_mm", "speed_mms", "turn_rate_dps", "cmd_speed_mms", "cmd_turn_dps",
     "wheel_left_mms", "wheel_right_mms", "balance_target_deg",
     "motor_left", "motor_right", "battery_v", "loop_hz",
+    # v2: balance tuning data
+    "bal_p", "bal_i", "bal_d", "steer_out", "vel_out_deg", "step",
 )
+TELEMETRY_V1_SIZE = 80   # v1 frames (no bal_p..step) are still decoded; the new fields read as 0
 
 RANGE_FMT = "<I5fHBB"
 RANGE_FIELDS = ("t_us", "x_mm", "y_mm", "heading_deg", "pitch_deg", "sensor_angle_deg",
@@ -106,7 +109,7 @@ STRUCTS = {  # C struct name -> (format, fields); GotoFrame is variable length (
 }
 
 _S = {name: struct.Struct(fmt) for name, (fmt, _f) in STRUCTS.items()}
-TELEMETRY_SIZE = _S["TelemetryFrame"].size      # 80
+TELEMETRY_SIZE = _S["TelemetryFrame"].size      # 104
 RANGE_SIZE = _S["RangeFrame"].size              # 28
 PARAM_INFO_SIZE = _S["ParamInfoFrame"].size     # 38
 HELLO_SIZE = _S["HelloFrame"].size              # 28
@@ -210,6 +213,8 @@ def decode_hello(p):
 
 
 def decode_telemetry(p):
+    if TELEMETRY_V1_SIZE <= len(p) < TELEMETRY_SIZE:   # older firmware (link v1)
+        p = bytes(p[:TELEMETRY_V1_SIZE]) + bytes(TELEMETRY_SIZE - TELEMETRY_V1_SIZE)
     return _unpack("TelemetryFrame", p)
 
 

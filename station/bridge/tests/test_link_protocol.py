@@ -2,13 +2,17 @@
 import os
 import re
 import struct
+import subprocess
 import unittest
 
 from station.bridge import link_protocol as lp
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-LINK_H = os.path.join(ROOT, "include", "protocol", "link_protocol.h")
-RADIO_H = os.path.join(ROOT, "include", "protocol", "radio_protocol.h")
+REL_LINK = "include/protocol/link_protocol.h"
+REL_RADIO = "include/protocol/radio_protocol.h"
+# Until the firmware branch is merged, the working tree may still hold an older header; then the
+# headers are read from this git ref instead (override with SBR3_HEADER_REF).
+HEADER_REF = os.environ.get("SBR3_HEADER_REF", "origin/v4-firmware")
 
 C_SIZES = {"uint8_t": 1, "int8_t": 1, "char": 1, "uint16_t": 2, "int16_t": 2,
            "uint32_t": 4, "int32_t": 4, "float": 4}
@@ -16,13 +20,43 @@ C_FMT = {"uint8_t": "B", "int8_t": "b", "uint16_t": "H", "int16_t": "h",
          "uint32_t": "I", "int32_t": "i", "float": "f"}
 
 
+def _version(txt):
+    m = re.search(r"#define\s+LINK_PROTOCOL_VERSION\s+(\d+)", txt or "")
+    return int(m.group(1)) if m else None
+
+
+def _git_show(rel):
+    try:
+        return subprocess.run(["git", "show", "%s:%s" % (HEADER_REF, rel)], cwd=ROOT, capture_output=True,
+                              text=True, timeout=10, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def load_headers():
+    """(link_h_text, radio_h_text, source) for the header version this mirror implements."""
+    def read(rel):
+        p = os.path.join(ROOT, rel)
+        return open(p).read() if os.path.exists(p) else None
+    link, radio = read(REL_LINK), read(REL_RADIO)
+    if _version(link) == lp.LINK_PROTOCOL_VERSION:
+        return link, radio, "working tree"
+    link2 = _git_show(REL_LINK)
+    if _version(link2) == lp.LINK_PROTOCOL_VERSION:
+        return link2, _git_show(REL_RADIO), HEADER_REF
+    return link, radio, "working tree (version mismatch)"
+
+
+LINK_TXT, RADIO_TXT, HEADER_SRC = load_headers()
+
+
 def _strip_comments(src):
     return re.sub(r"//[^\n]*", "", src)
 
 
-def parse_structs(path):
+def parse_structs(src):
     """Very small C struct parser for the protocol headers: name -> [(ctype, field, count)]."""
-    src = _strip_comments(open(path).read())
+    src = _strip_comments(src)
     out = {}
     for m in re.finditer(r"struct\s+__attribute__\(\(packed\)\)\s+(\w+)\s*\{(.*?)\n\};", src, re.S):
         name, body = m.group(1), m.group(2)
@@ -44,8 +78,8 @@ def parse_structs(path):
     return out
 
 
-def parse_defines(path):
-    src = _strip_comments(open(path).read())
+def parse_defines(src):
+    src = _strip_comments(src)
     d = {}
     for m in re.finditer(r"#define\s+(\w+)\s+(0x[0-9A-Fa-f]+|\d+)\b", src):
         d[m.group(1)] = int(m.group(2), 0)
@@ -54,10 +88,13 @@ def parse_defines(path):
     return d
 
 
-@unittest.skipUnless(os.path.exists(LINK_H), "C header not found")
+@unittest.skipUnless(LINK_TXT, "C header not found")
 class TestMatchesHeader(unittest.TestCase):
+    def test_header_version(self):
+        self.assertEqual(_version(LINK_TXT), lp.LINK_PROTOCOL_VERSION, "header source: " + HEADER_SRC)
+
     def test_struct_layouts(self):
-        structs = parse_structs(LINK_H)
+        structs = parse_structs(LINK_TXT)
         for name, (fmt, fields) in lp.STRUCTS.items():
             self.assertIn(name, structs, name)
             cfields = structs[name]
@@ -66,36 +103,38 @@ class TestMatchesHeader(unittest.TestCase):
             self.assertEqual(struct.calcsize(fmt), csize, name + " size")
             # same primitive type per field
             exp = "<" + "".join(("%ds" % n) if t == "char" else C_FMT[t] * n for t, _f, n in cfields)
-            self.assertEqual(struct.calcsize(exp), struct.calcsize(fmt))
             self.assertEqual(re.sub(r"(\d+)([fBHI])", lambda m: m.group(2) * int(m.group(1)), fmt), exp,
                              name + " types")
 
+    def test_static_asserts(self):
+        for name, size in re.findall(r"sizeof\((\w+)\)\s*==\s*(\d+)", LINK_TXT):
+            self.assertEqual(struct.calcsize(lp.STRUCTS[name][0]), int(size), name)
+
     def test_goto_frame(self):
-        self.assertEqual(parse_structs(LINK_H)["GotoFrame"][:2],
+        self.assertEqual(parse_structs(LINK_TXT)["GotoFrame"][:2],
                          [("uint8_t", "replace", 1), ("uint8_t", "count", 1)])
-        self.assertIn("points[16]", open(LINK_H).read())
+        self.assertIn("points[16]", LINK_TXT)
         self.assertEqual(lp.GOTO_MAX_POINTS, 16)
 
     def test_constants(self):
-        d = parse_defines(LINK_H)
+        d = parse_defines(LINK_TXT)
         for k, v in d.items():
             if k.startswith(("LINK_", "MSG_")):
                 self.assertEqual(getattr(lp, k), v, k)
         self.assertEqual(len([k for k in d if k.startswith("MSG_")]), len(lp.MSG_NAMES))
 
-    @unittest.skipUnless(os.path.exists(RADIO_H), "radio header not found")
+    @unittest.skipUnless(RADIO_TXT, "radio header not found")
     def test_radio_enums(self):
-        d = parse_defines(RADIO_H)
+        d = parse_defines(RADIO_TXT)
         for k, v in d.items():
             if k.startswith(("MODE_", "EVT_", "TLM_")) or k == "RADIO_PROTOCOL_VERSION":
                 self.assertEqual(getattr(lp, k), v, k)
         self.assertEqual(len(lp.MODE_NAMES), lp.MODE_COUNT)
         self.assertEqual(len(lp.EVENT_NAMES), lp.EVT_COUNT)
 
-
 class TestSizes(unittest.TestCase):
     def test_known_sizes(self):
-        self.assertEqual(lp.TELEMETRY_SIZE, 80)
+        self.assertEqual(lp.TELEMETRY_SIZE, 104)
         self.assertEqual(lp.RANGE_SIZE, 28)
         self.assertEqual(lp.PARAM_INFO_SIZE, 38)
         self.assertEqual(lp.HELLO_SIZE, 28)
@@ -123,6 +162,7 @@ def sample_tlm(**kw):
     d = {f: 0.0 for f in lp.TELEMETRY_FIELDS}
     d.update(t_us=123456, mode=3, status=lp.TLM_ARMED | lp.TLM_UPRIGHT, error_code=0, radio_ok=1)
     d.update(pitch_deg=1.5, heading_deg=-370.25, x_mm=1000.0, battery_v=12.25, loop_hz=1000.0)
+    d.update(bal_p=-812.5, bal_i=40.25, bal_d=3.5, step=4000000000)
     d.update(kw)
     return d
 
@@ -147,7 +187,7 @@ class TestRoundTrip(unittest.TestCase):
 
     def test_hello_param_nav_log(self):
         h = self.parse_one(lp.encode_hello(param_count=11, firmware="v4 test"))
-        self.assertEqual(h, {"link_version": 1, "radio_version": 2, "param_count": 11, "firmware": "v4 test"})
+        self.assertEqual(h, {"link_version": lp.LINK_PROTOCOL_VERSION, "radio_version": 2, "param_count": 11, "firmware": "v4 test"})
         p = self.parse_one(lp.encode_param_info(3, 4.63, 0.0, 20.0, "bal.kd"))
         self.assertEqual(p["name"], "bal.kd")
         self.assertAlmostEqual(p["value"], 4.63, places=5)
@@ -193,6 +233,23 @@ class TestResync(unittest.TestCase):
         types = [t for t, _ in out]
         self.assertEqual(types[0], lp.MSG_CMD_VEL)
         self.assertEqual(types[-1], lp.MSG_SET_MODE)
+
+    def test_boot_text_between_frames(self):
+        # the Teensy prints plain text on USB serial during setup (lidar init) before/among frames
+        text = (b"VL53L0X init... sensor 0 ok\r\nservo center\r\n" + bytes(range(32, 127)) +
+                b"\r\nBNO085 found at 0x4A\r\n")
+        a, b = lp.encode_hello(param_count=35, firmware="v4"), lp.encode_telemetry(sample_tlm())
+        p = lp.FrameParser()
+        out = p.feed(text + a + text + b + text[:7])
+        self.assertEqual([t for t, _ in out], [lp.MSG_HELLO, lp.MSG_TELEMETRY])
+        self.assertEqual(p.crc_errors, 0)
+        self.assertEqual(lp.decode(*out[1])["battery_v"], 12.25)
+
+    def test_v1_telemetry_still_decodes(self):
+        full = lp._pack("TelemetryFrame", sample_tlm(bal_p=5.0, step=9))
+        d = lp.decode_telemetry(full[:lp.TELEMETRY_V1_SIZE])
+        self.assertEqual(d["battery_v"], 12.25)
+        self.assertEqual((d["bal_p"], d["step"]), (0.0, 0))
 
     def test_byte_by_byte(self):
         stream = lp.encode_telemetry(sample_tlm()) + lp.encode_log("abc") + lp.encode_event(1)

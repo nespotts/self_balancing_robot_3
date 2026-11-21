@@ -16,17 +16,29 @@ RANGE_MAX = 2000.0
 SERVO_STEPS = 16
 SERVO_STEP_DEG = 180.0 / SERVO_STEPS   # 11.25 deg: 16 steps x 2 sensors = 32 directions
 SERVO_STEP_S = 0.060
-TLM_HZ = 100
 REST_PITCH = 18.0         # leaning on the stand when the motors are off
+ARRIVE_MM = 80.0          # sim-only navigation constants
+OBSTACLE_MM = 300.0
 
-# (name, default, min, max). The firmware owns the real list; the UI reads it from ParamInfoFrames.
+# (name, default, min, max): a copy of the v4 firmware table (src/params.h) so the UI sees the same
+# set. The UI never hardcodes these; it builds everything from ParamInfoFrames.
 PARAMS = [
-    ("bal.kp", 250.0, 0.0, 1000.0), ("bal.ki", 2010.0, 0.0, 5000.0), ("bal.kd", 4.63, 0.0, 20.0),
-    ("steer.kp", 20.0, 0.0, 100.0), ("steer.ki", 5.9, 0.0, 50.0), ("steer.kd", 0.075, 0.0, 1.0),
-    ("vel.kp", 0.006, 0.0, 0.05), ("vel.ki", 0.00869, 0.0, 0.05), ("vel.kd", 0.00007, 0.0, 0.001),
-    ("drive.max_speed", 450.0, 0.0, 1000.0), ("drive.max_turn", 180.0, 0.0, 360.0),
-    ("nav.arrive_mm", 80.0, 20.0, 500.0), ("nav.obstacle_mm", 300.0, 100.0, 1000.0),
+    ("bal.kp", 250.0, 0.0, 2000.0), ("bal.ki", 2010.0, 0.0, 20000.0), ("bal.kd", 4.63, 0.0, 50.0),
+    ("bal.offset_deg", 3.15, -15.0, 15.0), ("bal.cutoff_deg", 45.0, 5.0, 80.0),
+    ("bal.reengage_deg", 15.0, 1.0, 45.0), ("bal.knob_trim_deg", 0.0, 0.0, 15.0), ("bal.d_src", 0.0, 0.0, 1.0),
+    ("str.kp", 20.0, 0.0, 500.0), ("str.ki", 5.9, 0.0, 500.0), ("str.kd", 0.075, 0.0, 10.0),
+    ("str.max_err_deg", 45.0, 1.0, 180.0),
+    ("vel.kp", 0.006, 0.0, 1.0), ("vel.ki", 0.00869, 0.0, 1.0), ("vel.kd", 0.00007, 0.0, 0.1),
+    ("vel.limit_deg", 20.0, 0.0, 30.0),
+    ("drv.max_speed", 450.0, 0.0, 1500.0), ("drv.max_turn", 180.0, 0.0, 720.0), ("drv.accel", 1500.0, 50.0, 10000.0),
+    ("drv.turn_accel", 1000.0, 50.0, 20000.0), ("drv.turn_deadband", 2.0, 0.0, 30.0),
+    ("mot.left_scale", 0.95, 0.5, 1.5), ("mot.right_scale", 1.0, 0.5, 1.5), ("mot.max", 4095.0, 0.0, 4095.0),
+    ("mot.curve_exp", 3.92, 1.0, 10.0), ("mot.knee_in", 1250.0, 1.0, 4000.0), ("mot.knee_out", 2750.0, 0.0, 4095.0),
+    ("ctl.rate_hz", 400.0, 100.0, 1000.0), ("ctl.loops", 3.0, 0.0, 3.0), ("ctl.settle_ms", 500.0, 0.0, 5000.0),
+    ("batt.low_cell", 3.4, 2.5, 4.2), ("batt.adc_per_v", 73.3182, 10.0, 200.0),
+    ("tlm.hz", 100.0, 1.0, 1000.0), ("cfg.save", 0.0, 0.0, 1.0), ("cfg.defaults", 0.0, 0.0, 1.0),
 ]
+SIM_RATE_HZ = 400         # physics steps per second (telemetry is sent at tlm.hz)
 
 NAV_IDLE, NAV_TURNING, NAV_DRIVING, NAV_BLOCKED, NAV_ARRIVED = range(5)
 
@@ -79,14 +91,23 @@ def _wrap180(a):
 
 
 class SimRobot:
-    def __init__(self, armed=True, radio=True, seed=None):
+    def __init__(self, remote=False, remote_armed=True, seed=None):
         self.rng = random.Random(seed)
         self.room = Room()
         self.t0 = time.monotonic()
         self.params = [[n, v, lo, hi] for n, v, lo, hi in PARAMS]
         self.pidx = {p[0]: i for i, p in enumerate(self.params)}
-        self.armed = armed
-        self.radio_ok = radio
+        # Arming (as in the v4 firmware): with the RC remote present its ARMED switch rules;
+        # without it, SET_MODE to a non-IDLE mode arms and SET_MODE IDLE disarms.
+        self.radio_ok = remote
+        self.remote_armed = remote_armed
+        self.armed = remote and remote_armed
+        self.requested = lp.MODE_IDLE
+        self.save_pending = False
+        self.step_n = 0
+        self.tlm_acc = 0.0
+        self.bal_i = 0.0
+        self.vel_out = 0.0
         # true world pose
         self.X = self.Y = 0.0
         self.TH = 0.0                 # deg, continuous
@@ -158,9 +179,17 @@ class SimRobot:
         elif t == lp.MSG_SET_PARAM:
             if 0 <= d["id"] < len(self.params):
                 pr = self.params[d["id"]]
-                pr[1] = max(pr[2], min(pr[3], d["value"]))
+                v = max(pr[2], min(pr[3], d["value"]))
+                if pr[0] == "cfg.save" and v >= 0.5:
+                    self.save_pending = True      # done in step() once the motors are off
+                    v = 0.0
+                elif pr[0] == "cfg.defaults" and v >= 0.5:
+                    for p, (_n, dflt, _lo, _hi) in zip(self.params, PARAMS):
+                        p[1] = dflt
+                    self.log("params: defaults restored (not saved)")
+                    v = 0.0
+                pr[1] = v
                 self.out.append(lp.encode_param_info(d["id"], pr[1], pr[2], pr[3], pr[0]))  # echo = ack
-                self.log("param %s = %g" % (pr[0], pr[1]))
         elif t == lp.MSG_GET_PARAMS:
             self.out.append(self.hello())
             for i, (n, v, lo, hi) in enumerate(self.params):
@@ -202,11 +231,19 @@ class SimRobot:
             self.log("scan")
 
     def set_mode(self, mode):
-        if not 0 <= mode < lp.MODE_COUNT or mode == self.mode:
+        if not 0 <= mode < lp.MODE_COUNT:
             return
-        if mode != lp.MODE_IDLE and not self.armed:
-            self.log("not armed: staying IDLE")
+        self.requested = mode
+        if not self.radio_ok:
+            self.armed = mode != lp.MODE_IDLE
+        self._apply_mode()
+
+    def _apply_mode(self):
+        mode = self.requested if self.armed else lp.MODE_IDLE
+        if mode == self.mode:
             return
+        if mode != lp.MODE_IDLE and self.mode == lp.MODE_IDLE:
+            self.log("armed")
         self.mode = mode
         if mode == lp.MODE_HOLD:
             x, y, _ = self.odom()
