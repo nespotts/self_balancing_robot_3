@@ -131,6 +131,8 @@ Screenshots of these: `python -m station.tools.screenshots --url http://localhos
 | | |
 |---|---|
 | grey / white / black | unknown / free / wall (25 mm cells, built on the Pi from every range reading) |
+| size | **grows with the robot**: starts 20 x 20 m, adds 1 m tiles whenever a reading reaches past the edge. Memory cap 64 MB (200 x 200 m): past it the bridge says so in the log and the map stops growing |
+| doorways | hits are range-weighted: close = narrow and strong, far = weak, and a close free reading counts double, so a 260-300 mm doorway is not walled off by far readings. Off: `range_weight` map setting |
 | ⋯ → **Map** | on / off + opacity · **Save / Load map** (`~/sbr3-maps`) · **Clear map** |
 | ⋯ → Map & route settings | distance kept off walls, robot radius, tilt limit, “no target” handling, drift correction (experimental) |
 | **Go** with a map | the bridge plans a route (purple) around obstacles, re-plans when the robot is blocked |
@@ -138,7 +140,7 @@ Screenshots of these: `python -m station.tools.screenshots --url http://localhos
 
 ```mermaid
 flowchart LR
-  R[RangeFrame] --> F{tilted? no target?} -- ok --> G[grid: free wedge + hit arc] --> T[changed 1 m tiles<br>PNG, 2 Hz] --> W[browsers]
+  R[RangeFrame] --> F{tilted? no target?} -- ok --> G[grid: free wedge + hit arc<br>grows by 1 m tiles] --> T[changed 1 m tiles<br>PNG, 2 Hz] --> W[browsers]
   G --> P[planner: A* / frontiers<br>worker thread] -- MSG_GOTO --> Robot
 ```
 
@@ -159,7 +161,7 @@ flowchart LR
 | remote's **Go home** | the robot starts a straight line; the bridge swaps it for a planned route to Home when the robot is armed and a map exists. It never arms the robot |
 
 Browser API and the GO_HOME rules: [api.md](api.md#saved-places).
-Pi cost: 0.2 ms per reading (< 1 % of a core at 50/s); a route or frontier search 0.1-0.3 s in a worker thread.
+Pi cost: 0.2 ms per reading (range weighting +10 %, growing: one copy of the grid, a few ms) (< 1 % of a core at 50/s); a route or frontier search 0.1-0.3 s in a worker thread.
 Offline: `python -m station.tools.mapbuild ~/sbr3-logs/<session>.jsonl -o map.png`.
 Drift correction (scan-to-map matching) is off by default: in the sim it does not beat plain odometry yet.
 Browser API: `{"t":"map","action":"reset|save|load|list|delete|set"}`, `{"t":"plan","action":"goto|explore|stop|set"}`;

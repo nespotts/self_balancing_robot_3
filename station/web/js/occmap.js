@@ -1,9 +1,10 @@
 // Occupancy grid layer + planned route (issue #12). The bridge sends the map as 1 m PNG tiles
-// ("map" messages: full on connect / reset / load, changed tiles ~2 Hz) and the planner's route ("plan").
+// ("map" messages: full on connect / reset / load, changed tiles ~2 Hz; the map grows as the robot explores) and the planner's route ("plan").
 import { state, on, send } from "./conn.js";
 import { toast } from "./ui.js";
 
-const occ = { info: null, v: -1, canvas: null, cx: null, drawn: new Set(), bbox: null, corr: [0, 0, 0], settings: {}, stats: {}, name: null };
+// tiles: key "tx,ty" (absolute: world mm / tile size, floor, so they stay valid while the map grows) -> Image
+const occ = { info: null, v: -1, tiles: new Map(), bbox: null, corr: [0, 0, 0], settings: {}, stats: {}, name: null };
 export const plan = { mode: "idle", status: "", path: [], goals: [], settings: {} };
 let redraw = () => {};
 export function onChange(fn) { redraw = fn; }
@@ -14,48 +15,29 @@ const store = {
 };
 export const occLayer = { on: store.get("occ.on", true), opacity: store.get("occ.opacity", 0.8) };
 
-function fillUnknown(tx, ty) {
-  const T = occ.info.tile;
-  occ.cx.fillStyle = "#808080";
-  occ.cx.fillRect(tx * T, (occ.info.nty - 1 - ty) * T, T, T);
-}
-
 function growBbox(tx, ty) {
   const b = occ.bbox;
-  if (!b) { occ.bbox = [tx, ty, tx, ty]; fillUnknown(tx, ty); return; }
-  const nb = [Math.min(b[0], tx), Math.min(b[1], ty), Math.max(b[2], tx), Math.max(b[3], ty)];
-  if (nb.every((v, i) => v === b[i])) return;
-  // unknown grey under the whole explored rectangle (tiles never touched stay grey)
-  for (let y = nb[1]; y <= nb[3]; y++) for (let x = nb[0]; x <= nb[2]; x++) {
-    if ((x < b[0] || x > b[2] || y < b[1] || y > b[3]) && !occ.drawn.has(x + "," + y)) fillUnknown(x, y);
-  }
-  occ.bbox = nb;
+  occ.bbox = b ? [Math.min(b[0], tx), Math.min(b[1], ty), Math.max(b[2], tx), Math.max(b[3], ty)] : [tx, ty, tx, ty];
 }
 
 on("map", (m) => {
   occ.corr = m.corr || [0, 0, 0]; occ.settings = m.settings || {}; occ.stats = m.stats || {}; occ.name = m.name;
-  if (m.full || m.v !== occ.v || !occ.canvas) {
-    if (!m.w) return;   // a delta for a map we don't have: the full one follows
-    occ.info = { res: m.res_mm, x0: m.x0_mm, y0: m.y0_mm, w: m.w, h: m.h, tile: m.tile, ntx: m.ntx, nty: m.nty };
+  if (m.full || m.v !== occ.v || !occ.info) {
+    if (!m.tile) return;   // a delta for a map we don't have: the full one follows
+    occ.info = { res: m.res_mm, tile: m.tile };
     occ.v = m.v;
-    occ.canvas = occ.canvas || document.createElement("canvas");
-    occ.canvas.width = m.w; occ.canvas.height = m.h;
-    occ.cx = occ.canvas.getContext("2d");
-    occ.cx.clearRect(0, 0, m.w, m.h);
-    occ.drawn.clear(); occ.bbox = null;
+    occ.tiles.clear(); occ.bbox = null;
   }
-  const T = occ.info.tile, v = occ.v;
+  const v = occ.v;
   for (const [tx, ty, b64] of m.tiles || []) {
     growBbox(tx, ty);
-    occ.drawn.add(tx + "," + ty);
-    const img = new Image();
-    img.onload = () => { if (occ.v === v) { occ.cx.drawImage(img, tx * T, (occ.info.nty - 1 - ty) * T); redraw(); } };
+    const key = tx + "," + ty, img = new Image();
+    img.onload = () => { if (occ.v === v) { occ.tiles.set(key, img); redraw(); } };
     img.src = "data:image/png;base64," + b64;
   }
   syncSettings();
   redraw();
 });
-
 on("plan", (m) => {
   const was = plan.mode;
   Object.assign(plan, m);
@@ -65,7 +47,7 @@ on("plan", (m) => {
 });
 
 export function planActive() { return plan.mode !== "idle" && plan.path.length > 1; }
-export function hasMap() { return !!(occ.canvas && occ.drawn.size); }
+export function hasMap() { return occ.tiles.size > 0; }
 // map frame (places, grid) -> odometry frame (what the canvas draws): the inverse of the map's pose correction
 export function mapToOdom(x, y) {
   const [tx, ty, th] = occ.corr, a = -th * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
@@ -74,7 +56,7 @@ export function mapToOdom(x, y) {
 
 // ---------- drawing (called from map.js with its view: odometry mm -> screen px) ----------
 export function drawOccMap(ctx, sx, sy, s) {
-  if (!occLayer.on || !occ.canvas || !occ.drawn.size) return;
+  if (!occLayer.on || !occ.tiles.size) return;
   const i = occ.info, [tx, ty, th] = occ.corr;
   ctx.save();
   ctx.globalAlpha = occLayer.opacity;
@@ -82,9 +64,14 @@ export function drawOccMap(ctx, sx, sy, s) {
   ctx.translate(sx(0), sy(0));
   ctx.scale(s, -s);                                   // odometry mm, y up
   if (th || tx || ty) { ctx.rotate(-th * Math.PI / 180); ctx.translate(-tx, -ty); }   // map frame -> odometry
-  ctx.translate(i.x0, i.y0 + i.h * i.res);
-  ctx.scale(i.res, -i.res);                           // canvas pixels (rows top-down)
-  ctx.drawImage(occ.canvas, 0, 0);
+  ctx.scale(i.res, -i.res);                           // cell units; tile images are rows top-down
+  const T = i.tile, b = occ.bbox;
+  ctx.fillStyle = "#808080";                          // unknown grey under the whole explored rectangle
+  ctx.fillRect(b[0] * T, -(b[3] + 1) * T, (b[2] - b[0] + 1) * T, (b[3] - b[1] + 1) * T);
+  for (const [key, img] of occ.tiles) {
+    const k = key.indexOf(",");
+    ctx.drawImage(img, +key.slice(0, k) * T, -(+key.slice(k + 1) + 1) * T);
+  }
   ctx.restore();
 }
 

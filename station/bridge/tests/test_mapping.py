@@ -300,6 +300,159 @@ class TestSimMapping(unittest.TestCase):
         self.assertGreater(close[0], 100)                          # never scraped a wall
 
 
+def corridor(robot, x1, half_w=1500):
+    """Replace the sim room by a long corridor: x -1000 .. x1, y +-half_w."""
+    from station.sim.sim import _box
+    robot.room.segs = _box((x1 - 1000) / 2.0, 0, x1 + 1000, 2 * half_w)
+
+
+def door_room(robot, gap):
+    """Two rooms (x -1000..2000, 2000..5000; y +-1500) with a doorway `gap` mm wide in the wall at x = 2000."""
+    from station.sim.sim import _box
+    robot.room.segs = _box(2000, 0, 6000, 3000) + [(2000, -1500, 2000, -gap / 2.0), (2000, gap / 2.0, 2000, 1500)]
+
+
+class TestBigMap(unittest.TestCase):
+    """The grid grows with the robot (issue #63) and narrow doorways stay open."""
+
+    def test_grid_grows_every_way(self):
+        g = Grid(size_m=4)
+        w0 = g.W
+        g.integrate_wedge(500, 500, 0.0, math.radians(6), 800, 900)
+        v0 = g.value(1000, 500)
+        self.assertLess(v0, UNKNOWN)
+        g.integrate_wedge(15000, -9000, math.radians(200), math.radians(6), 1500, 1600)   # far right / below
+        self.assertGreater(g.W, w0)
+        self.assertGreater(g.value(15000 + 1600 * math.cos(math.radians(200)), -9000 + 1600 * math.sin(math.radians(200))), UNKNOWN)
+        self.assertEqual(g.value(1000, 500), v0)                          # old cells kept (they moved inside the array)
+        g.integrate_wedge(-12000, 7000, 0.0, math.radians(6), 300)        # far left / above
+        self.assertEqual(g.value(1000, 500), v0)
+        self.assertLess(g.value(-12000 + 150, 7000), UNKNOWN)
+        self.assertEqual(g.x0 % (g.T * g.res), 0)                          # tile aligned
+        # browsers get absolute tile indices (world mm // 1000), whatever the grid's corner is
+        tiles = {(tx, ty) for tx, ty, _ in g.tiles_msg(g.take_dirty())}
+        self.assertIn((0, 0), tiles)                                       # (500, 500), dirty before the grid grew
+        self.assertIn((-12, 7), tiles)
+        self.assertIn((13, -10), tiles)
+        full = {(tx, ty) for tx, ty, _ in g.tiles_msg(sorted(g.touched))}
+        self.assertEqual(full, tiles)
+
+    def test_memory_cap_warns(self):
+        g = Grid(size_m=4, max_cells=200 * 200 * 4)          # 5 m x 5 m
+        w0 = g.W
+        g.integrate_wedge(0, 0, 0.0, math.radians(6), 800, 900)
+        g.integrate_wedge(30000, 0, 0.0, math.radians(6), 800, 900)
+        self.assertEqual(g.W, w0)
+        self.assertIn("memory limit", g.warning)
+        self.assertEqual(g.value(30500, 0), UNKNOWN)
+        self.assertGreater(g.value(900, 0), UNKNOWN)         # the map itself keeps working
+        m = Mapper(tempfile.mkdtemp(), max_cells=200 * 200 * 4)
+        lines = []
+        m.say = lines.append
+        m.on_range(reading(x=60000, r=800))
+        m.poll(time.monotonic())
+        self.assertTrue(any("memory limit" in x for x in lines))
+        self.assertTrue(m.stats()["warning"])
+
+    def test_save_load_grown_and_old_files(self):
+        g = Grid(size_m=4)
+        g.integrate_wedge(0, 0, 0.0, math.radians(6), 800, 900)
+        g.integrate_wedge(12000, 5000, 1.0, math.radians(6), 1500, 1600)
+        text = g.to_json()
+        g2 = Grid.from_json(text)
+        self.assertEqual(g2.touched, g.touched | g.dirty)
+        for x, y in ((500, 0), (900, 0), (12000 + 800 * math.cos(1.0), 5000 + 800 * math.sin(1.0)), (3000, 3000)):
+            self.assertEqual(g2.value(x, y), g.value(x, y))
+        self.assertEqual(g2.tile_origin()[0] * g2.T * g2.res, g2.x0)
+        # a map with a grown but untouched margin is saved without it
+        g3 = Grid(size_m=4)
+        g3.integrate_wedge(500, 500, 0.0, math.radians(6), 800, 900)
+        g3.integrate_wedge(9000, 0, 0.0, math.radians(6), 100, 200)
+        g3.reset()
+        g3.integrate_wedge(500, 500, 0.0, math.radians(6), 800, 900)
+        self.assertEqual(Grid.from_json(g3.to_json()).W, g3.W)
+        # an old file (no init_n; a grid whose corner is not on a tile edge) loads and stays put
+        d = json.loads(Grid(size_m=4).to_json())
+        d.pop("init_n")
+        d.update(ntx=2, nty=2, x0_mm=-30 * 25.0, y0_mm=-30 * 25.0)
+        cells = bytearray([UNKNOWN]) * (80 * 80)
+        cells[(30 + 4) * 80 + 30 + 10] = 200                               # world cell (10, 4)
+        d["cells"] = base64.b64encode(zlib.compress(bytes(cells))).decode("ascii")
+        d["touched"] = [[0, 0]]
+        g4 = Grid.from_json(json.dumps(d))
+        self.assertEqual(g4.value(10 * 25 + 5, 4 * 25 + 5), 200)
+        self.assertEqual(g4.x0 % (g4.T * g4.res), 0)
+        self.assertTrue(g4.touched)
+        # and a default-size old file keeps its place
+        old = Grid(size_m=20)
+        old.integrate_wedge(1000, 1000, 0.0, math.radians(6), 800, 900)
+        self.assertEqual(Grid.from_json(old.to_json()).value(1500, 1000), old.value(1500, 1000))
+
+    def test_robot_far_from_the_start_maps_correctly(self):
+        r = DriftRobot(seed=3)
+        corridor(r, 18000)
+        m = Mapper(tempfile.mkdtemp())
+        w0 = m.grid.W
+        drive_offline(r, m.on_range, points=[(15000, 0)], max_s=200)
+        self.assertGreater(r.X, 14000)                                       # it really went 15 m out
+        self.assertGreater(m.grid.W, w0)                                     # the 20 m grid had to grow
+        walls = [v for i, v in enumerate(m.grid.cells) if v > 150]
+        near = sum(1 for i, v in enumerate(m.grid.cells) if v > 150 and r.room.clearance(
+            m.grid.x0 + (i % m.grid.W + 0.5) * m.grid.res, m.grid.y0 + (i // m.grid.W + 0.5) * m.grid.res) < 75)
+        self.assertGreater(len(walls), 150)
+        self.assertGreater(near / len(walls), 0.85)
+        seen = sum(1 for x in range(11000, 16000, 250) for y in (-1500, 1500)
+                   if any(m.grid.value(x + dx, y + dy) > 150 for dx in (-50, 0, 50) for dy in (-75, -50, -25, 0, 25, 50, 75)))
+        self.assertGreater(seen, 6)                                          # of 40 wall samples out there (a straight drive sees the walls at few angles)
+        self.assertLess(m.grid.value(14000, 0), UNKNOWN)
+        # browsers: full message covers the far tiles with absolute indices, the planner can use the grid
+        full = json.loads(m.full_msg())
+        self.assertTrue(any(t[0] >= 14 for t in full["tiles"]))
+        cm = CostMap(m.grid)
+        self.assertIsNotNone(cm.cell(15000, 0))
+        path = cm.astar((0, 0), (14000, 0), unknown_ok=False)
+        self.assertIsNotNone(path)
+        # save / load keeps it
+        m.save("far")
+        before = bytes(m.grid.cells)
+        m2 = Mapper(m.dir)
+        m2.load("far")
+        self.assertEqual(m2.grid.value(14000, 0), m.grid.value(14000, 0))
+        self.assertEqual(m2.grid.value(14000, 1500), m.grid.value(14000, 1500))
+
+    def test_narrow_doorway_stays_open(self):
+        from station.bridge.planner import OCC_BYTE
+        for gap in (260, 300):
+            for seed, pts in ((1, [(1500, 0), (2600, 0)]), (2, [(1400, -900), (1400, 900)]), (3, [(1500, 0), (2600, 0)])):
+                r = DriftRobot(seed=seed)
+                door_room(r, gap)
+                m = Mapper(tempfile.mkdtemp())
+                drive_offline(r, m.on_range, points=pts, max_s=120)
+                g = m.grid
+                slot = [g.value(x, y) for x in (1975, 2000, 2025) for y in range(-50, 51, 25)]
+                label = "gap %d seed %d: %s" % (gap, seed, slot)
+                self.assertLessEqual(sum(1 for v in slot if v > OCC_BYTE), 3, label)         # open (the frame ends are 140 mm out)
+                self.assertLessEqual(g.value(2000, 0), OCC_BYTE, label)
+
+    def test_range_weight_marks(self):
+        # near hits are strong and narrow, far hits weak; a close free reading clears a far hit
+        g = Grid(size_m=8)
+        g.integrate_wedge(0, 0, 0.0, math.radians(6), 300, 400, hit_half=math.radians(2.5), rw=True)
+        near = g.value(400, 0) - UNKNOWN
+        g2 = Grid(size_m=8)
+        g2.integrate_wedge(0, 0, 0.0, math.radians(6), 1900, 2000, hit_half=math.radians(2.5), rw=True)
+        far = g2.value(2000, 0) - UNKNOWN
+        g3 = Grid(size_m=8)
+        g3.integrate_wedge(0, 0, 0.0, math.radians(6), 1900, 2000, hit_half=math.radians(2.5))
+        plain = g3.value(2000, 0) - UNKNOWN
+        self.assertGreater(near, plain)
+        self.assertLess(far, plain)
+        self.assertGreater(far, 0)
+        g2.integrate_wedge(0, 0, 0.0, math.radians(6), 700, 800, hit_half=math.radians(2.5), rw=True)    # close, same line
+        self.assertLessEqual(g2.value(1500, 0), UNKNOWN)       # (not cleared here: the wedge ends at 700) ...
+        g2.integrate_wedge(300, 0, 0.0, math.radians(6), 1900, 2000, rw=True)
+        self.assertLess(g2.value(1000, 0), UNKNOWN)
+
 class TestBridgeMapApi(unittest.TestCase):
     def test_ws(self):
         asyncio.run(self._run())
