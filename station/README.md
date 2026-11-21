@@ -68,6 +68,29 @@ Screenshots: `python -m station.tools.screenshots --url http://localhost:8080/ -
 | **Score** | **Last 20 s** (⋯: 10 / 20 / 30 / 60 s) or **Start … Stop** around a run (push it a few times). The bridge scores the full-rate session log like `tools/tune.py score`: pitch error rms, oscillation Hz, motor rms / saturation / sign flips, D noise, pushes > 3° with settle time and overshoot. Needs **Full rate** (400 Hz) |
 | **Runs side by side** | one column per run with the params active then (changed ones in yellow, `*` = changed during the run); best value per row highlighted. History lives in the bridge (and in the session log as `["score", t, {...}]`) |
 
+### Tune → Balance: Find balance point (issue #52)
+
+<p>
+<img src="docs/screenshots/phone-balpoint-measure.png" width="30%">
+<img src="docs/screenshots/phone-balpoint-proposal.png" width="30%">
+<img src="docs/screenshots/phone-balpoint-done.png" width="30%">
+</p>
+
+```mermaid
+flowchart LR
+  A[Balancing still<br>hands off] --> B[settle 6 s<br>measure 10 s<br>mean vel_out] --> C{lean under 0.1 deg?}
+  C -- no --> D["Apply: offset - lean<br>(slewed, max 2 deg a round)"] --> B
+  C -- yes --> E[Save to robot]
+```
+
+If `bal.offset_deg` is off, the velocity loop has to lean the robot to stop it creeping. That lean (`vel_out_deg`)
+is the error: `new offset = offset - mean(vel_out_deg)`. **Start** only works armed, upright, in BALANCE / HOLD and
+standing still. It reads telemetry and sets one param (`bal.offset_deg`); it never arms, changes the mode or drives.
+A push, driving, disarm, E-stop, lost link or someone else touching the offset aborts it at once.
+**Apply** moves the offset gently, then measures again to check; **Undo** restores the old value; **Save to robot** is the
+usual EEPROM save (motors off). Browser API: `{"t":"balpoint","action":"start"|"apply"|"revert"|"stop"|"status"}`
+(`start` also takes `"auto":true` to apply each step itself, `settle_s`, `window_s`, `rounds`); state arrives as `balpoint_state`.
+Sim: set `bal.offset_deg` wrong (real balance point 3.15) and run it. Screenshots: `--prep-balpoint balpoint`.
 ### Tune → Motor test (wheels up)
 
 Robot on a stand, wheels off the ground, remote in IDLE + ARMED. Pick All / Dead zone / Speed curve / Reversal,
@@ -144,10 +167,10 @@ rm /tmp/sbr3-bridge.release                   # bridge reconnects
 | `{"t":"cfg","action":"save"}` / `"defaults"` | EEPROM save / firmware defaults |
 | `{"t":"goto","points":[[x,y],...],"go":true}` / `{"t":"event","event":3}` | |
 | `{"t":"sub","tune":true}` | receive every telemetry frame as `{"t":"tune","cols":[...],"rows":[...]}` |
-| `{"t":"preset"\|"score"\|"motor","action":...}` | Tune tools: see the docstring of `bridge/tuning_api.py` |
+| `{"t":"preset"\|"score"\|"motor"\|"balpoint","action":...}` | Tune tools: see the docstring of `bridge/tuning_api.py` |
 
 Receive: `hello`, `status`, `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`, `map`, `plan`,
-and for the Tune tools `presets`, `score_state`, `score_runs`, `motor_state`, `motor_fit`.
+and for the Tune tools `presets`, `score_state`, `score_runs`, `motor_state`, `motor_fit`, `balpoint_state`.
 `ranges.pts` rows (every reading, batched at 25 Hz): `[i, hit_x, hit_y, sensor_x, sensor_y, valid, tilt, pi_ms, sensor_id, sensor_angle_deg, range_mm]`
 (sensor 0 = front / XSHUT 34, 1 = rear / XSHUT 28; angle in the robot frame, + = CCW; raw mm as sent). `status.rng_hz` = readings/s per sensor.
 No WebSocket (old Kindle): `GET /api/state`, `GET|POST /api/cmd`.

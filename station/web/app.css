@@ -358,6 +358,25 @@ details.pgroup:not([open]) { padding-top: 8px; padding-bottom: 8px; }
 .score-tiles .tile b { font-size: 19px; }
 @media (min-width: 900px) { .score-tiles { grid-template-columns: repeat(6, 1fr); } }
 .score-hist:empty { display: none; }
+
+/* Find balance point (issue #52) */
+.bp-card { margin-bottom: 12px; }
+.bp-card .sc-bar #bp-status { flex: 1; font-size: 13px; }
+#bp-go { min-width: 70px; }
+#bp-go.recording { background: var(--stop); border-color: #ff7070; }
+.bp-body p { margin: 8px 0 0; font-size: 13px; }
+.bp-body p:empty { display: none; }
+.bp-big { display: flex; align-items: baseline; gap: 8px; margin-top: 8px; }
+.bp-big b { font-size: 28px; font-variant-numeric: tabular-nums; }
+.bp-big span { color: var(--muted); font-size: 13px; }
+.bp-prog { height: 8px; border-radius: 4px; background: var(--surface-3); margin-top: 8px; overflow: hidden; }
+.bp-prog i { display: block; height: 100%; width: 0; background: var(--blue); transition: width .25s linear; }
+.bp-prog.settle i { background: var(--muted); }
+.bp-actions { display: flex; gap: 8px; margin-top: 10px; }
+.bp-actions .primary { min-width: 110px; }
+.bp-chain { font-variant-numeric: tabular-nums; }
+.bp-warn { color: var(--warn); }
+.bp-bad { color: #ffb4a8; }
 .hist-cap { font-size: 12px; margin: 12px 0 4px; }
 .best-key { padding: 1px 6px; border-radius: 6px; background: rgba(57, 135, 229, .28); color: var(--text); }
 .hist-wrap { overflow-x: auto; }

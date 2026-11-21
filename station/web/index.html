@@ -189,6 +189,14 @@
       <div id="score-tiles" class="score-tiles"></div>
       <div id="score-hist" class="score-hist"></div>
     </div>
+    <!-- Find balance point (issue #52): station/web/js/balpoint.js -->
+    <div class="card bp-card tb-only" id="bp-card">
+      <div class="sc-bar"><h3>Find balance point</h3>
+        <span id="bp-status" class="muted"></span>
+        <button id="bp-go" class="small primary" title="Measure the lean the robot needs to stand still, then fix bal.offset_deg">Start</button>
+      </div>
+      <div id="bp-body" class="bp-body"></div>
+    </div>
     <!-- wheels-up motor test (issue #16): station/web/js/motortest.js -->
     <div class="tm-only" id="motor-view"></div>
     <div class="card tune-chart tb-only">

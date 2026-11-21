@@ -70,7 +70,7 @@ Gains are br3ttb units: ki per second, kd seconds.
 | Name | Default | Meaning |
 |---|---|---|
 | bal.kp / ki / kd | 250 / 2010 / 4.63 | balance PID (power per deg) |
-| bal.offset_deg | 3.15 | balance point = pitch −3.15° |
+| bal.offset_deg | 3.15 | balance point = pitch −3.15° (Station: Tune, Find balance point, measures it from the velocity loop) |
 | bal.cutoff_deg | 45 | fallen |
 | bal.reengage_deg | 15 | re-engage window |
 | bal.knob_trim_deg | 0 | ± trim from left knob (0 = off) |

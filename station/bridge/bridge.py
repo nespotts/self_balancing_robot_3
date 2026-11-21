@@ -267,6 +267,7 @@ class Bridge:
         self.link = None
         self.log.stop()
         self.tlm_time = -10.0
+        self.tools.on_lost()
         if not quiet:
             self.say("lost %s (Teensy reset/unplugged?) - reconnecting" % self.port)
         self._set_link_state("released" if self.released() else "waiting")
@@ -296,6 +297,7 @@ class Bridge:
             if d["radio_ok"] and not self.remote_seen:
                 self.remote_seen = True
                 self.push_status()
+            self.tools.on_tlm(d, self.tlm_time)           # find balance point (#52)
             if self.tune_clients:
                 self._add_tune(d)
             last = self.track[-1] if self.track else None
@@ -454,6 +456,7 @@ class Bridge:
         for text in self.mapper.poll(now):                # occupancy grid tiles, ~2 Hz (#12)
             self.broadcast(text)
         self.planner.tick(now)
+        self.tools.tick(now)
         if self.params_dirty:
             self.params_dirty = False
             self.broadcast(self.params_msg())
@@ -663,7 +666,7 @@ class Bridge:
                 self.waypoints = []
                 self.broadcast(json.dumps({"t": "reset"}))
             self.say("%s: event %s" % (who, lp.EVENT_NAMES[ev]))
-        elif t in ("preset", "score", "motor"):
+        elif t in ("preset", "score", "motor", "balpoint"):
             return self.tools.handle(m, who)
         elif t == "map":       # occupancy grid: reset / save / load / list / delete / set (#12)
             return self.mapper.command(m, who)
