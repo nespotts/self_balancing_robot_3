@@ -6,7 +6,8 @@ import asyncio
 import os
 import sys
 
-from .sim import SimRobot, SimServer
+from .sim import SimServer
+from .tour import DriftRobot, tour
 
 
 def main(argv=None):
@@ -24,10 +25,14 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--head-error", type=float, default=0.0, metavar="DEG",
                     help="range-sensor head mounted this far CCW (+) of true; rng.servo_trim_deg -DEG fixes it")
+    ap.add_argument("--tour", action="store_true", help="arm and drive a waypoint loop around the room (mapping demo)")
+    ap.add_argument("--drift", type=float, default=0.0, metavar="DEG_PER_MIN",
+                    help="odometry drift: heading gains this many deg/min and distances read 2 %% long")
     a = ap.parse_args(argv)
     host, _, port = a.listen.rpartition(":")
     remote = a.remote or a.remote_disarmed
-    robot = SimRobot(remote=remote, remote_armed=not a.remote_disarmed, seed=a.seed, head_error_deg=a.head_error)
+    robot = DriftRobot(remote=remote, remote_armed=not a.remote_disarmed, seed=a.seed, head_error_deg=a.head_error,
+                       drift_deg_min=a.drift, drift_scale=0.02 if a.drift else 0.0)
     server = SimServer(robot, host or "127.0.0.1", int(port), a.garbage)
 
     async def run():
@@ -36,8 +41,10 @@ def main(argv=None):
             from station.bridge.__main__ import DEFAULT_WEB
             from station.bridge.bridge import Bridge
             b = Bridge("tcp://%s:%s" % (host or "127.0.0.1", port), DEFAULT_WEB, a.log_dir,
-                       http_port=a.http_port)
+                       http_port=a.http_port, map_dir=os.environ.get("SBR3_MAP_DIR", "~/sbr3-maps"))
             jobs.append(b.run())
+            if a.tour:
+                jobs.append(tour(b))
         await asyncio.gather(*jobs)
 
     try:

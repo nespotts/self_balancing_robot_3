@@ -23,13 +23,15 @@ def build_parser():
                     help="delete the oldest sessions above this total (default 2048 = 2 GB)")
     ap.add_argument("--release-file", default=None,
                     help="while this file exists the serial port is released (default %s)" % DEFAULT_RELEASE_FILE)
+    ap.add_argument("--map-dir", default=os.environ.get("SBR3_MAP_DIR", "~/sbr3-maps"), help="saved occupancy maps")
     ap.add_argument("--quiet", action="store_true")
     return ap
 
 
 def main(argv=None):
     a = build_parser().parse_args(argv)
-    b = Bridge(a.port, a.web, a.log_dir, a.host, a.http_port, a.baud, a.release_file, a.log_max_mb, a.quiet)
+    b = Bridge(a.port, a.web, a.log_dir, a.host, a.http_port, a.baud, a.release_file, a.log_max_mb, a.quiet,
+               map_dir=a.map_dir)
     try:
         asyncio.run(b.run())
     except KeyboardInterrupt:
