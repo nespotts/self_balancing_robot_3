@@ -16,8 +16,8 @@ def _param_names():
 
 
 def _doc_names():
-    """Names in docs/firmware.md's Params table; 'a.x / y' also names the param a.*y that ends with it."""
-    txt = _read("docs", "firmware.md")
+    """Names in docs/params.md's Params table; 'a.x / y' also names the param a.*y that ends with it."""
+    txt = _read("docs", "params.md")
     sec = txt.split("## Params", 1)[1].split("\n## ", 1)[0]
     names = set()
     for line in sec.splitlines():
@@ -52,8 +52,8 @@ class DocsMatchHeaders(unittest.TestCase):
 
     def test_param_table(self):
         src, doc = set(_param_names()), _doc_names()
-        self.assertEqual(sorted(src - doc), [], "params missing from docs/firmware.md")
-        self.assertEqual(sorted(doc - src), [], "removed/renamed params still in docs/firmware.md")
+        self.assertEqual(sorted(src - doc), [], "params missing from docs/params.md")
+        self.assertEqual(sorted(doc - src), [], "removed/renamed params still in docs/params.md")
 
 
 if __name__ == "__main__":
