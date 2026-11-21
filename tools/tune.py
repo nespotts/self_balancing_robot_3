@@ -12,7 +12,7 @@ import glob, json, math, os, sys, time, urllib.request
 
 BRIDGE = os.environ.get("SBR3_BRIDGE", "http://127.0.0.1:8080")
 LOGDIR = os.path.expanduser(os.environ.get("SBR3_LOGS", "~/sbr3-logs"))
-GROUPS = ("bal.", "vel.", "str.", "drv.", "ctl.", "tlm.", "mot.")
+GROUPS = ("bal.", "vel.", "str.", "drv.", "ctl.", "tlm.", "mot.", "rng.")
 
 
 def api_state(params=False):
