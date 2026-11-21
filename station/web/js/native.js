@@ -204,7 +204,8 @@ function init() {
     menu.append(el("div", { class: "native-menu" },
       el("span", { class: "muted" }, "Screen"), o,
       el("button", { onclick: () => { menu.hidden = true; N.openFinder(); } }, "Find another robot…"),
-      el("span", { class: "muted small" }, "Balance Bot " + (info.version || ""))));
+      el("span", { class: "muted small" }, "Balance Bot " + (info.version || "") +
+        (info.robot && info.robot.label ? " · " + info.robot.label : ""))));
   }
   on("hello", addMenu);
   addMenu();

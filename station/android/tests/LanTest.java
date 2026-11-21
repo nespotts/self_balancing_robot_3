@@ -45,6 +45,32 @@ public class LanTest {
         ok(!Lan.looksLikeBridge("{\"t\": \"hello\"}"), "other json");
         ok(!Lan.looksLikeBridge(null), "null");
 
+        // robot vs simulator (issue #27: a sim on the PC must not win over the real robot)
+        String robot = "{\"t\": \"status\", \"link\": \"connected\", \"port\": \"/dev/ttyACM0\", \"robot_alive\": true}";
+        String silent = "{\"t\": \"status\", \"link\": \"waiting\", \"port\": \"/dev/ttyACM0\", \"robot_alive\": false}";
+        String sim = "{\"t\": \"status\", \"link\": \"connected\", \"port\": \"tcp://127.0.0.1:5761\", \"robot_alive\": true}";
+        eq(Lan.kindOf(robot), Lan.ROBOT, "/dev/ = robot");
+        eq(Lan.kindOf(sim), Lan.SIM, "tcp:// = sim");
+        eq(Lan.kindOf("{\"t\":\"status\",\"link\":\"connected\",\"port\":\"COM5\"}"), Lan.ROBOT, "COM5 = robot");
+        eq(Lan.kindOf("{\"t\":\"status\",\"link\":\"connected\",\"port\":\"\\/dev\\/ttyACM0\"}"), Lan.ROBOT, "escaped slashes");
+        eq(Lan.kindOf("{\"t\":\"status\",\"link\":\"connected\"}"), Lan.SIM, "no port = not a robot");
+        ok(Lan.robotAlive(robot) && !Lan.robotAlive(silent), "robot_alive");
+        eq(Lan.kindLabel(Lan.ROBOT) + "/" + Lan.kindLabel(Lan.SIM), "Robot/Simulator", "labels");
+
+        Lan.Hit hR = Lan.Hit.of("192.168.0.209:8080", robot), hS = Lan.Hit.of("192.168.0.149:8080", sim);
+        Lan.Hit hR2 = Lan.Hit.of("192.168.0.50:8080", silent), hS2 = Lan.Hit.of("192.168.0.12:8080", sim);
+        List<Lan.Hit> one = java.util.Arrays.asList(hS, hR);
+        eq(Lan.autoPick(one), hR, "one robot + a sim: open the robot");
+        eq(Lan.autoPick(Lan.rank(one, "192.168.0.149:8080")), hR, "last used = sim, robot exists: the robot");
+        eq(Lan.rank(one, "192.168.0.149:8080").get(0), hR, "robot listed first even if the sim was last");
+        eq(Lan.autoPick(java.util.Arrays.asList(hS)), null, "only a sim: ask");
+        eq(Lan.autoPick(java.util.Arrays.asList(hR, hR2)), null, "two robots: ask");
+        eq(Lan.autoPick(new java.util.ArrayList<Lan.Hit>()), null, "nothing");
+        List<Lan.Hit> r = Lan.rank(java.util.Arrays.asList(hS, hS2, hR2, hR), "192.168.0.149:8080");
+        eq(r.toString(), "[Robot 192.168.0.209:8080, Robot 192.168.0.50:8080, Simulator 192.168.0.149:8080, "
+            + "Simulator 192.168.0.12:8080]", "rank: robots (talking first), then sims (last used, then by IP)");
+        eq(Lan.rank(java.util.Arrays.asList(hS, hS2), null).get(0), hS2, "sims by IP");
+
         // scan list
         List<String> s = Lan.scanList("192.168.0.42", 24, "192.168.0.209");
         eq(s.size(), 253, "/24 minus phone, network, broadcast");

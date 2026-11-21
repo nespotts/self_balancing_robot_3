@@ -44,6 +44,16 @@
     border-radius: 12px; padding: 12px 14px; min-width: 0; font-variant-numeric: tabular-nums; }
   input:focus { outline: none; border-color: var(--blue); }
   .err { color: #ff9a92; font-size: 14px; min-height: 1.2em; margin: 0; }
+  .hits { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+  .hits button { display: flex; align-items: center; gap: 12px; text-align: left; background: var(--surface); font-size: 17px;
+    font-variant-numeric: tabular-nums; }
+  .hits button i { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+  .hits button.robot { border-color: var(--good); }
+  .hits button.robot i { background: var(--good); }
+  .hits button.robot.silent i { background: var(--warn); }
+  .hits button b { font-weight: 600; color: var(--text); }
+  .hits button span { color: var(--text-2); }
+  .hits button small { margin-left: auto; color: var(--muted); font-size: 13px; }
   .chip { background: var(--surface-2); border: 1px solid var(--line); border-radius: 18px; padding: 8px 14px; font-size: 14px; }
   .foot { position: fixed; bottom: 10px; left: 0; right: 0; text-align: center; font-size: 12px; color: var(--muted); }
   svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -68,6 +78,7 @@
   <h1 id="title">Looking for the robot</h1>
   <p class="sub" id="sub"></p>
   <div class="bar" id="bar"><i id="bar-i"></i></div>
+  <div class="hits" id="hits" hidden></div>
 
   <ul class="tips" id="tips" hidden>
     <li><svg viewBox="0 0 24 24"><path d="M2 9a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="19.5" r="1"/></svg><span id="tip-wifi">Phone on the robot's Wi-Fi</span></li>
@@ -112,7 +123,9 @@ function set(s, title, sub) {
   $("sub").textContent = sub || "";
   $("bar").hidden = s !== "search";
   $("tips").hidden = s !== "none";
-  $("actions").hidden = !(s === "none" || s === "error" || s === "manual");
+  $("hits").hidden = s !== "pick";
+  $("retry").classList.toggle("primary", s !== "pick");   // the list is the main thing there
+  $("actions").hidden = !(s === "none" || s === "error" || s === "manual" || s === "pick");
   $("show-manual").hidden = !$("manual").hidden || s === "found";
   $("recent").hidden = !(last && (s === "none" || s === "manual") && $("manual").hidden);
   $("recent").textContent = "Last robot: " + last.replace(/:8080$/, "");
@@ -135,9 +148,35 @@ function search() {
   if (N) N.findStart();
 }
 
-function connect(addr) {
-  set("found", "Robot found", addr.replace(/:8080$/, "") + " · opening …");
+const kindName = (k) => (k === "robot" ? "Robot" : k === "sim" ? "Simulator" : "Bridge");
+const host = (a) => (a || "").replace(/:8080$/, "");
+
+function connect(addr, kind) {
+  set("found", kindName(kind) + " found", kindName(kind) + " · " + host(addr) + " · opening …");
   setTimeout(() => N.connect(addr), 350);
+}
+
+// several bridges answered (or only simulators): the user picks; real robots are listed first
+function pick(hits) {
+  const robots = hits.filter((h) => h.kind === "robot").length;
+  set("pick", robots ? "Pick a robot" : "Only a simulator found",
+    robots ? hits.length + " answered on the Wi-Fi" : "No real robot answered. Open the simulator, or search again.");
+  const box = $("hits");
+  box.textContent = "";
+  for (const h of hits) {
+    const b = document.createElement("button");
+    b.className = h.kind === "robot" ? (h.alive ? "robot" : "robot silent") : "sim";
+    b.append(document.createElement("i"));
+    const k = document.createElement("b"); k.textContent = kindName(h.kind);
+    const a = document.createElement("span"); a.append(k, " · " + host(h.addr));
+    b.append(a);
+    if (h.addr === last || (h.kind === "robot" && !h.alive)) {
+      const n = document.createElement("small"); n.textContent = h.kind === "robot" && !h.alive ? "Teensy silent" : "last used";
+      b.append(n);
+    }
+    b.onclick = () => connect(h.addr, h.kind);
+    box.append(b);
+  }
 }
 
 on.find = (d) => {
@@ -146,21 +185,25 @@ on.find = (d) => {
   $("bar-i").style.width = (d.total ? Math.round(100 * d.done / d.total) : 0) + "%";
   if (d.subnet) $("sub").textContent = "Scanning " + d.subnet + "  ·  " + d.done + " / " + d.total;
 };
-on.found = (d) => connect(d.addr);
-on.findDone = () => {
-  set("none", "Robot not found", noWifi ? "No Wi-Fi: join the robot's network, then search again." : "Nothing answered on port 8080.");
+on.findDone = (d) => {
+  if (document.body.dataset.s !== "search") return;
+  const hits = d.hits || [];
+  const auto = d.auto && hits.find((h) => h.addr === d.auto);
+  if (auto) connect(auto.addr, auto.kind);        // exactly one real robot: open it
+  else if (hits.length) pick(hits);
+  else set("none", "Robot not found", noWifi ? "No Wi-Fi: join the robot's network, then search again." : "Nothing answered on port 8080.");
 };
 on.probe = (d) => {
   $("go").disabled = false;
-  if (d.ok) connect(d.addr);
+  if (d.ok) connect(d.addr, d.kind);
   else $("err").textContent = d.error || "No answer";
 };
 
 $("retry").onclick = search;
-$("show-manual").onclick = () => { if (N) N.findStop(); if (document.body.dataset.s === "search") set("manual", "Enter the address", "The Pi's IP, as on the router or the robot's screen."); showManual(last); };
+$("show-manual").onclick = () => { if (N) N.findStop(); if (["search", "pick"].includes(document.body.dataset.s)) set("manual", "Enter the address", "The Pi's IP, as on the router or the robot's screen."); showManual(last); };
 $("recent").onclick = () => { $("err").textContent = ""; set("search", "Connecting", last.replace(/:8080$/, "") + " …"); N.probe(last); on.probe = probeThen(on.probe); };
 function probeThen(orig) {   // probe from the "last robot" chip: a failure lands back on "not found"
-  return function (d) { on.probe = orig; if (d.ok) connect(d.addr); else { set("none", "Robot not found", d.error || ""); } };
+  return function (d) { on.probe = orig; if (d.ok) connect(d.addr, d.kind); else { set("none", "Robot not found", d.error || ""); } };
 }
 $("go").onclick = () => {
   const v = $("addr").value.trim();

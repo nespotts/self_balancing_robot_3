@@ -78,6 +78,70 @@ final class Lan {
         return body != null && body.trim().startsWith("{") && STATUS_T.matcher(body).find() && STATUS_LINK.matcher(body).find();
     }
 
+    // ------------------------------------------------------------------ robot vs simulator
+
+    static final String ROBOT = "robot", SIM = "sim";
+    private static final Pattern STATUS_PORT = Pattern.compile("\"port\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+    private static final Pattern STATUS_ALIVE = Pattern.compile("\"robot_alive\"\\s*:\\s*true");
+    private static final Pattern COM_PORT = Pattern.compile("(?i)COM[0-9]+");
+
+    /** The bridge's serial port from /api/status ("/dev/ttyACM0", "tcp://127.0.0.1:5761"), or "". */
+    static String statusPort(String body) {
+        if (body == null) return "";
+        java.util.regex.Matcher m = STATUS_PORT.matcher(body);
+        return m.find() ? m.group(1).replace("\\/", "/") : "";
+    }
+
+    /** ROBOT when the bridge talks to a real Teensy (serial port /dev/... or COMn), else SIM (tcp://... = simulator). */
+    static String kindOf(String body) {
+        String p = statusPort(body);
+        return p.startsWith("/dev/") || COM_PORT.matcher(p).matches() ? ROBOT : SIM;
+    }
+
+    static boolean robotAlive(String body) { return body != null && STATUS_ALIVE.matcher(body).find(); }
+
+    /** "Robot" / "Simulator". */
+    static String kindLabel(String kind) { return ROBOT.equals(kind) ? "Robot" : SIM.equals(kind) ? "Simulator" : "Bridge"; }
+
+    /** One bridge that answered the scan. */
+    static final class Hit {
+        final String addr, kind;
+        final boolean alive;
+        Hit(String addr, String kind, boolean alive) { this.addr = addr; this.kind = kind; this.alive = alive; }
+        static Hit of(String addr, String body) { return new Hit(addr, kindOf(body), robotAlive(body)); }
+        @Override public String toString() { return kindLabel(kind) + " " + addr; }
+    }
+
+    /** Robots first (talking ones first), then simulators; within each the last-used address first, then by IP. */
+    static List<Hit> rank(List<Hit> hits, final String last) {
+        List<Hit> out = new ArrayList<>(hits);
+        java.util.Collections.sort(out, (a, b) -> {
+            int c = Boolean.compare(!ROBOT.equals(a.kind), !ROBOT.equals(b.kind));
+            if (c == 0) c = Boolean.compare(!a.alive, !b.alive);
+            if (c == 0) c = Boolean.compare(!a.addr.equals(last), !b.addr.equals(last));
+            if (c == 0) c = Long.compare(sortKey(a.addr), sortKey(b.addr));
+            return c != 0 ? c : a.addr.compareTo(b.addr);
+        });
+        return out;
+    }
+
+    private static long sortKey(String hostPort) {
+        int[] b = ipv4(hostOf(hostPort));
+        if (b == null) return Long.MAX_VALUE;
+        return (((long) b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]);
+    }
+
+    /** The one to open without asking: the only real robot. null = let the user pick (or nothing found). */
+    static Hit autoPick(List<Hit> hits) {
+        Hit robot = null;
+        for (Hit h : hits) {
+            if (!ROBOT.equals(h.kind)) continue;
+            if (robot != null) return null;
+            robot = h;
+        }
+        return robot;
+    }
+
     /**
      * Hosts to probe on the phone's subnet: at most the /24 around phoneIp (or the smaller subnet if prefix > 24),
      * without the phone itself and the network/broadcast addresses. `first` (e.g. the last robot's IP) goes first.
