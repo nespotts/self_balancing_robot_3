@@ -44,11 +44,10 @@ def load(path, seconds):
     return rng, params
 
 
-def fit(pts):
+def fit(pts, ks=None):
     """pts: [(a_deg, r_mm)] -> (rms, D, k, phi)"""
     best = None
-    for ki in range(-40, 41):
-        k = 1.0 + ki * 0.005
+    for k in ks or [0.7 + i * 0.005 for i in range(121)]:
         for pi in range(-300, 301):
             phi = pi * 0.1
             g = [1.0 / math.cos(math.radians(k * a + phi)) for a, _ in pts]
@@ -96,6 +95,10 @@ def main():
     print("wall %.0f mm, rms %.1f mm, k %.3f, head zero at reported %+.1f deg" % (D, rms, k, a0))
     print("now:      rng.servo_trim_deg %.1f  rng.servo_deg_per_cmd %.3f  rng.servo_dir %d" % (trim, scale, sdir))
     print("suggest:  rng.servo_trim_deg %.1f  rng.servo_deg_per_cmd %.3f" % (trim + sdir * a0 / scale, scale * k))
+    # The VL53L0X sees a ~25 deg cone, which flattens the curve (k too low). The zero is robust:
+    rms1, D1, _, phi1 = fit(pts, [1.0])
+    print("k fixed 1: rms %.1f mm, head zero at reported %+.1f deg -> rng.servo_trim_deg %.1f" % (
+        rms1, -phi1, trim + sdir * -phi1 / scale))
 
 
 if __name__ == "__main__":

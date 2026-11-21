@@ -149,7 +149,8 @@ right → +=). Repeat until straight.
 
 **Or by range, both at once**: robot square to a flat wall 30–60 cm ahead, `rng.sweep_deg` 90,
 `rng.steps` 19, wait 20 s, then on the Pi `python3 tools/range_align.py --seconds 15` →
-suggested `servo_trim_deg` and `servo_deg_per_cmd` (fit of the readings to a flat wall).
+suggested `servo_trim_deg` (fit of the readings to a flat wall). Its `servo_deg_per_cmd` is only rough:
+the sensor's ~25° cone flattens the curve, so measure the travel by eye (step 1).
 
 **3.** `rng.servo_hold_deg` −1, `rng.sweep_deg` 170, `rng.steps` 16, `cfg.save`.
 
