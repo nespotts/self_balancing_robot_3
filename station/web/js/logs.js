@@ -57,7 +57,7 @@ function updateLink() {
   if (s.log_error) kv("Session log", "OFF: " + s.log_error);
   kv("Frames / CRC errors", s.frames + " / " + s.crc_errors);
   if (state.tlm) kv("RC remote", state.tlm.radio_ok ? "connected (its ARMED switch rules)"
-    : s.remote_seen ? "LOST - failsafe" : "not in use (the station arms)");
+    : s.remote_seen ? "LOST - failsafe" : "off (the phone arms and drives)");
   if (state.robot) kv("Firmware", state.robot.firmware);
   kv("Clients", s.clients);
   kv("Session", s.session || "—");

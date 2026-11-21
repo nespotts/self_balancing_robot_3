@@ -6,11 +6,13 @@ flowchart LR
   L -- "Release E-stop<br>(confirm)" --> D["IDLE, disarmed"]
   D -- "remote: ARMED off, then on" --> M["pick a mode"]
   D -- "no remote: two-tap Arm<br>(arm request + SET_MODE)" --> M
+  M -- "Disarm (SET_MODE IDLE)<br>no latch" --> D
   M --> B["BALANCE"]
   B -- "tilt > bal.cutoff_deg" --> F["motors off<br>= a Fall, saved to Logs"]
 ```
 
 - **STOP latches.** Release E-stop first, then arm again.
+- **Disarm** (next to STOP, one tap) = `SET_MODE IDLE`: no latch. **No RC remote**: the robot disarms; arm again with the two-tap Arm. **RC remote present**: motors off (IDLE) only, the remote's ARMED switch still rules, so it stays armed until the switch goes off.
 - **Arming** needs the two-tap **Arm & Balance** (no remote) or the remote's ARMED switch. A plain mode request never arms.
 - **Falls** are recorded by themselves: [station tour](../station/README.md), [details](station-features.md).
 
@@ -37,4 +39,20 @@ flowchart LR
                                                                    └─ station SET_MODE ──> station in charge
 ```
 
+## Phone as the only controller
+
+The RC remote is optional. With none, the phone (this page / the Android app) is the supervisor. What stops the robot:
+
+| Event | What happens | Where |
+|---|---|---|
+| **STOP** | `EVT_LINK_ESTOP` + IDLE, latched until Release E-stop; the robot stays disarmed after it | bridge + firmware |
+| **Disarm** | `SET_MODE IDLE`, disarmed, not latched | firmware (`onPiSetMode`) |
+| App leaves the screen (Back, Home, lock, call) | `AppStop`: `cmd_vel 0`, plan stop, GOTO / EXPLORE -> BALANCE. Never E-stops or idles | app (`AppStop.java`) |
+| Tab closed / app killed | the socket closes: `cmd_vel 0` at once; client count drops to 0, GOTO / EXPLORE pause within 0.5 s (robot keeps balancing); a phone that connects again carries on | bridge heartbeat + firmware |
+| Wi-Fi lost, phone locked (socket stays open, silent) | the bridge pings every 2 s; a client that has not answered for **6 s** stops counting, so the count drops to 0 as above. Dropped for good after 45 s | bridge (`WS_LIVE_S`) |
+| Joystick / tilt released, or no `cmd_vel` for 300 ms | speed and turn ramp to 0, keeps balancing | bridge + firmware |
+| Robot link silent | Disarm / mode buttons answer "robot link down - not sent"; the firmware's own failsafes act | bridge |
+
+Tests: `station/bridge/tests/test_phone_remote.py` (Disarm with and without a remote, STOP latch / release, tab closed, silent phone),
+`test_phone_ui.py` (the Control screen), `test_app_stop.py`, `station/sim/tests/test_nav.py` (no clients -> no motion).
 Back: [firmware index](firmware.md).

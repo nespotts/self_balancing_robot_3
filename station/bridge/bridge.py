@@ -33,8 +33,10 @@ SENSOR_FWD_MM = 26.0     # range-sensor servo axis, forward of the axle (CAD)
 SENSOR_RADIUS_MM = 12.9  # each VL53L0X sits this far out from the servo axis, facing outwards (CAD)
 WS_SLOW_BYTES = 256 * 1024
 WS_DROP_BYTES = 4 * 1024 * 1024   # a client whose send buffer grows beyond this is not reading: drop it (#47)
-WS_PING_S = 15.0                  # ping idle clients; a client silent (no pong either) for WS_IDLE_S is dropped
-WS_IDLE_S = 45.0
+WS_PING_S = 2.0                   # ping idle clients (the browser answers by itself, even in a background tab)
+WS_LIVE_S = 6.0                   # a client silent (no frame, no pong) this long no longer counts as a supervisor: the robot
+                                  # pauses GOTO / EXPLORE (a phone that left the Wi-Fi leaves no FIN; its socket lingers)
+WS_IDLE_S = 45.0                  # ... and one silent this long is dropped
 LOG_RETRY_S = 30.0                # session log could not be opened: try again this often
 TICK_LATE_S = 0.2                 # warn in the log when the event loop was blocked this long (#45)
 TLM_HZ_GRACE_S = 10.0             # Tune closed this long ago -> put tlm.hz back (#46)
@@ -201,7 +203,8 @@ class Bridge:
 
     def client_count(self):
         now = _now()
-        return len(self.clients) + sum(1 for t in self.pollers.values() if now - t < POLLER_TIMEOUT_S)
+        live = sum(1 for c in self.clients if now - c.last_rx < WS_LIVE_S)
+        return live + sum(1 for t in self.pollers.values() if now - t < POLLER_TIMEOUT_S)
 
     # ------------------------------------------------------------------ link
     def release_file_active(self):

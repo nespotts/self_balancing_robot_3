@@ -297,9 +297,9 @@ def evaluate(c):
         # ---- radio
         rd = c.get("radio")
         if not c.get("remote_seen"):
-            tiles["radio"] = _tile("radio", "Radio", NA, "no remote", "no RC remote in use: the station arms the robot")
+            tiles["radio"] = _tile("radio", "RC remote", NA, "off", "no RC remote in use: the phone arms and drives the robot")
         elif not t.get("radio_ok"):
-            tiles["radio"] = _tile("radio", "Radio", BAD, "LOST", "remote silent: failsafe (%d so far)" % c.get("failsafes", 0))
+            tiles["radio"] = _tile("radio", "RC remote", BAD, "LOST", "remote silent: failsafe (%d so far)" % c.get("failsafes", 0))
         else:
             parts = []
             lvl, val = OK, "ok"
@@ -314,7 +314,7 @@ def evaluate(c):
                     lvl = WARN
             if c.get("failsafes"):
                 parts.append("%d failsafes this session" % c["failsafes"])
-            tiles["radio"] = _tile("radio", "Radio", lvl, val, ", ".join(parts) or "remote present")
+            tiles["radio"] = _tile("radio", "RC remote", lvl, val, ", ".join(parts) or "remote present")
         # ---- firmware
         hello = c.get("hello") or {}
         if hello:
@@ -327,7 +327,7 @@ def evaluate(c):
             tiles["fw"] = na("fw", "Firmware", "no HELLO yet")
     else:
         for id, lab in (("loop", "Loop"), ("imu", "IMU"), ("encl", "Enc L"), ("encr", "Enc R"), ("rngf", "Range F"),
-                        ("rngr", "Range R"), ("radio", "Radio"), ("fw", "Firmware")):
+                        ("rngr", "Range R"), ("radio", "RC remote"), ("fw", "Firmware")):
             tiles[id] = na(id, lab)
 
     # ---- E-stop
@@ -415,8 +415,8 @@ def evaluate(c):
                     "RC remote answering" if t.get("radio_ok") else "RC remote lost: failsafe")
         else:
             n = c.get("clients", 0)
-            add_pre("ctl", "Remote or station", OK if n else WARN,
-                    "the station (this page) is in charge" if n else "no remote and no station client")
+            add_pre("ctl", "Remote or phone", OK if n else WARN,
+                    "no RC remote: the phone (this page) is in charge" if n else "no RC remote and no phone / browser connected")
         if float(p.get("rng.enable", 0.0)) >= 0.5:
             add_pre("rng", "Range sensors", worst([tiles["rngf"]["level"], tiles["rngr"]["level"]]),
                     "both sensors reading" if worst([tiles["rngf"]["level"], tiles["rngr"]["level"]]) == OK else

@@ -35,11 +35,11 @@ Signing key: `%USERPROFILE%\.android\sbr3-station.jks` (made on the first build,
 
 The Pi serves the web UI (`station/web`), including Tilt / Pad.
 
-## Drive
+## Control
 
 | | |
 |---|---|
-| **Tilt** | Drive tab → **Tilt**. Press and **hold the pad**, tilt the phone: forward / back = speed, left / right = turn. Zeroed where you pressed. |
+| **Tilt** | Control tab → **Tilt**. Press and **hold the pad**, tilt the phone: forward / back = speed, left / right = turn. Zeroed where you pressed. |
 | **Gamepad** | Pair it in Android Bluetooth settings. Left stick drives (STATION). **B = STOP**, X = IDLE, Y = BALANCE (twice to arm), A = STATION, L1 / R1 = speed |
 | **Speed** | Slow / Med / Fast also limit tilt and gamepad |
 | **⋯ menu** | Screen: Auto / Landscape / Portrait · Find another robot |

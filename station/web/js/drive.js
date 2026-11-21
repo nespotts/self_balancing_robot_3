@@ -3,10 +3,13 @@ import { state, on, send, modeName, robotAlive, flag, tlmFresh, STALE_MS } from 
 import { el, toast } from "./ui.js";
 
 const MODE_HELP = {
-  IDLE: "Motors off - safe to pick up", BALANCE: "Balance in place", MANUAL: "Drive with the RC remote",
-  STATION: "Drive from this screen", GOTO: "Follow the waypoints", EXPLORE: "Wander and map", HOLD: "Hold position",
+  IDLE: "Motors off - safe to pick up", BALANCE: "Balance in place", MANUAL: "Drive with the RC remote (only with a remote)",
+  STATION: "Manual: drive with the joystick / tilt", GOTO: "Follow the waypoints", EXPLORE: "Wander and map", HOLD: "Hold position",
 };
-const EVENT_LABEL = { MARK_WAYPOINT: "Mark waypoint here", CLEAR_WAYPOINTS: "Clear waypoints", GO_HOME: "Go home",
+// Controller mode buttons: friendly names. IDLE is the Disarm button (top bar); MANUAL (the RC remote's sticks) shows only with a remote.
+const MODE_LABEL = { BALANCE: "Balance", HOLD: "Hold", STATION: "Manual", GOTO: "Go to", EXPLORE: "Explore", MANUAL: "RC drive", IDLE: "Idle" };
+const MODE_ORDER = ["BALANCE", "HOLD", "STATION", "GOTO", "EXPLORE", "MANUAL", "IDLE"];
+const EVENT_LABEL =  { MARK_WAYPOINT: "Mark waypoint here", CLEAR_WAYPOINTS: "Clear waypoints", GO_HOME: "Go home",
   RESET_POSE: "Reset pose to 0,0", START_SCAN: "Stop and scan" };
 
 const modesEl = document.getElementById("modes");
@@ -28,7 +31,7 @@ const TWO_TAP = new Set(["GOTO", "EXPLORE"]);
 let tapBtn = null, tapTimer = 0;
 function tapReset() {
   clearTimeout(tapTimer);
-  if (tapBtn) { tapBtn.classList.remove("confirm"); tapBtn.textContent = tapBtn.dataset.name; }
+  if (tapBtn) { tapBtn.classList.remove("confirm"); tapBtn.textContent = tapBtn.dataset.label; }
   tapBtn = null;
 }
 function modeTap(btn, name, i) {
@@ -47,12 +50,15 @@ function modeTap(btn, name, i) {
 function buildModes() {
   modesEl.innerHTML = "";
   tapReset();
-  (state.hello?.modes || []).forEach((name, i) => {
-    const b = el("button", { class: name === "IDLE" ? "idle" : "", "data-mode": i, "data-name": name,
-      title: MODE_HELP[name] || "" }, name);
+  const names = state.hello?.modes || [];
+  [...names.keys()].sort((a, b) => MODE_ORDER.indexOf(names[a]) - MODE_ORDER.indexOf(names[b])).forEach((i) => {
+    const name = names[i], label = MODE_LABEL[name] || name;
+    const b = el("button", { class: name === "IDLE" ? "idle" : "", "data-mode": i, "data-name": name, "data-label": label,
+      title: MODE_HELP[name] || "" }, label);
     b.onclick = () => modeTap(b, name, i);
     modesEl.append(b);
   });
+  updateModeVisibility();
   const menu = document.getElementById("drive-menu");
   menu.innerHTML = "";
   (state.hello?.events || []).forEach((name, i) => {
@@ -74,7 +80,7 @@ export function disarmedNoRemote() { return robotAlive() && !flag("armed") && !r
 
 // ---------- arming: an explicit two-tap step ----------
 const armBox = document.getElementById("arm-box"), armBtn = document.getElementById("arm-btn");
-const armHint = document.getElementById("arm-hint");
+const armHint = document.getElementById("arm-hint"), whoEl = document.getElementById("ctl-who");
 let armTimer = 0;
 function armReset() { clearTimeout(armTimer); armBtn.classList.remove("confirm"); armBtn.textContent = "Arm & Balance"; }
 armBtn.onclick = () => {
@@ -89,6 +95,22 @@ armBtn.onclick = () => {
   toast("Arming - stand the robot up");
 };
 
+// Who is in charge: with an RC remote present its ARMED switch rules (the phone can still pick modes);
+// without one the phone is the only controller and arms / disarms by itself.
+function updateWho() {
+  const alive = robotAlive();
+  whoEl.hidden = !alive;
+  if (!alive) return;
+  const rc = remotePresent();
+  whoEl.className = "ctl-who " + (rc ? "rc" : "phone");
+  whoEl.textContent = rc ? "Controlled by: RC remote (its switch arms)" : "Controlled by: this phone";
+}
+// IDLE is the Disarm button; the RC remote's own drive mode only exists with a remote
+function updateModeVisibility() {
+  const rc = remotePresent();
+  for (const b of modesEl.children) b.hidden = b.dataset.name === "IDLE" || (b.dataset.name === "MANUAL" && !rc);
+}
+
 function updateArm() {
   const alive = robotAlive(), armed = flag("armed");
   const needArm = alive && !armed && !remotePresent();
@@ -98,6 +120,8 @@ function updateArm() {
     "Arm with the RC remote's switch.";
   if (!needArm) armReset();
   modesEl.hidden = needArm;   // mode buttons don't arm: show them once armed
+  updateWho();
+  updateModeVisibility();
 }
 
 function updateLock() {
@@ -105,7 +129,7 @@ function updateLock() {
   if (!state.connected) txt = "Not connected to the bridge";
   else if (!robotAlive()) txt = "Robot not responding";
   else if (disarmedNoRemote()) txt = "Arm the robot first";
-  else if (!isStation()) txt = "Joystick drives in STATION mode";
+  else if (!isStation()) txt = "Joystick drives in Manual mode";
   lock.hidden = !txt;
   joy.classList.toggle("locked", !!txt);
   lockText.textContent = txt;
@@ -172,7 +196,7 @@ window.addEventListener("keydown", (e) => {
   const k = KEYMAP[e.code];
   if (!k) return;
   e.preventDefault();
-  if (!isStation()) { if (!warned) { toast("Switch to STATION to drive with the keys"); warned = true; } return; }
+  if (!isStation()) { if (!warned) { toast("Switch to Manual to drive with the keys"); warned = true; } return; }
   if (!keys.has(k)) { keys.add(k); pump(true); }
 });
 window.addEventListener("keyup", (e) => { const k = KEYMAP[e.code]; if (k && keys.delete(k)) pump(true); });
