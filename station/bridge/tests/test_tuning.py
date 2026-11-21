@@ -178,12 +178,15 @@ class TestMotorFit(unittest.TestCase):
         self.assertEqual((P["mot.left_scale"], P["mot.right_scale"]), (1.0, 0.856))
         self.assertEqual((P["mot.model"], P["mot.vcomp"], P["mot.v_ref"]), (1.0, 1.0, 12.0))
         self.assertNotIn("mot.drive_mode", P)
+        self.assertAlmostEqual(P["mot.bk_l_fwd"], 6.81, delta=0.01)   # stiction kick = the start volts (#69)
+        self.assertTrue(all(P["mot.bk_%s" % k] >= P["mot.dz_%s" % k] for k in ("l_fwd", "l_rev", "r_fwd", "r_rev")))
         self.assertEqual((round(P["mot.k_l"]), round(P["mot.k_r"])), (166, 204))     # mm/s per V (speed loop)
         self.assertAlmostEqual(R["proposal"]["gain_ratio"], 1.76, delta=0.01)   # (1.18 before the zero-speed steps left the curve)
         self.assertEqual(len(R["b"]["points"]["left_fwd"]), 16)
         json.dumps(out)                                       # goes to the browser as is
         text = "\n".join(mf.report(R))
         self.assertIn("mot.dz_l_fwd = 5.70 V", text)
+        self.assertIn("mot.bk_l_fwd = 6.81 V", text)
         self.assertIn("left is -18.4%", text)
         self.assertIn("mot.right_scale=0.856", text)
 

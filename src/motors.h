@@ -3,6 +3,8 @@
 //   0  v3 dead-zone linearisation curve (mot.curve_exp / mot.knee_in / mot.knee_out), default
 //   1  volts model: u = cmd/4095 -> V = dz + (v_ref - dz) * |u|, dz per wheel and direction
 //      (mot.dz_l_fwd ...), straight taper 0 -> dz inside |u| < mot.dz_band; duty = V / v_ref
+//      + stiction kick (issue #69, StictionKick): a stopped wheel gets its breakaway volts (mot.bk_*,
+//      scaled by mot.bk_gain, 0 = off) for <= mot.bk_ms or until it turns, then fades back to the model
 // mot.vcomp 1: duty *= v_ref / v_batt (filtered pack voltage, capped at 1.3x; 1 if the reading is bad),
 // so the same u gives the same motor voltage at any charge. Works with both models.
 // mot.speed_loop 1 (issue #26, experimental, default 0): the command is a wheel speed instead,
@@ -37,8 +39,9 @@
 
 class Motor {
  public:
-  Motor(uint8_t en, uint8_t d1, uint8_t d2, uint16_t dz_fwd, uint16_t dz_rev, uint16_t k, uint16_t dir)
-      : pin_{en, d1, d2}, dz_fwd_(dz_fwd), dz_rev_(dz_rev), k_(k), dir_(dir) {}
+  Motor(uint8_t en, uint8_t d1, uint8_t d2, uint16_t dz_fwd, uint16_t dz_rev, uint16_t k, uint16_t dir,
+        uint16_t bk_fwd, uint16_t bk_rev)
+      : pin_{en, d1, d2}, dz_fwd_(dz_fwd), dz_rev_(dz_rev), k_(k), dir_(dir), bk_fwd_(bk_fwd), bk_rev_(bk_rev) {}
   void begin();
   void set(float cmd);       // -4095..4095, + = forward, through the correction (or the speed loop)
   void setRaw(float duty);   // -4095..4095 raw duty, no correction (motor test)
@@ -48,6 +51,7 @@ class Motor {
   const uint8_t* pins() const { return pin_; }
   void feedback(int32_t counts, uint32_t t_us);  // encoder read (speed loop)
   float loopTarget() const { return sl_target_; }
+  uint8_t kickState() const { return kick_.state(); }  // StictionKick IDLE / KICK / FADE
 
  private:
   enum : uint8_t { EN = 0, D1 = 1, D2 = 2 };
@@ -55,14 +59,17 @@ class Motor {
   void level(uint8_t i, bool high);  // pin i as GPIO at this level (leaves PWM cleanly)
   void pwm(uint8_t i, int duty);     // pin i as PWM with this duty
   bool speedLoop(float cmd, float& duty);
+  bool feedbackFresh(uint32_t now_us) const;
   uint8_t pin_[3];
   bool is_pwm_[3] = {false, false, false};
   uint16_t dz_fwd_, dz_rev_, k_;  // ParamIds of this wheel's dead zones (V) and speed gain (mm/s/V)
   uint16_t dir_;                  // ParamId of this wheel's wiring direction (+1 normal, -1 swapped wires)
+  uint16_t bk_fwd_, bk_rev_;      // ParamIds of this wheel's breakaway volts (stiction kick)
   float cmd_ = 0;
   bool off_ = true;
   WheelSpeedEst est_;
   WheelSpeedLoop loop_;
+  StictionKick kick_;
   uint32_t loop_us_ = 0;
   bool loop_run_ = false;
   float sl_target_ = 0;

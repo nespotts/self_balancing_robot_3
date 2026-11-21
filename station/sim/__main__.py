@@ -44,12 +44,17 @@ def main(argv=None):
                     help="demo: knock the robot over every SECONDS while it balances (fills the Falls list)")
     ap.add_argument("--drift", type=float, default=0.0, metavar="DEG_PER_MIN",
                     help="odometry drift: heading gains this many deg/min and distances read 2 %% long")
+    ap.add_argument("--stiction", action="store_true",
+                    help="balance on TT motors with static friction through the firmware motor layer (issue #69: "
+                         "set mot.model 1 to see the stick-slip rock, mot.bk_gain 0 / 1 to compare)")
     a = ap.parse_args(argv)
     host, _, port = a.listen.rpartition(":")
     remote = a.remote or a.remote_disarmed
     robot = DriftRobot(remote=remote, remote_armed=not a.remote_disarmed, seed=a.seed, head_error_deg=a.head_error,
                        drift_deg_min=a.drift, drift_scale=0.02 if a.drift else 0.0)
     robot.bench = a.bench
+    if a.stiction:
+        robot.use_floor_wheels()
     if a.drain is not None:
         robot.drain = a.drain / 60.0
     server = SimServer(robot, host or "127.0.0.1", int(port), a.garbage)

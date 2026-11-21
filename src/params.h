@@ -117,7 +117,16 @@
   X(NAV_SIDE_KP,     "nav.side_kp",        0.5f,      0.0f,    5.0f)     \
   X(NAV_STUCK_MS,    "nav.stuck_ms",       2500.0f,   0.0f,    20000.0f) \
   X(NAV_STUCK_MM,    "nav.stuck_mm",       40.0f,     5.0f,    500.0f)   \
-  X(NAV_STUCK_BACK,  "nav.stuck_backoff_mm", 100.0f,  0.0f,    500.0f)
+  X(NAV_STUCK_BACK,  "nav.stuck_backoff_mm", 100.0f,  0.0f,    500.0f)   \
+  /* issue #69: stiction kick (mot.model 1): breakaway volts for a stopped wheel (motor test "start") */ \
+  X(MOT_BK_L_FWD,    "mot.bk_l_fwd",       2.46f,     0.0f,    8.0f)     \
+  X(MOT_BK_L_REV,    "mot.bk_l_rev",       2.11f,     0.0f,    8.0f)     \
+  X(MOT_BK_R_FWD,    "mot.bk_r_fwd",       2.73f,     0.0f,    8.0f)     \
+  X(MOT_BK_R_REV,    "mot.bk_r_rev",       2.49f,     0.0f,    8.0f)     \
+  X(MOT_BK_GAIN,     "mot.bk_gain",        1.0f,      0.0f,    1.5f)     \
+  X(MOT_BK_MS,       "mot.bk_ms",          80.0f,     0.0f,    300.0f)   \
+  X(MOT_BK_BAND,     "mot.bk_band",        0.03f,     0.0f,    0.3f)     \
+  X(MOT_BK_MMS,      "mot.bk_mms",         15.0f,     1.0f,    200.0f)
 
 enum ParamId : uint16_t {
 #define PARAM_ENUM(id, name, def, mn, mx) P_##id,
