@@ -25,6 +25,7 @@ RANGE_ON_CONNECT = 2500
 TILT_DEG = 10.0          # range points taken while pitched more than this are flagged
                          # (IMU pitch, which reads about -3 deg when balanced)
 SENSOR_FWD_MM = 26.0     # range-sensor servo axis, forward of the axle (CAD)
+SENSOR_RADIUS_MM = 12.9  # each VL53L0X sits this far out from the servo axis, facing outwards (CAD)
 WS_SLOW_BYTES = 256 * 1024
 POLLER_TIMEOUT_S = 3.0
 # Flashing: while this file exists the bridge lets go of the serial port (checked 4x a second).
@@ -299,7 +300,7 @@ class Bridge:
         ox = d["x_mm"] + SENSOR_FWD_MM * math.cos(h)    # sensor position (servo axis)
         oy = d["y_mm"] + SENSOR_FWD_MM * math.sin(h)
         a = h + math.radians(d["sensor_angle_deg"])
-        rr = r if (d["valid"] and r < 8000) else 2000
+        rr = (r if (d["valid"] and r < 8000) else 2000) + SENSOR_RADIUS_MM
         hx = ox + rr * math.cos(a)
         hy = oy + rr * math.sin(a)
         tilt = 1 if abs(d["pitch_deg"]) > TILT_DEG else 0

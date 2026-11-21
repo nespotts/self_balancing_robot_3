@@ -13,7 +13,7 @@
    └──────────────────────────────    failsafe)         └── params (EEPROM)
 ```
 
-`loop()`: new IMU sample → balance step → encoders (if due).
+`loop()`: new IMU sample → balance step → encoders (if due) → range sweep slice (≤ ¼ step).
 No sample → radio, Pi link, telemetry, battery, button. Nothing blocks the balance step.
 
 ## Rates
@@ -78,9 +78,21 @@ Gains are br3ttb units: ki per second, kd seconds.
 | ctl.settle_ms | 500 | |
 | batt.low_cell / adc_per_v | 3.4 V / 73.3 | |
 | tlm.hz | 100 | |
-| rng.enable | 0 | 1 = VL53L0X + servo at boot (set, `cfg.save`, reboot) |
+| rng.enable | 0 | 1 = range sweep on (starts at boot, or live when motors are off); 0 = off, servo limp |
 | cfg.save | — | set 1 → write EEPROM (when motors off) |
 | cfg.defaults | — | set 1 → defaults (not saved) |
+| rng.servo_trim_deg | 0 | ± added to every servo command: **horn fix** (see Range sweep) |
+| rng.sweep_deg | 180 | head travel; 180 + two sensors = full 360° |
+| rng.steps | 16 | positions per pass (180/16 = 11.25° apart) |
+| rng.settle_ms | 40 | servo wait per step (bigger moves wait in proportion) |
+| rng.timing_budget_ms | 33 | per reading (20–200, longer = steadier) ¹ |
+| rng.long_range | 1 | 1 = long-range mode (to ~2 m) ¹ |
+| rng.max_mm | 2000 | farther → `valid` 0 |
+| rng.servo_hold_deg | −1 | −1 = sweep; 0–180 = park the servo there (90 = centre) |
+| rng.obstacle_mm | 300 | TLM_OBSTACLE when front < this while driving forward (0 = off) |
+| rng.servo_dir | 1 | −1 if the scan comes out mirrored |
+
+¹ applied between readings, only while the motors are off. Everything else applies at once.
 
 EEPROM block has a name-layout CRC + value CRC; any mismatch → defaults (boot log says so).
 
@@ -94,6 +106,40 @@ EEPROM block has a name-layout CRC + value CRC; any mismatch → defaults (boot 
 | `sh2_getProdIds` has no timeout | not used |
 
 Boot: ~1 s until samples. Status line in the log 3 s after boot and on IMU health change.
+
+## Range sweep (issue #7)
+
+```
+            +X = forward (pitch + = leaning this way, wheels roll this way at + speed)
+                 ^  sensor 0 at head angle 0
+                 |
+      +90 (left) |  head angle + = CCW (seen from above)
+           <-----O----->  -90 (right)        O = servo axis, 26 mm ahead of the axle
+                 |                             sensors 12.9 mm from it, 189 mm above the axle
+                 v  sensor 1 = head angle + 180
+```
+
+| | |
+|---|---|
+| Servo command | `90 + rng.servo_dir × head_angle + rng.servo_trim_deg` (0–180) |
+| Sweep | head −90 … +78.75 and back (16 steps); sensor 1 covers the other half → 32 points / 360° |
+| Hold | `rng.servo_hold_deg` = servo angle; head angle = `servo_dir × (hold − 90)`; trim still added |
+| RangeFrame | every reading: pose + pitch when it finished, `sensor_angle_deg` = head angle (+180 for sensor 1), `valid` 0 = no target / > `rng.max_mm` / timeout |
+| Radio telemetry | `range_front_mm` / `range_rear_mm` = latest reading within half a step of 0° / 180° (0 = none for 2 s) |
+| Rate | ~80 ms per position (settle 40 + budget 33 + I2C) → ~25 readings/s, 360° every ~1.3 s |
+
+Never blocks the balance loop: after each balance step it spends at most a quarter of the step
+period on I2C (single-shot ranging with raw register writes, ready from the INT pins, fallback polling).
+The status line `rng: … readings/s … max slice … us` comes 5 s after start, then every 30 s.
+
+### Fixing the head zero (trim)
+
+1. Robot upright on its stand, motors off. Set `rng.servo_hold_deg` = 90 (centre).
+2. Look from above: sensor 0 (the one on XSHUT 34) must point straight ahead, along the wheels' rolling direction.
+3. If it points X° to the left (CCW), set `rng.servo_trim_deg` = −X (with `servo_dir` 1); X° right → +X.
+   Repeat until straight, then check `hold` 0 and 180: the sensors should point straight sideways.
+4. If hold 180 turns the head to the **right** of the robot, the servo turns the other way: set `rng.servo_dir` = −1 (and flip the trim sign).
+5. `rng.servo_hold_deg` = −1 (sweep), `cfg.save`.
 
 ## Error codes (telemetry `error_code`)
 
