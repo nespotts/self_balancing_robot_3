@@ -45,12 +45,7 @@ class TestBridgeWithSim(unittest.TestCase):
         b = Bridge("tcp://127.0.0.1:%d" % sim_port, WEB, self.tmp, "127.0.0.1", 0,
                    release_file=os.path.join(self.tmp, "release"), quiet=True,
                    preset_dir=os.path.join(self.tmp, "presets"))
-        from station.bridge.httpws import HttpServer
-        routes = [("GET", "/api/state", b.api_state), ("*", "/api/cmd", b.api_cmd),
-                  ("GET", "/api/logs", b.api_logs), ("*", "/api/logs/", b.api_logs),
-                  ("*", "/api/serial", b.api_serial)]
-        http = HttpServer(WEB, routes, "/ws", b.ws_handler)
-        hs = await http.start("127.0.0.1", 0)
+        hs = await b.build_http().start("127.0.0.1", 0)    # the real server, with the Origin / Host checks
         port = hs.sockets[0].getsockname()[1]
         tasks = [asyncio.ensure_future(b.link_task()), asyncio.ensure_future(b.tick_task())]
         loop = asyncio.get_running_loop()

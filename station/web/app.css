@@ -137,10 +137,18 @@ body[data-view="tune"] #view-tune, body[data-view="logs"] #view-logs, body[data-
 #view-drive { padding: 12px; }
 body[data-view="drive"] #view-drive { display: flex; flex-direction: column; gap: 12px; }
 .joy-wrap { flex: 1; justify-content: center; }
-.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.tiles { position: relative; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .tile { background: var(--surface-2); border-radius: 10px; padding: 8px 6px; text-align: center; }
 .tile b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
 .tile span { font-size: 11px; color: var(--muted); }
+/* stale data (no telemetry for ~1 s): grey numbers + a "no data" badge (drive tiles, sensor cards) */
+.nodata { display: none; padding: 2px 9px; border-radius: 10px; font-size: 12px; font-weight: 700; background: #4a3000;
+  border: 1px solid #8a5a00; color: #ffd27a; }
+.tiles .nodata { position: absolute; z-index: 1; top: -9px; left: 50%; transform: translateX(-50%); }
+.tiles.stale .nodata, .sens-card.stale .nodata { display: inline-block; }
+.tiles.stale .tile b { color: var(--muted); opacity: .6; }
+.modes button:disabled { opacity: .4; }
+.modes button.confirm { background: #8a5a00; border-color: #ffb020; color: #fff; animation: pulse 1s ease-in-out infinite; }
 .arm-box { display: flex; flex-direction: column; gap: 6px; }
 .arm-box p { margin: 0; font-size: 13px; text-align: center; }
 button.arm { width: 100%; padding: 16px; font-size: 17px; font-weight: 700; background: #1d3550; border-color: var(--blue); color: #fff; }
@@ -241,7 +249,8 @@ body[data-view="plots"] #view-plots { display: flex; flex-direction: column; gap
 .sc-ok::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; background: var(--muted); }
 .sc-ok.good::before { background: var(--good); }
 .sc-ok.bad::before { background: var(--warn); }
-.sens-card.stale .sc-range b { color: var(--muted); }
+.sens-card.stale .sc-range b { color: var(--muted); opacity: .6; }
+.sens-card .nodata { margin-left: auto; }
 .sp-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .sp-bar h3 { margin: 0; flex: 1; }
 .sp-scale button { padding: 5px 10px; font-size: 13px; }
