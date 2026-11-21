@@ -283,14 +283,13 @@ class CostMap:
                 if k < 0 or k >= n or abs(k % w - ix) > 1:
                     continue
                 c = cost[k]
-                if state[k] != 1:
-                    continue
-                if c >= MARGIN:
+                if state[k] != 1 or c >= MARGIN:
+                    # near the start the robot's own footprint is unseen / inflated: let it out
                     kx, ky = k % w, k // w
                     d2 = (kx - sx) ** 2 + (ky - sy) ** 2
-                    if d2 > esc or (c == BLOCKED and d2 > 4):
+                    if state[k] == 2 or d2 > esc or (c == BLOCKED and d2 > 4):
                         continue
-                    c = 60
+                    c = max(c, 60) if c >= MARGIN else c
                 nd = d + step * (1.0 + c / 10.0)
                 if nd < dist.get(k, 1e18):
                     dist[k] = nd
@@ -356,6 +355,8 @@ class Planner:
         self.goal = None              # explore: current frontier goal
         self.map_changed = False
         self.status = ""
+        self.gen = 0                  # bumps with every user command (drops stale job results)
+        self.pending = None
 
     # ---------------------------------------------------------- frames
     def robot_map_pose(self):
@@ -426,14 +427,16 @@ class Planner:
             self.mode, self.goals, self.blacklist = "goto", goals[:20], []
             self.started_at = self.clock()
             self.blocked_plans = 0
-            self._start_job(self._plan_goto, go=True)
+            self._start_job(self._plan_goto, go=True, force=True)
             return None
         if act == "explore":
             self.mode, self.goals, self.blacklist, self.goal = "explore", [], [], None
             self.started_at = self.clock()
             self.blocked_plans = 0
             self._set_status("exploring")
-            self._start_job(self._plan_explore, go=True)
+            if self.b.tlm["mode"] != lp.MODE_EXPLORE:     # arm now (no remote): the sweep runs while armed
+                self.b.handle_command({"t": "set_mode", "mode": lp.MODE_EXPLORE}, "planner")
+            self._start_job(self._plan_explore, go=True, force=True)
             return None
         return {"t": "error", "text": "unknown plan action %r" % act}
 
@@ -442,6 +445,8 @@ class Planner:
         if self.mode == "idle" and not self.path:
             return
         was = self.mode
+        self.gen += 1
+        self.pending = None
         self.mode, self.path, self.goals, self.goal = "idle", [], [], None
         if was != "idle" and why:
             self._set_status(why)
@@ -454,12 +459,19 @@ class Planner:
             self.stop("manual waypoints from %s" % who)
 
     # ---------------------------------------------------------- jobs (worker thread)
-    def _start_job(self, fn, go=False, check=False):
+    def _start_job(self, fn, go=False, check=False, force=False):
+        """Run fn(pose) in the worker; force (a user command): bump the generation so results of
+        older jobs are dropped, and queue it if a job is still running."""
+        if force:
+            self.gen += 1
         if self.job and not self.job.done():
+            if force:
+                self.pending = (fn, go)
             return False
         pose = self.robot_map_pose()
         if pose is None:
             return False
+        gen = self.gen
         if not check:
             self.last_plan = self.clock()
         if self.sync:
@@ -468,14 +480,23 @@ class Planner:
                 fut.set_result(fn(pose))
             except Exception as e:
                 fut.set_exception(e)
-            self._job_done(fut, go)
+            self._job_done(fut, go, gen)
             return True
         loop = asyncio.get_running_loop()
         self.job = loop.run_in_executor(None, fn, pose)
-        self.job.add_done_callback(lambda fut: self._job_done(fut, go))
+        self.job.add_done_callback(lambda fut: self._job_done(fut, go, gen))
         return True
 
-    def _job_done(self, fut, go):
+    def _job_done(self, fut, go, gen):
+        if self.pending:
+            fn, pgo = self.pending
+            self.pending = None
+            self.job = None
+            if self.mode != "idle":
+                self._start_job(fn, pgo)
+            return
+        if gen != self.gen:
+            return                    # a newer command came in meanwhile
         try:
             res = fut.result()
         except Exception as e:      # a planner bug must never take the bridge down
@@ -492,6 +513,9 @@ class Planner:
             self._set_status(status, log=False)
         elif kind == "ok":
             pass
+        elif kind == "wait":
+            self.path = []
+            self._set_status(res[1], log=False)
         elif kind == "blacklist":     # explore: that frontier is unreachable / done; try again soon
             self.blacklist.append(res[1])
             self.last_plan = 0.0
@@ -530,6 +554,8 @@ class Planner:
         cm = self.costmap()
         fr = cm.frontiers(pose[:2], self.settings["frontier_min_mm"], self.blacklist)
         if not fr:
+            if self.clock() - self.started_at < 8.0:
+                return ("wait", "exploring: looking around")
             return ("done", "explore done: no reachable frontier left")
         dist, goal, path, size = fr[0]
         if dist < 120 or len(path) < 2:
@@ -618,6 +644,7 @@ class Planner:
                     self.blocked_plans = 0
                 self._start_job(self._plan_goto if self.mode == "goto" else self._plan_explore, go=True)
                 return
-        if now - self.last_check > 1.5 and now - self.last_plan > 1.5 and state != "blocked":
+        # ~100-250 ms of a Pi core per check (worker thread): every 2.5 s while driving
+        if now - self.last_check > 2.5 and now - self.last_plan > 1.5 and state != "blocked":
             self.last_check = now
             self._start_job(self._check, go=True, check=True)

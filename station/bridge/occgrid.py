@@ -181,8 +181,8 @@ class Grid:
     def wedge_spans(self, ox, oy, a, half, r):
         """Cells of the triangle origin -> (r, a - half) -> (r, a + half) (world mm / rad) as row spans
         [(start, stop), ...] of flat indices, clipped to the grid. A cell is in when the horizontal
-        line through its row's centre crosses it inside the triangle; every row the triangle covers
-        gets at least the cell(s) under that line, so the apex (the sensor) is always included."""
+        line through its row's centre crosses it inside the triangle (the thin tip at the sensor may be
+        skipped: it is the robot's own spot)."""
         res, W, H = self.res, self.W, self.H
         p = [((ox - self.x0) / res, (oy - self.y0) / res)]
         for s in (-half, half):

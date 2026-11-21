@@ -11,9 +11,10 @@ Sensor model (see station/README.md "Map"):
 - "no target" readings (valid = 0) are ignored unless no_target_mm > 0 (then a half-strength
   free wedge out to that distance: VL53L0X "no target" also happens on dark / shiny / angled surfaces);
 - readings taken while |pitch - typical pitch| > pitch_limit_deg are dropped (the beam would hit
-  the floor or go over obstacles); typical pitch = slow average, so the IMU mount offset does not matter.
+  the floor or go over obstacles); typical pitch = median of the last ~2 s, so the IMU mount offset does not matter.
 - optional pose correction (setting "correct"): see scanmatch.py.
 """
+import collections
 import json
 import math
 import os
@@ -55,6 +56,7 @@ class Mapper:
         self._load_settings()
         self.name = None                 # map last saved / loaded
         self.pitch_ref = None
+        self.pitches = collections.deque(maxlen=51)
         self.corr = [0.0, 0.0, 0.0]      # map pose = corr o odometry pose: [dx mm, dy mm, dtheta deg]
         self.matcher = scanmatch.Matcher(self)
         self.n = {"readings": 0, "used": 0, "tilt": 0, "no_target": 0, "short": 0}
@@ -127,10 +129,11 @@ class Mapper:
         if not math.isfinite(p) or abs(p) > PITCH_ABS_MAX:
             self.n["tilt"] += 1
             return
-        if self.pitch_ref is None:
-            self.pitch_ref = p
+        self.pitches.append(p)                    # typical pitch = median of the last ~2 s
+        if len(self.pitches) >= 5:
+            self.pitch_ref = sorted(self.pitches)[len(self.pitches) // 2]
         else:
-            self.pitch_ref += 0.01 * (p - self.pitch_ref)     # ~4 s at 25 readings/s
+            self.pitch_ref = p
         if abs(p - self.pitch_ref) > S["pitch_limit_deg"]:
             self.n["tilt"] += 1
             return

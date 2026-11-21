@@ -497,7 +497,8 @@ class Bridge:
             if m.get("go"):
                 self.send(lp.encode_set_mode(lp.MODE_GOTO))
                 self.estop = False
-            self.say("%s: %d waypoint(s)%s" % (who, len(pts), " -> GOTO" if m.get("go") else ""))
+            if who != "planner":                       # (the planner re-sends routes often)
+                self.say("%s: %d waypoint(s)%s" % (who, len(pts), " -> GOTO" if m.get("go") else ""))
         elif t == "event":
             ev = int(_num(m.get("event"), -1))
             if not 0 < ev < lp.EVT_COUNT:

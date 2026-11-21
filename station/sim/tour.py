@@ -194,12 +194,7 @@ def plan_offline(robot, mapper, command, max_s=300.0, on_step=None):
         robot.step()
     pump()
     b.update()
-    for _ in range(int(2.0 / 0.1)):     # one look around before planning
-        for _ in range(40):
-            robot.step()
-        pump()
-        mapper.poll(robot.t)
-    b.update()
+
     err = b.planner.command(command, "test")
     if err:
         raise RuntimeError(err)

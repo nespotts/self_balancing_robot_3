@@ -112,6 +112,16 @@ body[data-view="tune"] #view-tune, body[data-view="logs"] #view-logs, body[data-
 .menu label { display: flex; gap: 10px; align-items: center; padding: 8px 6px; }
 .menu input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--blue); }
 .menu button { text-align: left; }
+#map-menu { max-height: calc(100% - 20px); overflow-y: auto; }
+.menu .occ-row input[type=range] { flex: 1; min-width: 80px; accent-color: var(--blue); height: 24px; }
+.map-list { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 6px 12px; border-left: 2px solid var(--line); margin-left: 6px; }
+.map-list button { display: flex; justify-content: space-between; gap: 12px; }
+.map-list small { color: var(--muted); font-weight: 400; }
+.map-set summary { cursor: pointer; padding: 8px 6px; color: var(--text-2); }
+.map-set label.num { justify-content: space-between; font-size: 14px; }
+.map-set input[type=number] { width: 72px; font: inherit; background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; margin-left: auto; }
+.map-set p { margin: 4px 6px; font-size: 12px; }
+#wp-explore.on { color: #ffb4a8; border-color: #ffb4a8; }
 .map-info { position: absolute; left: 10px; top: 10px; font-size: 13px; color: var(--text-2); background: rgba(26, 26, 25, .85);
   border-radius: 8px; padding: 6px 10px; pointer-events: none; line-height: 1.45; max-width: calc(100% - 80px); }
 .map-info:empty { display: none; }
