@@ -177,6 +177,14 @@ say "flashing (soft reboot, no button press needed)..."
 T0=$SECONDS
 timeout "$FLASH_TIMEOUT" "${CMD[@]}"
 RC=$?
+if [ $RC != 0 ] && [ $RC != 124 ]; then
+  # Seen on the robot: "Found HalfKay Bootloader" then "error writing to Teensy" on the first
+  # try. The Teensy is in the bootloader by now, so a second run normally works.
+  warn "teensy_loader_cli exit code $RC - retrying once"
+  sleep 1
+  timeout "$FLASH_TIMEOUT" "${CMD[@]}"
+  RC=$?
+fi
 [ $RC = 124 ] && fail "teensy_loader_cli timed out after ${FLASH_TIMEOUT}s (Teensy did not enter the bootloader? press its button)"
 [ $RC = 0 ] || fail "teensy_loader_cli exit code $RC"
 ok "flashed in $((SECONDS - T0))s"

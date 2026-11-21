@@ -78,10 +78,22 @@ Gains are br3ttb units: ki per second, kd seconds.
 | ctl.settle_ms | 500 | |
 | batt.low_cell / adc_per_v | 3.4 V / 73.3 | |
 | tlm.hz | 100 | |
+| rng.enable | 0 | 1 = VL53L0X + servo at boot (set, `cfg.save`, reboot) |
 | cfg.save | — | set 1 → write EEPROM (when motors off) |
 | cfg.defaults | — | set 1 → defaults (not saved) |
 
 EEPROM block has a name-layout CRC + value CRC; any mismatch → defaults (boot log says so).
+
+## IMU (BNO08x on SPI) gotchas
+
+| Problem | Fix (`src/imu.cpp`, `lib/sh2`) |
+|---|---|
+| nRF24 = SPI mode 0, BNO = mode 3; Teensy 4 flips SCK idle level on the first clocked byte → 1-bit shift | dummy byte with no CS before/after each IMU transfer |
+| Advertisement is 276 B, but arrived as 512 B when shifted; SH-2 buffer was 384 | vendored SH-2 in `lib/sh2`, buffers 1024 |
+| No WAKE pin: chip ignores writes unless it is asserting INT | writes ride on a chip transfer (full duplex); idle → reset chip, send on its boot transfer after the init response |
+| `sh2_getProdIds` has no timeout | not used |
+
+Boot: ~1 s until samples. Status line in the log 3 s after boot and on IMU health change.
 
 ## Error codes (telemetry `error_code`)
 

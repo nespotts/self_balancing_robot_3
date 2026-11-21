@@ -165,8 +165,10 @@ class Decoder:
             return "TELEMETRY (short frame, %d bytes)" % len(p)
         mode = MODES[v["mode"]] if v["mode"] < len(MODES) else "mode%d" % v["mode"]
         flags = ",".join(n for bit, n in TLM_BITS if v["status"] & bit) or "-"
-        s = "tlm %-7s %-24s pitch %+6.1f  speed %+6.0f mm/s  bat %5.2f V  loop %4.0f Hz" % (
-            mode, flags, v["pitch_deg"], v["speed_mms"], v["battery_v"], v["loop_hz"])
+        s = ("tlm %-7s %-24s pitch %+6.1f roll %+6.1f hdg %+7.1f prate %+6.1f  speed %+5.0f mm/s"
+             "  bat %5.2f V  loop %4.0f Hz") % (
+            mode, flags, v["pitch_deg"], v["roll_deg"], v["heading_deg"], v["pitch_rate_dps"],
+            v["speed_mms"], v["battery_v"], v["loop_hz"])
         if v["error_code"]:
             s += "  ERR %d" % v["error_code"]
         if not v["radio_ok"]:

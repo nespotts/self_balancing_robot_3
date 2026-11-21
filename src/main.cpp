@@ -54,6 +54,13 @@ static bool save_wait_logged = false;
 
 // ------------------------------------------------------------------ helpers
 
+static void logImuStatus() {
+  char s[2 * LINK_MAX_PAYLOAD];
+  int n = imu.debugString(s, sizeof(s));
+  link.log("%.180s", s);
+  if (n > 180) link.log("  ..%s", s + 180);
+}
+
 static float wrap180(float a) {
   a = fmodf(a, 360.0f);
   if (a > 180.0f) a -= 360.0f;
@@ -376,6 +383,16 @@ static void background() {
     if (now_us - last_tlm_us >= 100000 && !tlm_fresh) buildTelemetry(now_us);
   }
 
+  // IMU status line: 3 s after boot, whenever its health changes, and every 60 s
+  static uint32_t imu_log_ms = 0;
+  static int8_t imu_was = -1;
+  const int8_t imu_now = imu.healthy(now_us) ? 1 : 0;
+  if ((imu_now != imu_was && now_ms > 3000) || now_ms - imu_log_ms >= 60000) {
+    imu_was = imu_now;
+    imu_log_ms = now_ms;
+    logImuStatus();
+  }
+
   if (now_ms - rate_t0_ms >= 500) {
     loop_hz = (float)(step_count - rate_steps0) * 1000.0f / (float)(now_ms - rate_t0_ms);
     rate_t0_ms = now_ms;
@@ -408,6 +425,11 @@ static void background() {
 
 void setup() {
   motors_begin();  // H-bridge pins driven low first
+  // Deselect every SPI chip before anything talks on the bus (a floating IMU CS breaks the nRF24 init).
+  pinMode(pins::IMU_CS, OUTPUT);
+  digitalWriteFast(pins::IMU_CS, HIGH);
+  pinMode(pins::RADIO_CSN, OUTPUT);
+  digitalWriteFast(pins::RADIO_CSN, HIGH);
   Serial.begin(115200);
   const bool loaded = params_load();
   SPI.begin();
@@ -415,10 +437,13 @@ void setup() {
   Wire1.begin();
   batt.begin();
   button.begin();
-  lidar_sweep_setup();  // VL53L0X init may re-begin Wire, so set the clocks after it
+  // VL53L0X + servo: only with rng.enable = 1 (applies at boot; sensors unplugged for now).
+  // Their init may re-begin Wire, so the clocks are set after it.
+  if (P(P_RNG_ENABLE) >= 0.5f) lidar_sweep_setup();
   Wire.setClock(I2C_CLOCK_HZ);
   Wire1.setClock(I2C_CLOCK_HZ);
   odom.begin();
+  while (millis() < 150) {}  // nRF24 needs ~100 ms after power-up before it takes its config
   radio.begin();
   imu.begin();
   link.log("boot %s, params %s, imu %s, radio %s", FIRMWARE_ID, loaded ? "from EEPROM" : "DEFAULTS",

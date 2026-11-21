@@ -40,6 +40,7 @@
   X(BATT_LOW_CELL,   "batt.low_cell",      3.4f,      2.5f,    4.2f)     \
   X(BATT_ADC_PER_V,  "batt.adc_per_v",     73.3182f,  10.0f,   200.0f)   \
   X(TLM_HZ,          "tlm.hz",             100.0f,    1.0f,    1000.0f)  \
+  X(RNG_ENABLE,      "rng.enable",         0.0f,      0.0f,    1.0f)     \
   X(CFG_SAVE,        "cfg.save",           0.0f,      0.0f,    1.0f)     \
   X(CFG_DEFAULTS,    "cfg.defaults",       0.0f,      0.0f,    1.0f)
 

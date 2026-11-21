@@ -28,6 +28,7 @@ class Imu {
   bool initialised() const { return ok_; }
   bool healthy(uint32_t now_us) const;
   uint32_t samples() const { return samples_; }
+  int debugString(char* out, int size) const;  // bring-up diagnostics
   float nominalDt() const { return interval_us_ ? interval_us_ * 1e-6f : 0.0025f; }
 
   // called from the SH-2 callbacks
