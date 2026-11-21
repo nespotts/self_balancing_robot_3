@@ -35,7 +35,7 @@ WebSocket.prototype.send = function (d) {
 """
 
 
-@unittest.skipIf(BROWSER is None, "no Chrome / Edge")
+@unittest.skipIf(BROWSER is None or os.environ.get("SBR3_FAST"), "no Chrome / Edge, or SBR3_FAST=1")
 class TestStaleUi(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

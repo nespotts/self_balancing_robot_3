@@ -40,6 +40,15 @@ Try it: `python -m station.sim`, open http://localhost:8080/ (`--host 0.0.0.0` s
 </p>
 <p>Tune, Plots, Logs</p>
 
+Places (saved spots on the map, **Go here**, Home):
+
+<p>
+<img src="docs/screenshots/phone-places.png" width="30%">
+<img src="docs/screenshots/phone-place-sheet.png" width="30%">
+<img src="docs/screenshots/phone-places-menu.png" width="30%">
+</p>
+<p>Places on the map, tap a place, the menu. <a href="../docs/station-features.md">Details</a></p>
+
 Falls (black-box recorder):
 
 <p>

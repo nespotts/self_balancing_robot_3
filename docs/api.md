@@ -39,10 +39,12 @@ rm /tmp/sbr3-bridge.release                   # bridge reconnects
 | `{"t":"set_param","id":0,"value":260}` / `{"t":"get_params"}` | |
 | `{"t":"cfg","action":"save"}` / `"defaults"` | EEPROM save / firmware defaults |
 | `{"t":"goto","points":[[x,y],...],"go":true}` / `{"t":"event","event":3}` | `go` + `"arm":true` arms (no remote); same for `{"t":"plan","action":"goto\|explore","arm":true}` |
+| `{"t":"places","action":"add","name":"Couch","x":1200,"y":300}` | saved place on the map (see **Saved places** below). `rename` (`name`, `new`), `delete` (`name`), `list`. `x`/`y` are odometry mm, like `goto` |
+| `{"t":"plan","action":"home"}` / `{"t":"plan","action":"goto","place":"Couch"}` | plan a route to Home / a saved place (`arm` as for goto) |
 | `{"t":"sub","tune":true}` | receive every telemetry frame as `{"t":"tune","cols":[...],"rows":[...]}` |
 | `{"t":"preset"\|"score"\|"motor"\|"balpoint","action":...}` | Tune tools: see the docstring of `bridge/tuning_api.py` |
 
-Receive: `hello`, `status`, `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`, `map`, `plan`,
+Receive: `hello`, `status`, `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`, `map`, `plan`, `places`,
 and for the Tune tools `presets`, `score_state`, `score_runs`, `motor_state`, `motor_fit`, `balpoint_state`.
 `ranges.pts` rows (every reading, batched at 25 Hz): `[i, hit_x, hit_y, sensor_x, sensor_y, valid, tilt, pi_ms, sensor_id, sensor_angle_deg, range_mm]`
 (sensor 0 = front / XSHUT 34, 1 = rear / XSHUT 28; angle in the robot frame, + = CCW; raw mm as sent). `status.rng_hz` = readings/s per sensor.
@@ -50,6 +52,30 @@ No WebSocket (old Kindle): `GET /api/state`, `GET|POST /api/cmd`.
 The Android app uses `POST /api/cmd` when it is left: `cmd_vel 0`, `{"t":"plan","action":"stop"}`, and `set_mode` BALANCE if the
 robot is armed + upright in GOTO / EXPLORE (`plan stop` alone leaves the robot in GOTO / EXPLORE with its waypoints).
 That `set_mode` has no `arm`, so it can never arm a robot that was disarmed meanwhile.
+
+### Saved places
+
+Names on the map (Home, Couch, ...), stored with the map in `~/sbr3-maps/<map>.places.json` (map frame, mm).
+
+| | |
+|---|---|
+| `places` `add` | `name` (1-30 characters), `x`, `y` in odometry mm. Max 50. A name that exists is refused, except **Home**: adding it moves Home |
+| `places` `rename` / `delete` | `name`, `new`. Deleting Home falls back to the default Home (where the pose was last reset) |
+| `places` `list` | asks for the list again |
+| reply | `{"t":"places","map":"name","items":[{"name":"Home","x":0,"y":0,"home":true,"default":true},{"name":"Couch","x":2400,"y":-300}]}`, sent to every browser after any change and on connect. Home is always first. A bad request answers `{"t":"error","text":...}` |
+| `plan` `home` | route (around walls when there is a map) to Home |
+| `plan` `goto` + `place` | route to that saved place; unknown name: `error` "no place called ..."; needs a robot pose ("no robot pose yet") and, like any goto, a link and no E-stop latch |
+
+`plan` `home` / `goto` `place` end like any plan: the Map banner shows the destination, **STOP** or **Clear** ends it.
+
+**GO_HOME reroute.** When the robot itself starts GO_HOME (the remote's Actions > Go home, or event 3), the firmware logs `GO_HOME: to x, y` and drives a straight line. The bridge reads that line and, if it can, takes over with a planned route to the saved Home:
+
+| Situation | Result |
+|---|---|
+| robot armed, no E-stop latch (bridge or robot), map has data | planned route to Home (or to the firmware's target when no Home is saved); never arms |
+| no map yet | the straight line stays, bridge log says so |
+| disarmed or latched (the robot ignored the request) | nothing |
+| planning fails | the straight line stays, bridge log: "go-home route failed" |
 
 ### Who may command the robot
 

@@ -70,7 +70,7 @@ class TestBridgeFalls(unittest.TestCase):
             # arm (no remote: the station arms), balance, a small shove is recovered
             ws.send(json.dumps({"t": "set_mode", "mode": lp.MODE_STATION, "arm": True}))
             await wait_for(ws, lambda m: m["t"] == "tlm" and m["status"] & lp.TLM_UPRIGHT)
-            await asyncio.sleep(2.5)
+            await asyncio.sleep(1.5)
             robot.push_robot(60.0)
             await asyncio.sleep(1.5)
             self.assertEqual((await get_json("/api/falls"))["falls"], [])
@@ -104,7 +104,7 @@ class TestBridgeFalls(unittest.TestCase):
             await wait_for(ws, lambda m: m["t"] == "tlm" and m["status"] & lp.TLM_UPRIGHT, 10)
             await asyncio.sleep(1.0)
             ws.send(json.dumps({"t": "estop"}))
-            await asyncio.sleep(4.0)
+            await asyncio.sleep(2.8)
             self.assertEqual(len((await get_json("/api/falls"))["falls"]), 1)
 
             # bad names are refused; delete works
