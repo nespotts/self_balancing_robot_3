@@ -88,6 +88,12 @@ SHOTS = [  # name, device, view, js to run after the view is shown, extra wait s
     ("desktop-route", DESKTOP, "map", "sbr3.send({t:'plan',action:'goto',points:[[2900,1650]]})", 4),
     ("phone-occmap", PHONE, "map", "", 1.5),
     ("phone-map-menu", PHONE, "map", "document.getElementById('map-more').click()", 1),
+    # saved places (issue #53): pins, a tapped pin, the menu with Go home; after --prep-map
+    ("phone-places", PHONE, "map", "document.getElementById('place-sheet').hidden=true;const f=document.getElementById('map-follow');"
+     "if(f.classList.contains('on'))f.click();[1,2,3].forEach(()=>document.getElementById('map-zout').click())", 1.5),
+    ("phone-place-sheet", PHONE, "map", "sbr3.openPlace('Couch')", 1.5),
+    ("phone-places-menu", PHONE, "map", "document.getElementById('place-sheet').hidden=true;document.getElementById('map-follow').click();"
+     "document.getElementById('map-more').click()", 1),
     ("phone-explore", PHONE, "map", "document.getElementById('map-menu').hidden=true;sbr3.send({t:'map',action:'reset'});sbr3.send({t:'plan',action:'explore'})", 14),
     # last: disarm, then the first tap of the two-tap "Arm & Balance"
     ("phone-arm", PHONE, "drive", "sbr3.send({t:'set_mode',mode:0});"
@@ -260,7 +266,7 @@ async def prep_map(url, max_s=150):
     end = time.monotonic() + max_s
     await asyncio.sleep(2)
     send(t="map", action="reset")
-    send(t="plan", action="explore")
+    send(t="plan", action="explore", arm=True)        # (the sim has no remote: the station arms)
     mode = None
     while time.monotonic() < end:
         try:
@@ -273,6 +279,8 @@ async def prep_map(url, max_s=150):
                 break
             mode = m.get("mode")
     send(t="plan", action="goto", points=[[0, 0]])        # back near the start for the shots
+    for name, x, y in (("Kitchen", -300, 1250), ("Couch", 2900, 1650), ("Dock", 3300, -250)):   # saved places (#53)
+        send(t="places", action="add", name=name, x=x, y=y)
     await asyncio.sleep(12)
     ws.close()
 

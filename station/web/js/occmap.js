@@ -66,6 +66,11 @@ on("plan", (m) => {
 
 export function planActive() { return plan.mode !== "idle" && plan.path.length > 1; }
 export function hasMap() { return !!(occ.canvas && occ.drawn.size); }
+// map frame (places, grid) -> odometry frame (what the canvas draws): the inverse of the map's pose correction
+export function mapToOdom(x, y) {
+  const [tx, ty, th] = occ.corr, a = -th * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+  return [c * (x - tx) - s * (y - ty), s * (x - tx) + c * (y - ty)];
+}
 
 // ---------- drawing (called from map.js with its view: odometry mm -> screen px) ----------
 export function drawOccMap(ctx, sx, sy, s) {
@@ -108,7 +113,7 @@ export function drawPlan(ctx, sx, sy) {
 // ---------- menu: layer, save / load / clear, settings ----------
 const $ = (id) => document.getElementById(id);
 let lastCmd = 0;
-function cmd(m) { lastCmd = performance.now(); if (!send(m)) toast("Not connected"); }
+export function cmd(m) { lastCmd = performance.now(); if (!send(m)) toast("Not connected"); }
 on("error", (m) => { if (performance.now() - lastCmd < 3000 && !m.code) toast(m.text, 3500); });   // (code: main.js says it)
 
 $("lay-occ").checked = occLayer.on;
@@ -147,7 +152,7 @@ on("map_list", (m) => {
 });
 
 $("map-reset").onclick = () => {
-  if (!confirm("Clear the map? (Saved maps are kept.)")) return;
+  if (!confirm("Clear the map and its places? (Saved maps are kept.)")) return;
   cmd({ t: "map", action: "reset" });
   $("map-menu").hidden = true;
 };

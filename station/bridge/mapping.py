@@ -22,6 +22,7 @@ import re
 import time
 
 from .occgrid import Grid
+from .places import HOME, Places
 from . import scanmatch
 
 SENSOR_FWD_MM = 26.0
@@ -69,6 +70,8 @@ class Mapper:
         self.last_autosave = time.monotonic()
         self.full_pending = False
         self.extra_listeners = []        # callables(): the map changed (planner, #12 follow-up)
+        self.places = Places()           # saved places (#53), map frame; stored as <map>.places.json
+        self.places_pending = False      # broadcast the places on the next poll
 
     # ------------------------------------------------------------ settings
     def _settings_path(self):
@@ -201,6 +204,7 @@ class Mapper:
             self.full_pending = False
             self.grid.take_dirty()
             out.append(self.full_msg())
+            self.places_pending = True
         else:
             dirty = self.grid.take_dirty()
             if dirty:
@@ -209,6 +213,9 @@ class Mapper:
                 out.append(json.dumps(m, separators=(",", ":")))
                 for f in self.extra_listeners:
                     f()
+        if self.places_pending:
+            self.places_pending = False
+            out.append(self.places_msg())
         if now - self.last_autosave >= AUTOSAVE_S:
             self.last_autosave = now
             if self.changed_since_save and self.n["used"]:
@@ -254,6 +261,9 @@ class Mapper:
                 png = p[:-5] + ".png"
                 if os.path.exists(png):
                     os.remove(png)
+                pp = self.places_path(str(m.get("name")))
+                if pp and os.path.exists(pp):
+                    os.remove(pp)
             return {"t": "map_list", "maps": self.list()}
         if act == "list":
             return {"t": "map_list", "maps": self.list()}
@@ -270,12 +280,85 @@ class Mapper:
         self.corr = [0.0, 0.0, 0.0]
         self.matcher.reset()
         self.name = None
+        self.places = Places()          # places belong to a map; the saved map keeps its own
         self.version += 1
         self.full_pending = True
         self.last_send = 0.0
         self.changed_since_save = False
         for k in self.n:
             self.n[k] = 0
+
+    # ------------------------------------------------------------ places (#53)
+    def default_home(self):
+        """Home when none is saved: where the pose was reset (the odometry origin), in the map frame."""
+        return tuple(self.places.origin) if self.places.origin else self.map_pose(0.0, 0.0, 0.0)[:2]
+
+    def home_xy(self):
+        return self.places.home(self.default_home())[:2]
+
+    def place_xy(self, name):
+        """Map-frame (x, y) of a saved place ('Home' always exists), or None."""
+        if str(name or "").strip().lower() == HOME.lower():
+            return self.home_xy()
+        p = self.places.find(name)
+        return (p["x"], p["y"]) if p else None
+
+    def on_pose_reset(self):
+        """The robot's odometry was reset here: the new origin is the default Home."""
+        self.places.origin = [round(v, 1) for v in self.map_pose(0.0, 0.0, 0.0)[:2]]
+        self.places_changed()
+
+    def places_path(self, name):
+        return os.path.join(self.dir, name + ".places.json") if NAME_RE.match(name or "") else None
+
+    def save_places(self, name=None):
+        name = name or self.name or AUTOSAVE_NAME
+        p = self.places_path(name)
+        if not p:
+            return
+        if not self.places.items and not self.places.origin and not os.path.exists(p):
+            return
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            Places.write(p, self.places)
+        except OSError:
+            pass
+
+    def places_changed(self):
+        self.save_places()
+        self.places_pending = True
+
+    def places_msg(self):
+        hx, hy = self.default_home()
+        return json.dumps({"t": "places", "map": self.name, "items": self.places.listing((hx, hy))},
+                          separators=(",", ":"))
+
+    def places_command(self, m, who="?"):
+        """{"t": "places", "action": "add", "name": "Couch", "x": mm, "y": mm}   (odometry frame, like goto;
+        name "Home" moves Home) | "rename" (name, new) | "delete" (name) | "list" -> error reply or None;
+        the new list reaches every browser with the next poll."""
+        act = m.get("action")
+        try:
+            if act == "add":
+                x, y = float(m.get("x")), float(m.get("y"))
+                mx, my = self.map_pose(x, y, 0.0)[:2]
+                name = self.places.add(m.get("name"), mx, my)
+                self.say("%s: saved place %s" % (who, name))
+            elif act == "rename":
+                name = self.places.rename(m.get("name"), m.get("new"))
+                self.say("%s: place renamed to %s" % (who, name))
+            elif act == "delete":
+                name = self.places.delete(m.get("name"))
+                self.say("%s: place %s deleted" % (who, name))
+            elif act == "list":
+                self.places_pending = True
+                return None
+            else:
+                return {"t": "error", "text": "unknown places action %r" % act}
+        except (TypeError, ValueError) as e:
+            return {"t": "error", "text": str(e)}
+        self.places_changed()
+        return None
 
     # ------------------------------------------------------------ files
     def path(self, name):
@@ -291,6 +374,7 @@ class Mapper:
         os.replace(tmp, p)
         with open(p[:-5] + ".png", "wb") as f:        # preview to look at (not read back)
             f.write(self.grid.png())
+        self.save_places(name)
         if not quiet:
             self.name = name
             self.changed_since_save = False
@@ -303,6 +387,7 @@ class Mapper:
             g = Grid.from_json(f.read())
         self.grid = g
         self.corr = [float(c) for c in g.meta.get("corr", [0, 0, 0])][:3]
+        self.places = Places.read(self.places_path(name))
         self.matcher.reset()
         self.name = name
         self.version += 1

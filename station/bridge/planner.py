@@ -20,6 +20,7 @@ import time
 
 from . import link_protocol as lp
 from .occgrid import UNKNOWN, UNIT
+from .places import HOME
 
 SQ2 = math.sqrt(2.0)
 BLOCKED = 255             # within robot radius + 30 mm of an obstacle: never
@@ -358,6 +359,7 @@ class Planner:
         self.gen = 0                  # bumps with every user command (drops stale job results)
         self.arm = False              # the next mode request carries the user's arm request (see command)
         self.pending = None
+        self.dest = None              # goto: name of the saved place being driven to (#53)
 
     # ---------------------------------------------------------- frames
     def robot_map_pose(self):
@@ -375,6 +377,7 @@ class Planner:
     # ---------------------------------------------------------- messages
     def msg(self):
         return json.dumps({"t": "plan", "mode": self.mode, "status": self.status,
+                           "dest": self.dest if self.mode == "goto" else None,
                            "path": [[round(x), round(y)] for x, y in self.to_odom(self.path)],
                            "goals": [[round(x), round(y)] for x, y in self.to_odom(self.goals)],
                            "settings": self.settings}, separators=(",", ":"))
@@ -416,6 +419,15 @@ class Planner:
             return None
         if not self.b.tlm:
             return {"t": "error", "text": "no robot pose yet"}
+        if act == "home" or (act == "goto" and m.get("place")):
+            # a saved place (#53): {"action": "goto", "place": "Couch"} or {"action": "home"}
+            name = HOME if act == "home" else str(m.get("place"))
+            xy = self.b.mapper.place_xy(name)
+            if xy is None:
+                return {"t": "error", "text": "no place called %s" % name}
+            self._begin_goto([xy], HOME if name.lower() == HOME.lower() else self.b.mapper.places.find(name)["name"],
+                             bool(m.get("arm")))
+            return None
         if act == "goto":
             dx, dy, dt = self.b.mapper.corr
             c, s = math.cos(math.radians(dt)), math.sin(math.radians(dt))
@@ -428,11 +440,7 @@ class Planner:
                 goals.append((c * x - s * y + dx, s * x + c * y + dy))
             if not goals:
                 return {"t": "error", "text": "no goal"}
-            self.mode, self.goals, self.blacklist = "goto", goals[:20], []
-            self.arm = bool(m.get("arm"))
-            self.started_at = self.clock()
-            self.blocked_plans = 0
-            self._start_job(self._plan_goto, go=True, force=True)
+            self._begin_goto(goals, None, bool(m.get("arm")))
             return None
         if act == "explore":
             self.mode, self.goals, self.blacklist, self.goal = "explore", [], [], None
@@ -446,6 +454,33 @@ class Planner:
             self._start_job(self._plan_explore, go=True, force=True)
             return None
         return {"t": "error", "text": "unknown plan action %r" % act}
+
+    def _begin_goto(self, goals, dest, arm):
+        """Plan + drive to map-frame goals. dest: the saved place's name (shown on the map), or None."""
+        self.mode, self.goals, self.blacklist = "goto", goals[:20], []
+        self.dest = dest
+        self.arm = arm
+        self.started_at = self.clock()
+        self.blocked_plans = 0
+        self._start_job(self._plan_goto, go=True, force=True)
+
+    def robot_go_home(self, target_odom):
+        """The robot just started its own GO_HOME (the remote's Actions > Go home, or the station's event):
+        a straight line to target_odom (first waypoint or the origin) in GOTO. When the bridge can plan, it
+        takes over with a route around obstacles to the saved Home (else to that same target). It never arms:
+        only an armed robot (the firmware requested GOTO) and no E-stop latch."""
+        b = self.b
+        t = b.tlm
+        if b.estop or getattr(b, "robot_estop", False) or not t or not (t["status"] & lp.TLM_ARMED):
+            return                               # the robot ignored the request (latched / disarmed)
+        if not b.mapper.grid.touched:
+            self.stop()
+            b.say("planner: GO_HOME from the robot: no map yet, it drives the straight line")
+            return
+        xy = b.mapper.places.find(HOME)
+        goal = (xy["x"], xy["y"]) if xy else b.mapper.map_pose(target_odom[0], target_odom[1], 0.0)[:2]
+        b.say("planner: GO_HOME from the robot: planning a route to %s" % ("Home" if xy else "its target"))
+        self._begin_goto([goal], HOME if xy else "Home", False)
 
     def stop(self, why="", idle_robot=False):
         """Forget the job. The robot keeps its last waypoints unless idle_robot (E-stop does that)."""
@@ -626,8 +661,9 @@ class Planner:
             return
         if state == "arrived" and nav.get("nav_index", 0) >= nav.get("waypoint_count", 0):
             if self.mode == "goto":
+                dest = self.dest
                 self.mode, self.path = "idle", []
-                self._set_status("arrived")
+                self._set_status("arrived" if not dest else "arrived at " + dest)
                 return
             if now - self.last_plan > 0.8:
                 if self.goal:

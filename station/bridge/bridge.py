@@ -4,6 +4,7 @@ import collections
 import json
 import math
 import os
+import re
 import tempfile
 import time
 
@@ -38,7 +39,8 @@ TICK_LATE_S = 0.2                 # warn in the log when the event loop was bloc
 TLM_HZ_GRACE_S = 10.0             # Tune closed this long ago -> put tlm.hz back (#46)
 # Commands that act on the robot: refused with an error while there is no link (#48)
 NEEDS_LINK = {"set_mode", "set_param", "cfg", "get_params", "goto", "event", "estop_release"}  # release: the robot latches too
-NEEDS_LINK_ACTION = {"preset": ("apply",), "motor": ("start", "apply"), "plan": ("goto", "explore")}
+NEEDS_LINK_ACTION = {"preset": ("apply",), "motor": ("start", "apply"), "plan": ("goto", "explore", "home")}
+GO_HOME_RE = re.compile(r"^GO_HOME: to (-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)")   # the firmware's log line (#53)
 NO_LINK_TEXT = "robot not connected"
 POLLER_TIMEOUT_S = 3.0
 # Flashing: while this file exists the bridge lets go of the serial port (checked 4x a second).
@@ -337,6 +339,14 @@ class Bridge:
             self.log.record("log", text)
             self._add_log("robot", text)
             self.tools.on_log(text)
+            if text.startswith("pose reset"):     # remote or station: the default Home is where it happened
+                self.mapper.on_pose_reset()
+            m = GO_HOME_RE.match(text)
+            if m:       # GO_HOME from the remote or a station event: route it around obstacles (#53)
+                try:
+                    self.planner.robot_go_home((float(m.group(1)), float(m.group(2))))
+                except Exception as e:
+                    self.say("go-home route failed: %s: %s (the robot drives the straight line)" % (type(e).__name__, e))
         elif t == lp.MSG_PARAM_INFO:
             d = lp.decode_param_info(p)
             for k in ("value", "min", "max"):
@@ -704,8 +714,10 @@ class Bridge:
             return self.tools.handle(m, who)
         elif t == "map":       # occupancy grid: reset / save / load / list / delete / set (#12)
             return self.mapper.command(m, who)
-        elif t == "plan":      # route planning / explore: goto / explore / stop / set
-            if self.estop and m.get("action") in ("goto", "explore"):
+        elif t == "places":    # saved places on the map: add / rename / delete / list (#53)
+            return self.mapper.places_command(m, who)
+        elif t == "plan":      # route planning / explore: goto / home / explore / stop / set
+            if self.estop and m.get("action") in ("goto", "explore", "home"):
                 return {"t": "error", "code": "estop", "text": "E-stop is on: release it first"}
             return self.planner.command(m, who)
         elif t == "ping":
@@ -783,6 +795,7 @@ class Bridge:
         for text in self.tools.hello_msgs():
             ws.send(json.dumps(text, separators=(",", ":")))
         ws.send(self.mapper.full_msg())
+        ws.send(self.mapper.places_msg())
         ws.send(self.planner.msg())
         for item in list(self.logs)[-60:]:
             ws.send(json.dumps(dict(t="log", **{k: v for k, v in item.items() if k != "t"}, ts=item["t"])))
