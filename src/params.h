@@ -111,7 +111,13 @@
   X(NAV_BLIND_SPEED, "nav.blind_speed",    150.0f,    0.0f,    1500.0f)  \
   /* motor wiring: -1 = that motor's wires are swapped; fixed in software at the lowest level */ \
   X(MOT_LEFT_DIR,    "mot.left_dir",       1.0f,      -1.0f,   1.0f)     \
-  X(MOT_RIGHT_DIR,   "mot.right_dir",      1.0f,      -1.0f,   1.0f)
+  X(MOT_RIGHT_DIR,   "mot.right_dir",      1.0f,      -1.0f,   1.0f)     \
+  /* issue #62: keep off side walls (gap = body side to wall), stuck detection + back off */ \
+  X(NAV_SIDE_MIN_MM, "nav.side_min_mm",    120.0f,    0.0f,    500.0f)   \
+  X(NAV_SIDE_KP,     "nav.side_kp",        0.5f,      0.0f,    5.0f)     \
+  X(NAV_STUCK_MS,    "nav.stuck_ms",       2500.0f,   0.0f,    20000.0f) \
+  X(NAV_STUCK_MM,    "nav.stuck_mm",       40.0f,     5.0f,    500.0f)   \
+  X(NAV_STUCK_BACK,  "nav.stuck_backoff_mm", 100.0f,  0.0f,    500.0f)
 
 enum ParamId : uint16_t {
 #define PARAM_ENUM(id, name, def, mn, mx) P_##id,

@@ -95,6 +95,12 @@ PARAMS = [
     ("nav.blind_speed", 150.0, 0.0, 1500.0),
     ("mot.left_dir", 1.0, -1.0, 1.0),
     ("mot.right_dir", 1.0, -1.0, 1.0),
+    # issue #62: keep off side walls, stuck detection + back off
+    ("nav.side_min_mm", 120.0, 0.0, 500.0),
+    ("nav.side_kp", 0.5, 0.0, 5.0),
+    ("nav.stuck_ms", 2500.0, 0.0, 20000.0),
+    ("nav.stuck_mm", 40.0, 5.0, 500.0),
+    ("nav.stuck_backoff_mm", 100.0, 0.0, 500.0),
 ]
 CELLS = 3
 WAYPOINT_MAX = 32         # src/config.h
@@ -104,6 +110,12 @@ NAV_IDLE, NAV_TURNING, NAV_DRIVING, NAV_BLOCKED, NAV_ARRIVED, NAV_HOLDING = (
     lp.NAV_IDLE, lp.NAV_TURNING, lp.NAV_DRIVING, lp.NAV_BLOCKED, lp.NAV_ARRIVED, lp.NAV_HOLDING)
 NAV_MODES = (lp.MODE_GOTO, lp.MODE_EXPLORE, lp.MODE_HOLD)
 SENSOR_HEIGHT_MM = 189.0  # range sensors above the axle
+# Navigator footprint constants (src/navigator.cpp, #62)
+HALF_WIDTH_MM = 76.0      # body side from the centre line
+SWING_R_MM = 105.0        # turning in place, the corners sweep r 88 (+ margin)
+SIDE_BACK_MM, SIDE_AHEAD_MM, SIDE_INNER_MM = 45.0, 300.0, 40.0   # side window: body rear .. 300 ahead
+BLOCKED_TURN_DEG = 30.0   # GOTO blocked by a wall alongside: turn away at most this much
+STUCK_DEG = 15.0
 
 
 def _box(cx, cy, w, h):
@@ -204,6 +216,15 @@ class Navigator:
         self.speed = self.turn = 0.0
         self.tx = self.ty = self.dist = 0.0
         self.front = self.rear = self.obst = 0.0
+        self.gap_l = self.gap_r = 0.0     # side gaps (0 = nothing beside), #62
+        self.near_mm = self.near_xr = 0.0
+        self.back_mm = 0.0
+        self.blk_h = 0.0                  # heading when it blocked
+        self.stuck = self.stuck_turn = self.stuck_seen = False
+        self.stuck_ms = 0
+        self.stuck_pose = (0.0, 0.0, 0.0)
+        self.away = self.away_done = False
+        self.away_pose = (0.0, 0.0, 0)
         self.obst_flag = False
         self.blk_fwd = self.blk_rev = False
         self.close = {"fwd": (0, 0.0), "rev": (0, 0.0)}   # last time / range inside the clear distance
@@ -236,6 +257,8 @@ class Navigator:
         self.blocked = self.latched = self.backing = False
         self.blk_fwd = self.blk_rev = False
         self.stop_since = 0
+        self.stuck = self.away = self.away_done = False
+        self.stuck_ms = 0
 
     # ---- inputs
     def add_range(self, f, now_ms):
@@ -265,6 +288,8 @@ class Navigator:
         self.blk_fwd = self.blk_rev = False
         self.driving = False
         self.stop_since = 0
+        self.stuck = self.away = self.away_done = False
+        self.stuck_ms = 0
         n = len(self.wp)
         if i["mode"] in (lp.MODE_GOTO, lp.MODE_EXPLORE):
             if self.idx >= n:
@@ -302,14 +327,28 @@ class Navigator:
     def _update_obstacles(self, i):
         P = self.P
         c, s = math.cos(math.radians(i["heading"])), math.sin(math.radians(i["heading"]))
-        half = 0.5 * P("nav.corridor_mm")
+        # with the side check on (#62), points beside the body (> its half width + 10) steer / slow it down
+        # instead of stopping it: a wall alongside or a door jamb is not in the way
+        half = (min(0.5 * P("nav.corridor_mm"), HALF_WIDTH_MM + 10.0) if P("nav.side_min_mm") > 0
+                else 0.5 * P("nav.corridor_mm"))
         age = P("nav.obst_age_ms")
-        front = rear = 0.0
+        front = rear = gl = gr = near = near_xr = 0.0
         for px, py, t in self.pts:
             if i["now_ms"] - t > age:
                 continue
             dx, dy = px - i["x"], py - i["y"]
             xr, yr = dx * c + dy * s, -dx * s + dy * c
+            if -SIDE_BACK_MM < xr < SIDE_AHEAD_MM and abs(yr) >= SIDE_INNER_MM:   # beside the body: side gap
+                g = max(1.0, abs(yr) - HALF_WIDTH_MM)
+                if yr > 0:
+                    if gl == 0 or g < gl:
+                        gl = g
+                elif gr == 0 or g < gr:
+                    gr = g
+            if abs(xr) > 30.0:            # ahead / behind, inside the corners' swing circle
+                r = math.hypot(xr, yr)
+                if r < SWING_R_MM and (near == 0 or r < near):
+                    near, near_xr = r, xr
             if abs(yr) > half:
                 continue
             if xr >= SENSOR_FWD_MM:
@@ -321,6 +360,62 @@ class Navigator:
                 if rear == 0 or d < rear:
                     rear = d
         self.front, self.rear = front, rear
+        self.gap_l, self.gap_r = gl, gr
+        self.near_mm, self.near_xr = near, near_xr
+
+    def _side_turn(self):
+        """Side walls (#62): (turn deg/s away from walls closer than nav.side_min_mm to the body side,
+        how far the nearer one is inside it)."""
+        P = self.P
+        smin = P("nav.side_min_mm")
+        pl = smin - self.gap_l if smin > 0 and 0 < self.gap_l < smin else 0.0
+        pr = smin - self.gap_r if smin > 0 and 0 < self.gap_r < smin else 0.0
+        return P("nav.side_kp") * (pr - pl), max(pl, pr)
+
+    def _side_avoid(self, vmax, tmax):
+        """Driving: steer away from side walls and slow down (linear to nav.min_speed at gap 0)."""
+        P = self.P
+        t, inside = self._side_turn()
+        if inside <= 0:
+            return
+        self.turn = _clamp(self.turn + t, tmax)
+        smin = P("nav.side_min_mm")
+        lim = max(P("nav.min_speed"), vmax * (smin - inside) / smin)
+        if self.speed > lim:
+            self.speed = lim
+
+    def _stuck_check(self, i, turning, trying):
+        """Stuck (#62): commanded to move but no progress for nav.stuck_ms."""
+        P = self.P
+        if not trying or P("nav.stuck_ms") <= 0:
+            return False
+        self.stuck_seen = True
+        sx, sy, sh = self.stuck_pose
+        moved = (abs(i["heading"] - sh) >= STUCK_DEG if turning
+                 else math.hypot(i["x"] - sx, i["y"] - sy) >= P("nav.stuck_mm"))
+        if not self.stuck_ms or turning != self.stuck_turn or moved:
+            self.stuck_ms = i["now_ms"] or 1
+            self.stuck_pose = (i["x"], i["y"], i["heading"])
+            self.stuck_turn = turning
+            return False
+        return i["now_ms"] - self.stuck_ms >= P("nav.stuck_ms")
+
+    def _start_stuck(self, i, turning):
+        P = self.P
+        self.stuck = self.blocked = True
+        self.blk_h = i["heading"]
+        self.driving = True              # so the BLOCKED branch runs (backs off) even if it was turning
+        self.stuck_ms = 0
+        if i["mode"] == lp.MODE_EXPLORE:
+            self.latched = True
+        self.log("nav: stuck, no progress %s for %.1f s (waypoint %u/%u)"
+                 % ("turning" if turning else "driving", P("nav.stuck_ms") / 1000.0, self.idx + 1, len(self.wp)))
+        self.back_mm = P("nav.stuck_backoff_mm")
+        self.backing = self.back_mm > 0
+        self.back = (i["x"], i["y"], i["now_ms"])
+        self.speed = self.turn = 0.0
+        self.state = NAV_BLOCKED
+        self.obst = self.front
 
     def limit_speed(self, v, vmax, apply):
         P = self.P
@@ -375,6 +470,7 @@ class Navigator:
         self.now_ms = i["now_ms"]
         self.speed = self.turn = 0.0
         self.obst_flag = False
+        self.stuck_seen = False
         self._update_obstacles(i)
         if i["mode"] in (lp.MODE_GOTO, lp.MODE_EXPLORE):
             self._update_goto(i)
@@ -387,13 +483,17 @@ class Navigator:
                 self._set_target(i, *self.wp[min(self.idx, len(self.wp) - 1)])
             else:
                 self.dist = 0.0
+        if not self.stuck_seen:           # not trying to move this step: the no-progress window starts over
+            self.stuck_ms = 0
 
     def _start_blocked(self, i):
         self.blocked = True
+        self.blk_h = i["heading"]
         if i["mode"] == lp.MODE_EXPLORE:
             self.latched = True
         self.log("nav: blocked, obstacle at %.0f mm (waypoint %u/%u)" % (self.obst, self.idx + 1, len(self.wp)))
-        if self.P("nav.backoff_mm") > 0:
+        self.back_mm = self.P("nav.backoff_mm")
+        if self.back_mm > 0:
             self.backing = True
             self.back = (i["x"], i["y"], i["now_ms"])
 
@@ -488,17 +588,46 @@ class Navigator:
         if not self.blocked:
             if not self.driving and abs(e) < align:
                 self.driving = True
+                self.away = self.away_done = False
             elif self.driving and far and abs(e) > 3.0 * align:
                 self.driving = False
         if not self.driving:
-            self.turn = _clamp(P("nav.turn_kp") * e, tmax)
             self.state = NAV_TURNING
             self.obst = self.front
+            # something inside the corners' swing circle ahead / behind: first step straight away from it (#62)
+            if not self.away_done and self.near_mm > 0 and P("nav.stuck_backoff_mm") > 0:
+                if not self.away:
+                    self.away = True
+                    self.away_pose = (i["x"], i["y"], i["now_ms"])
+                    self.log("nav: too close to turn (%.0f mm), stepping %s"
+                             % (self.near_mm, "back" if self.near_xr > 0 else "forward"))
+                step = max(P("nav.min_speed"), 30.0)
+                va = self.limit_speed(-step if self.near_xr > 0 else step, vmax, True)
+                ax, ay, ams = self.away_pose
+                if (not self.obst_flag and math.hypot(i["x"] - ax, i["y"] - ay) < P("nav.stuck_backoff_mm")
+                        and i["now_ms"] - ams < 4000):
+                    self.speed = va
+                    self.obst = self.front
+                    return
+                self.away_done = True     # far enough (or the way out is blocked too): turn anyway
+            self.away = False
+            self.obst_flag = False
+            self.turn = _clamp(P("nav.turn_kp") * e, tmax)
+            # target behind and a wall close at one side: turn the nose away from that wall (#62)
+            smin = P("nav.side_min_mm")
+            if smin > 0 and abs(e) > 120.0:
+                l, r = 0 < self.gap_l < smin, 0 < self.gap_r < smin
+                if l and (not r or self.gap_l < self.gap_r):
+                    self.turn = -abs(self.turn)
+                elif r:
+                    self.turn = abs(self.turn)
+            if self._stuck_check(i, True, abs(self.turn) >= P("nav.stop_turn_dps")):
+                self._start_stuck(i, True)
             return
         v = P("nav.speed_kp") * self.dist * max(0.0, math.cos(math.radians(e)))
         v = min(max(v, P("nav.min_speed")), vmax)
         vl = self.limit_speed(v, vmax, True)
-        if self.latched:                      # EXPLORE: stays blocked until a new list
+        if self.latched or self.stuck:        # EXPLORE: stays blocked until a new list; stuck: backing off
             self.obst_flag = True
         if self.obst_flag:
             if not self.blocked:
@@ -508,21 +637,32 @@ class Navigator:
             if self.backing:
                 bx, by, bms = self.back
                 back = math.hypot(i["x"] - bx, i["y"] - by)
-                vb = self.limit_speed(-max(P("nav.min_speed"), 30.0), vmax, True)
-                if self.obst_flag or back >= P("nav.backoff_mm") or i["now_ms"] - bms > 5000:
+                # stuck: twice as fast (a balancing robot pressed against a wall barely follows the slowest speed)
+                vb = self.limit_speed(-max(P("nav.min_speed"), 30.0) * (2.0 if self.stuck else 1.0), vmax, True)
+                if self.obst_flag or back >= self.back_mm or i["now_ms"] - bms > 5000:
                     self.backing = False
                     vb = 0.0
                 vl = vb
                 self.obst = obst
                 self.obst_flag = True
+            if not self.backing and i["mode"] != lp.MODE_EXPLORE:
+                self.stuck = False            # GOTO: backed off, try again
             self.speed, self.turn, self.state = vl, 0.0, NAV_BLOCKED
+            # GOTO, blocked with a wall alongside (heading into it): turn away from it a little, in place (#62)
+            if (not self.backing and not self.latched and not self.stuck
+                    and abs(i["heading"] - self.blk_h) < BLOCKED_TURN_DEG):
+                self.turn = _clamp(self._side_turn()[0], tmax)
             return
         if self.blocked:
             self.log("nav: clear, going on")
         self.blocked = self.backing = False
         self.speed = vl
         self.turn = _clamp(P("nav.turn_kp") * e, tmax) if far else 0.0
+        self._side_avoid(vmax, tmax)
         self.state = NAV_DRIVING
+        # (not in the last 3 x arrive_mm: slow there, and a balancing robot rocks to and fro before it moves)
+        if self._stuck_check(i, False, self.dist > 3.0 * arrive and self.speed >= max(20.0, 0.5 * P("nav.min_speed"))):
+            self._start_stuck(i, False)
 
     def _hold_speed(self, i, x, y):
         """nav.hold_* position loop on the forward error."""

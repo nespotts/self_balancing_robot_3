@@ -161,6 +161,7 @@ class OfflineBridge:
         self.tlm_time = 0.0
         self.waypoints = []
         self.lines = []
+        self.robot_logs = []
         self.planner = Planner(self, NAV_STATE_NAMES, clock=lambda: robot.t, sync=True)
 
     def say(self, text):
@@ -201,6 +202,10 @@ def plan_offline(robot, mapper, command, max_s=300.0, on_step=None):
         for t, p in parser.feed(b"".join(out)):
             if t == lp.MSG_RANGE:
                 mapper.on_range(lp.decode_range(p))
+            elif t == lp.MSG_LOG:
+                text = lp.decode_log(p)
+                b.robot_logs.append(text)
+                b.planner.on_log(text)            # as Bridge does ("nav: stuck", #62)
 
     robot.set_mode(lp.MODE_BALANCE, arm=True)
     t_end = robot.t + 2.5

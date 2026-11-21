@@ -58,6 +58,9 @@ struct Bot {
   Navigator nav;
   World world;
   bool live = true;
+  bool jam = false;     // wheels blocked: the pose does not change (pushing against a wall)
+  float min_wall_y = 1e9;  // closest |y - wall_y| seen (side wall tests)
+  float wall_y = 0;
 
   NavIn in() const {
     NavIn n;
@@ -106,8 +109,11 @@ struct Bot {
       v += fmaxf(-1500 * dt, fminf(1500 * dt, vt - v)) * 0.5f;
       w += fmaxf(-1000 * dt, fminf(1000 * dt, wt - w)) * 0.5f;
       h += w * dt;
-      x += v * cosf(h * 0.0174533f) * dt;
-      y += v * sinf(h * 0.0174533f) * dt;
+      if (!jam) {
+        x += v * cosf(h * 0.0174533f) * dt;
+        y += v * sinf(h * 0.0174533f) * dt;
+      }
+      if (fabsf(y - wall_y) < min_wall_y) min_wall_y = fabsf(y - wall_y);
       while (const char* l = nav.peekLog()) {
         printf("  %6.2f s  %s\n", ms / 1000.0, l);
         nav.popLog();
@@ -225,14 +231,63 @@ static void testStatusDue() {
   CHECK(b.nav.statusDue(1502));   // 2 Hz
 }
 
-int main() {
-  testThreeWaypoints();
+// issue #62: driving parallel to a wall 105 mm from the centre line (29 mm from the body side)
+static void testSideWall(bool side_on) {
+  printf("goto: wall alongside, side check %s\n", side_on ? "on" : "off");
+  reset();
+  if (!side_on) g_param[P_NAV_SIDE_MIN_MM] = 0;
+  Bot b;
+  b.world.add(-1000, -105, 4000, -105);
+  b.wall_y = -105;
+  b.nav.add(2500, 60);
+  b.nav.listChanged(true);
+  b.nav.onModeChange(b.in());
+  b.run(25);
+  printf("  at %.0f, %.0f, closest to the wall %.0f mm (centre)\n", b.x, b.y, b.min_wall_y);
+  if (side_on) {
+    CHECK(b.nav.state() == NAV_ARRIVED);
+    CHECK(b.min_wall_y > 76 + 15);  // body side never closer than 15 mm
+  } else {
+    CHECK(b.nav.state() == NAV_BLOCKED);  // the old corridor: the wall alongside is "in the way"
+    CHECK(b.x < 500);
+  }
+}
+
+static void testStuck() {
+  printf("goto: wheels jammed -> stuck, back off\n");
+  reset();
+  Bot b;
+  b.nav.add(3000, 0);
+  b.nav.listChanged(true);
+  b.nav.onModeChange(b.in());
+  b.run(2);
+  b.jam = true;
+  const float x0 = b.x;
+  b.run(P(P_NAV_STUCK_MS) / 1000.0f + 0.5f);
+  CHECK(b.nav.stuck());
+  CHECK(b.nav.state() == NAV_BLOCKED);
+  b.jam = false;
+  b.run(0.4f);
+  CHECK(b.nav.state() == NAV_BLOCKED);
+  CHECK(b.v < 0);  // backing off
+  for (int i = 0; i < 100 && b.nav.state() == NAV_BLOCKED; i++) b.run(0.05f);
+  printf("  backed off %.0f mm\n", x0 - b.x);
+  CHECK(x0 - b.x > 80 && x0 - b.x < 140);
+  CHECK(!b.nav.stuck());  // GOTO goes on
+  b.run(20);
+  CHECK(b.nav.state() == NAV_ARRIVED);
+}
+
+int main() {  testThreeWaypoints();
   testEndHeading();
   testObstacle(MODE_GOTO);
   testObstacle(MODE_EXPLORE);
   testUnsupervised();
   testHold();
   testStatusDue();
+  testSideWall(false);
+  testSideWall(true);
+  testStuck();
   printf(g_fail ? "%d FAILED\n" : "all passed\n", g_fail);
   return g_fail ? 1 : 0;
 }

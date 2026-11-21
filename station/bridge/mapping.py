@@ -411,7 +411,7 @@ class Mapper:
         except OSError:
             return out
         for n in names:
-            if n.endswith(".json") and n != "settings.json" and NAME_RE.match(n[:-5]):
+            if n.endswith(".json") and n not in ("settings.json", "planner.json") and NAME_RE.match(n[:-5]):
                 st = os.stat(os.path.join(self.dir, n))
                 out.append({"name": n[:-5], "size": st.st_size, "mtime": int(st.st_mtime)})
         out.sort(key=lambda d: -d["mtime"])
