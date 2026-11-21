@@ -64,18 +64,23 @@ async def act_waypoints(cdp):
     return None
 
 
+FULL_RATE = "document.getElementById('tc-full').classList.contains('on')||document.getElementById('tc-full').click()"
+
 SHOTS = [  # name, device, view, js to run after the view is shown, extra wait s[, action]
     ("phone-map", PHONE, "map", "", 1),
     ("phone-waypoints", PHONE, "map", "", 0.5, act_waypoints),
     ("phone-driving", PHONE, "drive", "", 0, act_drive),
     ("phone-drive", PHONE, "drive", "", 1),
     ("phone-plots", PHONE, "plots", "", 1),
-    ("phone-tune", PHONE, "tune", "", 1),
+    ("phone-tune", PHONE, "tune", FULL_RATE, 6),
     ("phone-logs", PHONE, "logs", "", 1.5),
     ("desktop-map", DESKTOP, "map", "", 1),
     ("desktop-plots", DESKTOP, "plots", "", 1),
-    ("desktop-tune", DESKTOP, "tune", "", 1),
+    ("desktop-tune", DESKTOP, "tune", FULL_RATE, 6),
     ("desktop-logs", DESKTOP, "logs", "", 1.5),
+    # last: disarm, then the first tap of the two-tap "Arm & Balance"
+    ("phone-arm", PHONE, "drive", "sbr3.send({t:'set_mode',mode:0});"
+     "setTimeout(()=>document.getElementById('arm-btn').click(),1800)", 2.5),
 ]
 
 
@@ -141,6 +146,8 @@ async def shoot(url, browser, names):
             if current != (w, h, dpr, mobile):
                 await cdp.call("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=dpr, mobile=mobile)
                 await cdp.call("Emulation.setTouchEmulationEnabled", enabled=mobile)
+                await cdp.call("Page.navigate", url="about:blank")   # fresh page (a hash change alone keeps state)
+                await asyncio.sleep(0.5)
                 await cdp.call("Page.navigate", url=url + "#" + view)
                 await asyncio.sleep(7)   # connect + fill the plot buffers
                 current = (w, h, dpr, mobile)

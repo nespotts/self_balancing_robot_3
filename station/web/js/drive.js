@@ -1,5 +1,5 @@
 // Drive panel: readouts, mode buttons, joystick + keyboard -> cmd_vel (MODE_STATION only).
-import { state, on, send, modeName, robotAlive } from "./conn.js";
+import { state, on, send, modeName, robotAlive, flag } from "./conn.js";
 import { el, toast } from "./ui.js";
 
 const MODE_HELP = {
@@ -43,16 +43,49 @@ function buildModes() {
 }
 
 function isStation() { return state.tlm && modeName(state.tlm.mode) === "STATION"; }
+// With no RC remote the station's mode request is also the arm switch (SET_MODE != IDLE arms).
+export function remotePresent() { return !!state.tlm?.radio_ok; }
+export function disarmedNoRemote() { return robotAlive() && !flag("armed") && !remotePresent(); }
+
+// ---------- arming: an explicit two-tap step ----------
+const armBox = document.getElementById("arm-box"), armBtn = document.getElementById("arm-btn");
+const armHint = document.getElementById("arm-hint");
+let armTimer = 0;
+function armReset() { clearTimeout(armTimer); armBtn.classList.remove("confirm"); armBtn.textContent = "Arm & Balance"; }
+armBtn.onclick = () => {
+  if (!armBtn.classList.contains("confirm")) {
+    armBtn.classList.add("confirm");
+    armBtn.textContent = "Tap again to arm";
+    armTimer = setTimeout(armReset, 3000);
+    return;
+  }
+  armReset();
+  send({ t: "set_mode", mode: state.hello.modes.indexOf("BALANCE") });
+  toast("Arming - stand the robot up");
+};
+
+function updateArm() {
+  const alive = robotAlive(), armed = flag("armed");
+  const needArm = alive && !armed && !remotePresent();
+  armBox.hidden = !(alive && !armed);
+  armBtn.hidden = !needArm;
+  armHint.textContent = !alive || armed ? "" : needArm ? "Motors are off. Arming starts balancing." :
+    "Arm with the RC remote's switch.";
+  if (!needArm) armReset();
+  modesEl.hidden = needArm;   // mode buttons would arm too: show them once armed
+}
 
 function updateLock() {
   let txt = "";
   if (!state.connected) txt = "Not connected to the bridge";
   else if (!robotAlive()) txt = "Robot not responding";
+  else if (disarmedNoRemote()) txt = "Arm the robot first";
   else if (!isStation()) txt = "Joystick drives in STATION mode";
   lock.hidden = !txt;
   joy.classList.toggle("locked", !!txt);
   lockText.textContent = txt;
-  take.hidden = !(state.connected && robotAlive() && !isStation());
+  take.hidden = !(state.connected && robotAlive() && !isStation() && !disarmedNoRemote());
+  updateArm();
 }
 
 function updateReadouts() {

@@ -63,6 +63,10 @@
       <div class="tile"><b id="rd-pitch">0.0</b><span>° pitch</span></div>
       <div class="tile"><b id="rd-head">0</b><span>° heading</span></div>
     </div>
+    <div class="arm-box" id="arm-box" hidden>
+      <button id="arm-btn" class="arm">Arm &amp; Balance</button>
+      <p id="arm-hint" class="muted"></p>
+    </div>
     <div class="modes" id="modes"></div>
     <div class="joy-wrap">
       <div class="joy" id="joy">
@@ -98,7 +102,21 @@
   <section id="view-tune" class="view">
     <div class="tune-head">
       <span id="tune-info" class="muted">Waiting for parameters…</span>
-      <button id="tune-reload" class="ghost">Reload</button>
+      <button id="tune-save" class="primary" title="Write the current values to the robot's EEPROM">Save to robot</button>
+      <button id="tune-more" class="ghost" title="More">⋯</button>
+      <div class="menu" id="tune-menu" hidden>
+        <button id="tune-reload">Reload values from the robot</button>
+        <button id="tune-defaults" class="warn">Restore firmware defaults…</button>
+      </div>
+    </div>
+    <div class="card tune-chart">
+      <div class="tc-bar">
+        <h3>Balance loop</h3>
+        <span id="tc-rate" class="muted"></span>
+        <button id="tc-full" class="small" title="Telemetry at the balance-loop rate (tlm.hz)">Full rate</button>
+        <button id="tc-pause" class="small">Pause</button>
+      </div>
+      <div class="tc-plots" id="tc-plots"></div>
     </div>
     <div id="tune-groups" class="tune-groups"></div>
   </section>

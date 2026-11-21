@@ -394,7 +394,7 @@ class SimRobot:
             self.waypoints = [home]
             self.nav_index = 0
             self.nav_state = NAV_IDLE
-            self.set_mode(lp.MODE_GOTO)
+            self.requested = lp.MODE_GOTO     # an event never arms
             self.log("going home")
         elif ev == lp.EVT_RESET_POSE:
             self.ox, self.oy, self.oth = self.X, self.Y, self.TH
@@ -529,8 +529,8 @@ class SimRobot:
             self.nav_state = NAV_IDLE
 
         # sensors (what the firmware sees)
-        pitch = math.degrees(self.theta) + IMU_MOUNT_DEG + rng.gauss(0, 0.04)
-        pitch_rate = math.degrees(self.theta_rate) + rng.gauss(0, 0.6)
+        pitch = math.degrees(self.theta) + IMU_MOUNT_DEG + rng.gauss(0, 0.015)
+        pitch_rate = math.degrees(self.theta_rate) + rng.gauss(0, 0.4)
         yaw_rate = math.degrees((self.vr - self.vl) / TRACK_MM)
         ctl_in = {"dt": dt, "now": now, "pitch": pitch, "pitch_rate": pitch_rate, "roll": rng.gauss(0, 0.2),
                   "heading": self.TH - self.oth, "yaw_rate": yaw_rate + rng.gauss(0, 0.3),

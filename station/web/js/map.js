@@ -7,7 +7,7 @@ const C = {
   track: "#3987e5", range: [240, 180, 41], rangeNew: "#ffd27a",
   robot: "#f0efec", heading: "#3987e5", wp: "#9085e9", wpPending: "#c3c2b7", target: "#d95926", text: "#f0efec",
 };
-const ROBOT_R = 140;  // mm
+const ROBOT = { l: 90, w: 152, track: 126.8, wheel: 66 };  // mm, from the CAD
 const FADE_MS = 120000;
 
 const canvas = document.getElementById("map");
@@ -163,17 +163,18 @@ function drawRobot() {
   const t = state.tlm;
   if (!t) return;
   const x = sx(t.x_mm), y = sy(t.y_mm), h = -t.heading_deg * Math.PI / 180;
-  const r = Math.max(10, ROBOT_R * view.s);
+  // real footprint (CAD): 90 mm long x 152 mm wide, wheels 66 mm on a 126.8 mm track; never under ~30 px wide
+  const k = Math.max(view.s, 30 / ROBOT.w);
+  const L = ROBOT.l * k, Wd = ROBOT.w * k, tr = ROBOT.track * k, wd = ROBOT.wheel * k, ww = Math.max(3, (ROBOT.w - ROBOT.track) * k);
   ctx.save();
   ctx.translate(x, y); ctx.rotate(h);
-  ctx.fillStyle = "rgba(240,239,236,0.12)"; ctx.strokeStyle = C.robot; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.fill(); ctx.stroke();
-  // wheels
-  ctx.fillStyle = C.robot;
-  ctx.fillRect(-r * 0.45, -r - 3, r * 0.9, 5); ctx.fillRect(-r * 0.45, r - 2, r * 0.9, 5);
-  // heading arrow
-  ctx.fillStyle = flag("obstacle") ? C.target : C.heading;
-  ctx.beginPath(); ctx.moveTo(r + 10, 0); ctx.lineTo(r * 0.1, -r * 0.55); ctx.lineTo(r * 0.1, r * 0.55); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "rgba(240,239,236,0.16)"; ctx.strokeStyle = C.robot; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.rect(-L / 2, -(tr - ww) / 2, L, tr - ww); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = C.robot;   // wheels
+  ctx.fillRect(-wd / 2, -Wd / 2, wd, ww); ctx.fillRect(-wd / 2, Wd / 2 - ww, wd, ww);
+  ctx.fillStyle = flag("obstacle") ? C.target : C.heading;   // heading arrow
+  const a = Math.max(10, L * 0.55);
+  ctx.beginPath(); ctx.moveTo(L / 2 + a, 0); ctx.lineTo(L / 2, -a * 0.6); ctx.lineTo(L / 2, a * 0.6); ctx.closePath(); ctx.fill();
   ctx.restore();
 }
 
@@ -232,6 +233,10 @@ bClear.onclick = () => {
 };
 bGo.onclick = () => {
   if (!state.connected) return toast("Not connected");
+  const t = state.tlm, disarmed = t && !flag("armed");
+  if (disarmed && !t.radio_ok) {   // no remote: SET_MODE GOTO arms the motors
+    if (!confirm("The robot is disarmed.\nArm it and drive to the waypoints?")) return;
+  } else if (disarmed) toast("Waypoints sent - arm with the RC remote to go", 3500);
   if (pending.length) {
     send({ t: "goto", points: pending.map((p) => [Math.round(p[0]), Math.round(p[1])]), replace: true, go: true });
     pending = [];

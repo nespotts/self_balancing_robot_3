@@ -4,7 +4,7 @@ import { toast } from "./ui.js";
 import { invalidate as mapInvalidate } from "./map.js";
 import "./drive.js";
 import { plotsShown } from "./plots.js";
-import "./tune.js";
+import { tuneShown } from "./tune.js";
 import { loadSessions } from "./logs.js";
 
 const VIEWS = ["map", "drive", "plots", "tune", "logs"];
@@ -17,6 +17,7 @@ function show(view) {
   if (location.hash.slice(1) !== view) history.replaceState(null, "", "#" + view);
   if (view === "map" || view === "drive") mapInvalidate();
   if (view === "plots") plotsShown();
+  tuneShown(view === "tune");
   if (view === "logs") loadSessions();
 }
 tabs.addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) show(b.dataset.view); });
@@ -37,6 +38,7 @@ window.addEventListener("keydown", (e) => {
 // ---------- top bar ----------
 const pLink = document.getElementById("pill-link"), pMode = document.getElementById("pill-mode");
 const pArmed = document.getElementById("pill-armed"), pBatt = document.getElementById("pill-batt");
+let rcLost = false;
 function setPill(p, text, cls) {
   p.querySelector(".txt").textContent = text;
   p.className = "pill " + (cls || "");
@@ -48,7 +50,12 @@ function updateTop() {
   else if (s.link === "released") setPill(pLink, "FLASHING", "warn");
   else if (!s.robot_alive) setPill(pLink, "SILENT", "warn");
   else if (t && !flag("pi_link")) setPill(pLink, "LINK?", "warn");
+  // The failsafe bit is always set with no RC remote: only an alarm if a remote was there and went quiet.
+  else if (t && s.remote_seen && !t.radio_ok) setPill(pLink, "RC LOST", "warn");
   else setPill(pLink, "LINK", "good");
+  const lost = !!(t && s?.remote_seen && !t.radio_ok && robotAlive());
+  if (lost && !rcLost) toast("RC remote lost - the robot stops driving and keeps balancing", 4000);
+  rcLost = lost;
   const alive = robotAlive();
   setPill(pMode, t && alive ? modeName(t.mode) : "—", t && alive && t.mode !== 0 ? "mode-on" : "");
   if (s?.estop) setPill(pArmed, "E-STOP", "estop");

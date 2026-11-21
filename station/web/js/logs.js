@@ -52,7 +52,8 @@ function updateLink() {
   kv("Port", s.port);
   kv("Telemetry", s.tlm_hz + " Hz" + (s.robot_alive ? "" : " (silent)"));
   kv("Frames / CRC errors", s.frames + " / " + s.crc_errors);
-  if (state.tlm) kv("RC remote", state.tlm.radio_ok ? "ok" : "no signal");
+  if (state.tlm) kv("RC remote", state.tlm.radio_ok ? "connected (its ARMED switch rules)"
+    : s.remote_seen ? "LOST - failsafe" : "not in use (the station arms)");
   if (state.robot) kv("Firmware", state.robot.firmware);
   kv("Clients", s.clients);
   kv("Session", s.session || "—");
