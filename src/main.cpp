@@ -344,7 +344,8 @@ static void controlStep() {
     odom.update(t, imu.heading());
   }
   // range sweep: a bounded slice of I2C work (a quarter of the step period), long before the next sample
-  if (sweep.started()) sweep.service(micros(), (uint32_t)(250000.0f / P(P_CTL_RATE_HZ)), rangePose());
+  if (sweep.started())
+    sweep.service(micros(), (uint32_t)(250000.0f / P(P_CTL_RATE_HZ)), rangePose(), modes.motorsAllowed());
   buildTelemetry(s.t_us);
 }
 
@@ -454,7 +455,7 @@ static void background() {
     static uint32_t sweep_us = 0;
     if (sweep.started() && now_us - sweep_us >= 2500) {
       sweep_us = now_us;
-      sweep.service(now_us, 600, rangePose());
+      sweep.service(now_us, 600, rangePose(), modes.motorsAllowed());
     }
   }
 
