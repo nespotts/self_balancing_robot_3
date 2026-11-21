@@ -13,30 +13,6 @@ static constexpr float kVscaleMax = 1.3f, kVscaleMin = 0.5f;
 static float g_vbatt = 0;  // filtered, 0 = none yet / invalid
 static uint32_t g_vbatt_ms = 0;
 
-float motor_curve(float in, float exp, float knee_in, float knee_out) {
-  in = fabsf(in);
-  if (in <= 0.0f) return 0.0f;
-  if (in > MOTOR_FULL) in = MOTOR_FULL;
-  float out;
-  if (in <= knee_in) {
-    out = knee_out * powf(in / knee_in, 1.0f / exp);
-  } else {
-    float slope = (MOTOR_FULL - knee_out) / (MOTOR_FULL - knee_in);
-    out = knee_out + slope * (in - knee_in);
-  }
-  if (out > MOTOR_FULL) out = MOTOR_FULL;
-  return out;
-}
-
-float motor_dz_volts(float u, float dz, float v_ref, float band) {
-  u = fabsf(u);
-  if (u <= 0.0f) return 0.0f;
-  if (u > 1.0f) u = 1.0f;
-  if (dz > v_ref) dz = v_ref;
-  if (u < band) return u / band * (dz + (v_ref - dz) * band);  // taper: no full dead-zone kick on noise
-  return dz + (v_ref - dz) * u;
-}
-
 void motors_set_vbatt(float v, uint32_t now_ms) {
   if (isnan(v) || v < kVbattMin || v > kVbattMax) {
     g_vbatt = 0;  // bad / unplugged balance lead: no compensation (scale 1)
@@ -60,10 +36,14 @@ float motors_vscale() {
   return s > kVscaleMax ? kVscaleMax : (s < kVscaleMin ? kVscaleMin : s);
 }
 
+
 // drive config in use (applied only with both motors off, see motors.h)
 static uint8_t g_mode = 0;
 static float g_hz = 0;
 static bool g_cfg_changed = false;
+static bool g_test = false;  // the motor test holds the motors (motors_test_begin .. _end)
+static constexpr float kMmPerCount = (float)M_PI * WHEEL_DIAMETER_MM / 4096.0f;
+static constexpr uint32_t kFeedbackStaleUs = 30000;
 
 void Motor::begin() {
   for (uint8_t i = 0; i < 3; i++) {
@@ -102,6 +82,9 @@ void Motor::off() {
   level(D2, false);
   off_ = true;
   cmd_ = 0;
+  loop_.reset();
+  loop_run_ = false;
+  sl_target_ = 0;
 }
 
 void Motor::drive(float pwm_signed) {
@@ -111,7 +94,7 @@ void Motor::drive(float pwm_signed) {
   off_ = false;
   // The IN pin that goes low is always set first, so both INs are never high together.
   if (g_mode == 1) {
-    // slow decay / brake: EN high, PWM on the direction's IN pin, the other IN low
+    // slow decay / brake (motor test only): EN high, PWM on the direction's IN pin, the other IN low
     if (pwm_signed > 0) {
       level(D2, false);
       level(EN, true);
@@ -123,7 +106,7 @@ void Motor::drive(float pwm_signed) {
     } else {
       level(D1, false);
       level(D2, false);
-      level(EN, true);  // both INs low, EN high = brake (hold); disarmed / IDLE uses off() instead
+      level(EN, true);  // both INs low, EN high = brake (hold); the test sends 0 as off() instead
     }
     return;
   }
@@ -141,9 +124,46 @@ void Motor::drive(float pwm_signed) {
   pwm(EN, duty);
 }
 
+void Motor::feedback(int32_t counts, uint32_t t_us) { est_.sample(counts, t_us, kMmPerCount); }
+
+// mot.speed_loop 1: cmd -> target wheel speed -> WheelSpeedLoop -> signed duty. false = not active
+// (off, or no fresh encoder feedback): the caller uses mot.model instead.
+bool Motor::speedLoop(float cmd, float& duty) {
+  const uint32_t now = micros();
+  if (P(P_MOT_SPEED_LOOP) < 0.5f || !est_.valid() || (int32_t)(now - est_.lastUs()) > (int32_t)kFeedbackStaleUs) {
+    if (loop_run_) loop_.reset();
+    loop_run_ = false;
+    sl_target_ = 0;
+    return false;
+  }
+  SpeedLoopCfg c;
+  c.kp = P(P_MOT_SL_KP);
+  c.ki = P(P_MOT_SL_KI);
+  c.i_max = P(P_MOT_SL_IMAX);
+  c.band = P(P_MOT_SL_BAND);
+  c.k_mms_per_v = P((ParamId)k_);
+  c.dz_fwd = P((ParamId)dz_fwd_);
+  c.dz_rev = P((ParamId)dz_rev_);
+  const float vb = g_vbatt > 0.0f ? g_vbatt : P(P_MOT_V_REF);
+  c.v_max = vb;
+  const float dz = 0.5f * (c.dz_fwd + c.dz_rev);
+  const float span = P(P_MOT_V_REF) - dz;
+  sl_target_ = cmd / MOTOR_FULL * c.k_mms_per_v * (span > 0.5f ? span : 0.5f);  // u = 1 -> model-1 top speed
+  const float dt = loop_run_ ? (float)(now - loop_us_) * 1e-6f : 0.0025f;
+  loop_us_ = now;
+  loop_run_ = true;
+  duty = loop_.step(sl_target_, est_.speed(), dt, c) / vb * MOTOR_FULL;
+  return true;
+}
+
 void Motor::set(float cmd) {
   if (isnan(cmd)) cmd = 0;
   cmd_ = cmd;
+  float duty;
+  if (speedLoop(cmd, duty)) {
+    drive(duty);
+    return;
+  }
   float pwm;
   if (P(P_MOT_MODEL) >= 0.5f) {
     const float v_ref = P(P_MOT_V_REF);
@@ -162,20 +182,19 @@ void Motor::setRaw(float duty) {
   drive(duty);
 }
 
-static Motor g_left(pins::MOT_L_EN, pins::MOT_L_D1, pins::MOT_L_D2, P_MOT_DZ_L_FWD, P_MOT_DZ_L_REV);
-static Motor g_right(pins::MOT_R_EN, pins::MOT_R_D1, pins::MOT_R_D2, P_MOT_DZ_R_FWD, P_MOT_DZ_R_REV);
+static Motor g_left(pins::MOT_L_EN, pins::MOT_L_D1, pins::MOT_L_D2, P_MOT_DZ_L_FWD, P_MOT_DZ_L_REV, P_MOT_K_L);
+static Motor g_right(pins::MOT_R_EN, pins::MOT_R_D1, pins::MOT_R_D2, P_MOT_DZ_R_FWD, P_MOT_DZ_R_REV, P_MOT_K_R);
 
-static uint8_t wantMode() { return P(P_MOT_DRIVE_MODE) >= 0.5f ? 1 : 0; }
 // mot.pwm_hz, or its default while the params are not loaded yet (motors_begin runs first: all 0)
-static float wantHz() {
+static float validHz(float hz) {
   const ParamDef& d = params_def(P_MOT_PWM_HZ);
-  const float hz = P(P_MOT_PWM_HZ);
   return (hz >= d.min && hz <= d.max) ? hz : d.def;
 }
+static float wantHz() { return validHz(P(P_MOT_PWM_HZ)); }
+static uint8_t wantMode();
 
 // Only with both motors off (EN low, INs GPIO low): nothing is driven while the timers change.
-static void applyConfig() {
-  const float hz = wantHz();
+static void applyConfig(float hz, uint8_t mode) {
   if (hz != g_hz) {
     // every motor pin's FlexPWM submodule (EN and both INs, see motors.h); pins sharing one are
     // simply set twice to the same value
@@ -183,22 +202,68 @@ static void applyConfig() {
     for (const Motor* m : ms)
       for (uint8_t i = 0; i < 3; i++) analogWriteFrequency(m->pins()[i], hz);
     g_hz = hz;
+    g_cfg_changed = true;
   }
-  g_mode = wantMode();
+  if (mode != g_mode) {
+    g_mode = mode;
+    g_cfg_changed = true;
+  }
 }
 
 void motors_begin() {
   analogWriteResolution(12);
   g_left.begin();
   g_right.begin();
-  applyConfig();
+  applyConfig(wantHz(), wantMode());
+  g_cfg_changed = false;
+}
+
+// mot.drive_mode 1 only at mot.pwm_hz <= mot.brake_max_hz (brake decay heats the L298N more at high
+// frequency: issues #23 / #26); above it: mode 0.
+static bool g_refused = false;
+static uint8_t wantMode() {
+  const bool want1 = P(P_MOT_DRIVE_MODE) >= 0.5f;
+  const bool ok = !want1 || wantHz() <= P(P_MOT_BRAKE_MAX_HZ);
+  if (!ok && !g_refused) g_cfg_changed = true;  // log the refusal once
+  g_refused = !ok;
+  return want1 && ok ? 1 : 0;
 }
 
 void motors_service() {
-  if (!g_left.isOff() || !g_right.isOff()) return;
-  if (wantHz() == g_hz && wantMode() == g_mode) return;
-  applyConfig();
-  g_cfg_changed = true;
+  if (g_test || !g_left.isOff() || !g_right.isOff()) return;
+  const uint8_t mode = wantMode();
+  if (wantHz() == g_hz && g_mode == mode) return;
+  applyConfig(wantHz(), mode);
+}
+
+bool motors_drive_mode_refused() { return g_refused; }
+
+bool motors_test_begin(uint8_t drive_mode, float pwm_hz) {
+  g_left.off();
+  g_right.off();
+  pwm_hz = validHz(pwm_hz);
+  const uint8_t mode = drive_mode ? 1 : 0;
+  if (mode == 1 && pwm_hz > P(P_MOT_BRAKE_MAX_HZ)) return false;  // second guard (motor_test.cpp checks first)
+  applyConfig(pwm_hz, mode);
+  g_test = true;
+  return true;
+}
+
+void motors_test_end() {
+  g_left.off();
+  g_right.off();
+  g_test = false;
+  applyConfig(wantHz(), wantMode());
+}
+
+void motors_test_drive(float left_duty, float right_duty, uint8_t wheels) {
+  Motor* const m[2] = {&g_left, &g_right};
+  const float d[2] = {left_duty, right_duty};
+  for (int i = 0; i < 2; i++) {
+    const bool selected = wheels == 0 || wheels == (uint8_t)(i + 1);
+    if (!g_test || !selected || isnan(d[i]) || d[i] == 0.0f) m[i]->off();
+    else m[i]->setRaw(d[i]);
+  }
 }
 
 bool motors_take_config_changed() {
@@ -211,13 +276,14 @@ uint8_t motors_drive_mode() { return g_mode; }
 float motors_pwm_hz() { return g_hz; }
 
 void motors_set(float left, float right) {
+  if (g_test) return;  // the motor test holds the motors (and may be in drive mode 1)
   g_left.set(left);
   g_right.set(right);
 }
 
-void motors_set_raw(float left_duty, float right_duty) {
-  g_left.setRaw(left_duty);
-  g_right.setRaw(right_duty);
+void motors_speed_feedback(int32_t left_counts, int32_t right_counts, uint32_t t_us) {
+  g_left.feedback(left_counts, t_us);
+  g_right.feedback(right_counts, t_us);
 }
 
 void motors_stop() {

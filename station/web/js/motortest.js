@@ -174,12 +174,14 @@ function drawFit() {
 
 // ---------- proposal ----------
 const LABEL = { "mot.model": "use the volts model", "mot.vcomp": "battery compensation", "mot.v_ref": "u = 1 → volts",
+  "mot.k_l": "mm/s per V", "mot.k_r": "mm/s per V",
 };
 function proposal(R) {
   const P = R.proposal, box = el("div", { class: "mt-sec mt-prop" }, el("h4", {}, "Proposal"));
   const t = el("table", { class: "mt-table" }, el("thead", {}, el("tr", {}, el("th", {}, ""), el("th", {}, ""), el("th", {}, "now"), el("th", {}, "new"))));
   const tb = el("tbody"), boxes = {};
-  const order = ["mot.dz_l_fwd", "mot.dz_l_rev", "mot.dz_r_fwd", "mot.dz_r_rev", "mot.left_scale", "mot.right_scale", "mot.v_ref", "mot.model", "mot.vcomp"];
+  const order = ["mot.dz_l_fwd", "mot.dz_l_rev", "mot.dz_r_fwd", "mot.dz_r_rev", "mot.left_scale", "mot.right_scale", "mot.v_ref",
+    "mot.k_l", "mot.k_r", "mot.model", "mot.vcomp"];
   for (const k of order) {
     if (!(k in P.params)) continue;
     const cur = param(k), opt = k === "mot.model" || k === "mot.vcomp";

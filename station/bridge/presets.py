@@ -2,7 +2,8 @@
 files on the Pi (~/sbr3-presets/<name>.json). Two built-ins ship read-only.
 
 Applying a preset = set_param for each value that differs from the robot's; it never touches
-mot.test / mot.test_max (the wheels-up test), mot.drive_mode (locked, issue #23) or cfg.* (actions).
+the wheels-up test (mot.test, test_max, test_wheels), the L298N drive mode and its limits (mot.drive_mode,
+brake_max_hz, brake_duty_max: issues #23 / #26) or cfg.* (actions).
 """
 import json
 import os
@@ -10,7 +11,9 @@ import re
 import time
 
 GROUPS = ("bal.", "vel.", "str.", "drv.", "mot.")
-NEVER = frozenset(("mot.test", "mot.test_max", "mot.drive_mode"))
+# test controls and L298N safety limits (issues #22 / #23 / #26) are never part of a preset
+NEVER = frozenset(("mot.test", "mot.test_max", "mot.test_wheels", "mot.drive_mode", "mot.brake_max_hz",
+                   "mot.brake_duty_max"))
 NAME_MAX = 60
 
 _V3 = {

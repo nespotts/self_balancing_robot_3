@@ -63,11 +63,11 @@ class TestBridgeWithSim(unittest.TestCase):
             ws = await WsClient.connect("127.0.0.1", port)
             hello = await wait_for(ws, lambda m: m["t"] == "hello")
             self.assertEqual(hello["modes"][3], "STATION")
-            params = await wait_for(ws, lambda m: m["t"] == "params" and len(m["list"]) >= 62)
+            params = await wait_for(ws, lambda m: m["t"] == "params" and len(m["list"]) >= 72)
             names = {p["name"]: p for p in params["list"]}
             self.assertEqual(names["bal.kp"]["value"], 250.0)
             self.assertEqual(names["vel.kd"]["value"], 0.00007)
-            self.assertEqual(len(params["list"]), 62)              # src/params.h (with the motor test params)
+            self.assertEqual(len(params["list"]), 72)              # src/params.h (with the motor test / profile params)
             self.assertEqual(names["cfg.save"]["id"], 34)           # same ids as src/params.h
             tlm = await wait_for(ws, lambda m: m["t"] == "tlm")
             self.assertEqual(tlm["mode"], lp.MODE_IDLE)

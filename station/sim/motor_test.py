@@ -174,6 +174,10 @@ class SimMotorTest:
             self.next_part(i)
 
     def start(self, i):
+        if self.test > 4:      # tracking tests 5-7 (issue #26): firmware only
+            self.emit("mt,abort,not_in_sim,part=-,t=0.0")
+            self.stop_all(True)
+            return
         self.parts = {1: "a", 2: "b", 3: "c"}.get(self.test, "abc")
         limit = {1: A_LIMIT_S, 2: B_LIMIT_S, 3: C_LIMIT_S}.get(self.test, A_LIMIT_S + B_LIMIT_S + C_LIMIT_S)
         self.state, self.part_i, self.part, self.holding = "run", 0, None, False

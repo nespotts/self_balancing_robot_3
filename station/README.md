@@ -35,6 +35,10 @@ Options: `--remote` (RC remote on: its ARMED switch rules), `--remote-disarmed`,
 Tests: `python -m unittest discover -s station -t .` (protocol vs the C header, plus a full sim + bridge + browser-API run).
 Screenshots: `python -m station.tools.screenshots --url http://localhost:8080/ --prep`
 
+## Android app
+
+[android/](android/README.md): full-screen app for the phone. Finds the robot on the Wi-Fi, tilt-to-drive (hold-to-drive dead-man), Bluetooth gamepad, haptics.
+
 ## Use it
 
 | | |
@@ -57,7 +61,7 @@ Screenshots: `python -m station.tools.screenshots --url http://localhost:8080/ -
 
 | | |
 |---|---|
-| **Preset ▾ / Apply** | built-in "v3 known good" and "2026-11-21 (kd 7.15, ki 1500)", plus your own (⋯ → Save current values as… / Compare… / Delete). Kept on the Pi in `~/sbr3-presets/*.json`. Apply = only the values that differ; asks first while the robot is armed. Never touches `mot.test`, `mot.drive_mode`, `cfg.*` |
+| **Preset ▾ / Apply** | built-in "v3 known good" and "2026-11-21 (kd 7.15, ki 1500)", plus your own (⋯ → Save current values as… / Compare… / Delete). Kept on the Pi in `~/sbr3-presets/*.json`. Apply = only the values that differ; asks first while the robot is armed. Never touches the motor test (`mot.test*`), `mot.drive_mode` and its brake limits, `cfg.*` |
 | **Score** | **Last 20 s** (⋯: 10 / 20 / 30 / 60 s) or **Start … Stop** around a run (push it a few times). The bridge scores the full-rate session log like `tools/tune.py score`: pitch error rms, oscillation Hz, motor rms / saturation / sign flips, D noise, pushes > 3° with settle time and overshoot. Needs **Full rate** (400 Hz) |
 | **Runs side by side** | one column per run with the params active then (changed ones in yellow, `*` = changed during the run); best value per row highlighted. History lives in the bridge (and in the session log as `["score", t, {...}]`) |
 

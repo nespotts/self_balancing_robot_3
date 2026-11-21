@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="300" viewBox="0 0 720 300" font-family="system-ui,Segoe UI,Arial,sans-serif" font-size="13">
+<title>Dead zone per drive config</title>
+<rect width="100%" height="100%" fill="#fcfcfb"/>
+<text x="20" y="22" fill="#0b0b0b" font-size="15" font-weight="600">Dead zone, right wheel: stops below / starts above (motor volts)</text>
+<line x1="120.0" y1="40" x2="120.0" y2="266" stroke="#e4e3df"/>
+<text x="120.0" y="284" fill="#52514e" text-anchor="middle">0 V</text>
+<line x1="191.2" y1="40" x2="191.2" y2="266" stroke="#e4e3df"/>
+<text x="191.2" y="284" fill="#52514e" text-anchor="middle">1 V</text>
+<line x1="262.5" y1="40" x2="262.5" y2="266" stroke="#e4e3df"/>
+<text x="262.5" y="284" fill="#52514e" text-anchor="middle">2 V</text>
+<line x1="333.8" y1="40" x2="333.8" y2="266" stroke="#e4e3df"/>
+<text x="333.8" y="284" fill="#52514e" text-anchor="middle">3 V</text>
+<line x1="405.0" y1="40" x2="405.0" y2="266" stroke="#e4e3df"/>
+<text x="405.0" y="284" fill="#52514e" text-anchor="middle">4 V</text>
+<line x1="476.2" y1="40" x2="476.2" y2="266" stroke="#e4e3df"/>
+<text x="476.2" y="284" fill="#52514e" text-anchor="middle">5 V</text>
+<line x1="547.5" y1="40" x2="547.5" y2="266" stroke="#e4e3df"/>
+<text x="547.5" y="284" fill="#52514e" text-anchor="middle">6 V</text>
+<line x1="618.8" y1="40" x2="618.8" y2="266" stroke="#e4e3df"/>
+<text x="618.8" y="284" fill="#52514e" text-anchor="middle">7 V</text>
+<line x1="690.0" y1="40" x2="690.0" y2="266" stroke="#e4e3df"/>
+<text x="690.0" y="284" fill="#52514e" text-anchor="middle">8 V</text>
+<text x="108" y="65" fill="#0b0b0b" text-anchor="end">coast 36.6 kHz</text>
+<rect x="554.3" y="53" width="63.7" height="14" rx="4" fill="#2a78d6" opacity="0.35"/>
+<circle cx="554.3" cy="60" r="6" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="618.0" cy="60" r="6" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<text x="544.3" y="65" fill="#52514e" text-anchor="end">6.1</text>
+<text x="628.0" y="65" fill="#52514e">7.0</text>
+<text x="108" y="111" fill="#0b0b0b" text-anchor="end">coast 10 kHz</text>
+<rect x="391.4" y="99" width="269.3" height="14" rx="4" fill="#eb6834" opacity="0.35"/>
+<circle cx="391.4" cy="106" r="6" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="660.8" cy="106" r="6" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<text x="381.4" y="111" fill="#52514e" text-anchor="end">3.8</text>
+<text x="670.8" y="111" fill="#52514e">7.6</text>
+<text x="108" y="157" fill="#0b0b0b" text-anchor="end">coast 4 kHz</text>
+<rect x="291.2" y="145" width="322.6" height="14" rx="4" fill="#1baf7a" opacity="0.35"/>
+<circle cx="291.2" cy="152" r="6" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="613.8" cy="152" r="6" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<text x="281.2" y="157" fill="#52514e" text-anchor="end">2.4</text>
+<text x="623.8" y="157" fill="#52514e">6.9</text>
+<text x="108" y="203" fill="#0b0b0b" text-anchor="end">coast 1 kHz</text>
+<rect x="208.7" y="191" width="176.4" height="14" rx="4" fill="#eda100" opacity="0.35"/>
+<circle cx="208.7" cy="198" r="6" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="385.2" cy="198" r="6" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<text x="198.7" y="203" fill="#52514e" text-anchor="end">1.2</text>
+<text x="395.2" y="203" fill="#52514e">3.7</text>
+<text x="108" y="249" fill="#0b0b0b" text-anchor="end">brake 1 kHz</text>
+<rect x="178.5" y="237" width="128.4" height="14" rx="4" fill="#e87ba4" opacity="0.35"/>
+<circle cx="178.5" cy="244" r="6" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="306.9" cy="244" r="6" fill="#e87ba4" stroke="#fcfcfb" stroke-width="2"/>
+<text x="168.5" y="249" fill="#52514e" text-anchor="end">0.8</text>
+<text x="316.9" y="249" fill="#52514e">2.6</text></svg>

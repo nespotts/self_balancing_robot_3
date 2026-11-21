@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>Balance Bot</title>
+<style>
+  :root { --bg: #121212; --surface: #1a1a19; --surface-2: #242422; --surface-3: #30302d; --line: #3a3a37;
+    --text: #f0efec; --text-2: #c3c2b7; --muted: #8d8c84; --blue: #3987e5; --good: #22a447; --warn: #d99a00; --bad: #e0413f;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); }
+  body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px 20px;
+    -webkit-tap-highlight-color: transparent; user-select: none; }
+  .box { width: 100%; max-width: 400px; display: flex; flex-direction: column; align-items: center; gap: 18px; }
+  .bot { width: 112px; height: 112px; border-radius: 50%; display: grid; place-items: center; background: var(--surface-2);
+    border: 2px solid var(--line); position: relative; }
+  .bot svg { width: 64px; height: 64px; }
+  .bot::after { content: ""; position: absolute; inset: -2px; border-radius: 50%; border: 2px solid transparent; }
+  body[data-s="search"] .bot::after { border-top-color: var(--blue); animation: spin 1s linear infinite; }
+  body[data-s="found"] .bot { border-color: var(--good); }
+  body[data-s="none"] .bot, body[data-s="error"] .bot { border-color: var(--bad); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  h1 { margin: 0; font-size: 24px; font-weight: 700; text-align: center; }
+  .sub { margin: -8px 0 0; color: var(--text-2); font-size: 15px; text-align: center; min-height: 1.3em; line-height: 1.4; }
+  .bar { width: 100%; height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--blue); transition: width .2s; }
+  .tips { width: 100%; margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+  .tips li { display: flex; gap: 12px; align-items: center; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px 14px; font-size: 15px; color: var(--text-2); }
+  .tips svg { flex: none; width: 22px; height: 22px; color: var(--muted); }
+  button { font: inherit; color: inherit; background: var(--surface-3); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 18px; cursor: pointer; }
+  button:active { transform: translateY(1px); }
+  button.primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+  button.link { background: none; border: 0; color: var(--blue); padding: 8px; font-size: 15px; }
+  .row { width: 100%; display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+  .manual { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+  .manual label { font-size: 13px; color: var(--muted); }
+  .manual .row button { flex: none; }
+  input { font: inherit; font-size: 18px; color: var(--text); background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px 14px; min-width: 0; font-variant-numeric: tabular-nums; }
+  input:focus { outline: none; border-color: var(--blue); }
+  .err { color: #ff9a92; font-size: 14px; min-height: 1.2em; margin: 0; }
+  .chip { background: var(--surface-2); border: 1px solid var(--line); border-radius: 18px; padding: 8px 14px; font-size: 14px; }
+  .foot { position: fixed; bottom: 10px; left: 0; right: 0; text-align: center; font-size: 12px; color: var(--muted); }
+  svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  [hidden] { display: none !important; }
+  @media (orientation: landscape) and (max-height: 500px) {
+    body { padding: 12px 20px; }
+    .box { max-width: 720px; display: grid; grid-template-columns: 112px 1fr; column-gap: 24px; row-gap: 12px; align-items: center; }
+    .bot { grid-row: span 3; }
+    h1, .sub { text-align: left; }
+    .sub { margin: 0; }
+    .box > :not(.bot):not(h1):not(.sub) { grid-column: 1 / -1; }
+    .tips { display: grid; grid-template-columns: 1fr 1fr 1fr; }
+  }
+</style>
+</head>
+<body data-s="search">
+<div class="box">
+  <div class="bot" aria-hidden="true">
+    <svg viewBox="0 0 64 64"><rect x="21" y="4" width="22" height="30" rx="5"/><rect x="26" y="10" width="12" height="7" rx="2"/>
+      <circle cx="32" cy="46" r="10"/><circle cx="32" cy="46" r="3"/><path d="M12 59h40"/></svg>
+  </div>
+  <h1 id="title">Looking for the robot</h1>
+  <p class="sub" id="sub"></p>
+  <div class="bar" id="bar"><i id="bar-i"></i></div>
+
+  <ul class="tips" id="tips" hidden>
+    <li><svg viewBox="0 0 24 24"><path d="M2 9a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="19.5" r="1"/></svg><span id="tip-wifi">Phone on the robot's Wi-Fi</span></li>
+    <li><svg viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M6.3 7.3a8 8 0 1 0 11.4 0"/></svg><span>Robot switched on (Pi takes ~40 s)</span></li>
+    <li><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg><span>Bridge running on port 8080</span></li>
+  </ul>
+
+  <div class="row" id="actions" hidden>
+    <button class="primary" id="retry">Search again</button>
+  </div>
+
+  <div class="manual" id="manual" hidden>
+    <label for="addr">Robot address</label>
+    <div class="row">
+      <input id="addr" inputmode="decimal" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="192.168.0.209">
+      <button class="primary" id="go">Connect</button>
+    </div>
+    <p class="err" id="err"></p>
+  </div>
+
+  <button class="chip" id="recent" hidden></button>
+  <button class="link" id="show-manual">Enter address</button>
+</div>
+<div class="foot" id="foot"></div>
+
+<script>
+"use strict";
+const N = window.SBR3Native;
+const $ = (id) => document.getElementById(id);
+const on = {};
+window.__sbr3 = { emit(name, json) {
+  let d = {}; try { d = typeof json === "string" ? JSON.parse(json) : json || {}; } catch (e) { }
+  if (on[name]) on[name](d);
+} };
+
+let last = N ? N.lastAddress() : "";
+const hash = new URLSearchParams(location.hash.slice(1));
+
+function set(s, title, sub) {
+  document.body.dataset.s = s;
+  $("title").textContent = title;
+  $("sub").textContent = sub || "";
+  $("bar").hidden = s !== "search";
+  $("tips").hidden = s !== "none";
+  $("actions").hidden = !(s === "none" || s === "error" || s === "manual");
+  $("show-manual").hidden = !$("manual").hidden || s === "found";
+  $("recent").hidden = !(last && (s === "none" || s === "manual") && $("manual").hidden);
+  $("recent").textContent = "Last robot: " + last.replace(/:8080$/, "");
+}
+
+function showManual(prefill) {
+  $("manual").hidden = false;
+  $("show-manual").hidden = true;
+  $("recent").hidden = true;
+  if (prefill != null && !$("addr").value) $("addr").value = prefill.replace(/:8080$/, "");
+  $("addr").focus();
+}
+
+let noWifi = false;
+function search() {
+  noWifi = false;
+  $("err").textContent = "";
+  $("bar-i").style.width = "0";
+  set("search", "Looking for the robot", last ? "Trying " + last.replace(/:8080$/, "") + " …" : "Scanning the Wi-Fi …");
+  if (N) N.findStart();
+}
+
+function connect(addr) {
+  set("found", "Robot found", addr.replace(/:8080$/, "") + " · opening …");
+  setTimeout(() => N.connect(addr), 350);
+}
+
+on.find = (d) => {
+  if (document.body.dataset.s !== "search") return;
+  if (!d.wifi) noWifi = true;
+  $("bar-i").style.width = (d.total ? Math.round(100 * d.done / d.total) : 0) + "%";
+  if (d.subnet) $("sub").textContent = "Scanning " + d.subnet + "  ·  " + d.done + " / " + d.total;
+};
+on.found = (d) => connect(d.addr);
+on.findDone = () => {
+  set("none", "Robot not found", noWifi ? "No Wi-Fi: join the robot's network, then search again." : "Nothing answered on port 8080.");
+};
+on.probe = (d) => {
+  $("go").disabled = false;
+  if (d.ok) connect(d.addr);
+  else $("err").textContent = d.error || "No answer";
+};
+
+$("retry").onclick = search;
+$("show-manual").onclick = () => { if (N) N.findStop(); if (document.body.dataset.s === "search") set("manual", "Enter the address", "The Pi's IP, as on the router or the robot's screen."); showManual(last); };
+$("recent").onclick = () => { $("err").textContent = ""; set("search", "Connecting", last.replace(/:8080$/, "") + " …"); N.probe(last); on.probe = probeThen(on.probe); };
+function probeThen(orig) {   // probe from the "last robot" chip: a failure lands back on "not found"
+  return function (d) { on.probe = orig; if (d.ok) connect(d.addr); else { set("none", "Robot not found", d.error || ""); } };
+}
+$("go").onclick = () => {
+  const v = $("addr").value.trim();
+  if (!v) { $("err").textContent = "Type the robot's IP address"; return; }
+  $("err").textContent = "Checking …";
+  $("go").disabled = true;
+  N.probe(v);
+};
+$("addr").addEventListener("keydown", (e) => { if (e.key === "Enter") $("go").click(); });
+$("addr").addEventListener("focus", () => setTimeout(() => $("addr").scrollIntoView({ block: "center" }), 350));   // above the keyboard
+
+if (N) {
+  try { const i = JSON.parse(N.appInfo()); $("foot").textContent = "Balance Bot " + (i.version || "") + (i.debug ? " · debug" : ""); } catch (e) { }
+}
+if (!N) {
+  set("none", "Open this in the Balance Bot app", "This page is the Android app's start screen.");
+} else if (hash.get("error")) {
+  const a = hash.get("addr") || last;
+  set("error", "Couldn't open the robot", (a || "").replace(/:8080$/, "") + " — " + hash.get("error"));
+  showManual(a || last);
+} else if (hash.get("manual")) {
+  set("manual", "Connect to a robot", "Search the Wi-Fi, or type the address.");
+  showManual(last);
+} else {
+  search();
+}
+</script>
+</body>
+</html>

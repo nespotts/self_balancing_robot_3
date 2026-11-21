@@ -72,11 +72,16 @@ PARAMS = [
     ("rng.servo_max_deg", 175.0, 90.0, 180.0), ("rng.servo_deg_per_cmd", 1.0, 0.5, 1.5),
     # wheels-up motor test (sim: robot on a stand, TT motors; station/sim/motor_test.py). mot.model / vcomp /
     # v_ref / dz_* are listed (the Tune page applies motor fits to them) but the balance sim keeps the v3 curve.
-    ("mot.test", 0.0, 0.0, 4.0), ("mot.test_max", 4095.0, 500.0, 4095.0), ("mot.model", 0.0, 0.0, 1.0),
+    ("mot.test", 0.0, 0.0, 7.0), ("mot.test_max", 4095.0, 500.0, 4095.0), ("mot.model", 0.0, 0.0, 1.0),
     ("mot.vcomp", 0.0, 0.0, 1.0), ("mot.v_ref", 12.0, 6.0, 17.0), ("mot.dz_l_fwd", 2.0, 0.0, 8.0),
     ("mot.dz_l_rev", 2.0, 0.0, 8.0), ("mot.dz_r_fwd", 2.0, 0.0, 8.0), ("mot.dz_r_rev", 2.0, 0.0, 8.0),
     ("mot.dz_band", 0.01, 0.0, 0.2), ("rng.idle_off", 1.0, 0.0, 1.0), ("mot.pwm_hz", 36621.09, 100.0, 50000.0),
-    ("mot.drive_mode", 0.0, 0.0, 0.0),
+    ("mot.drive_mode", 0.0, 0.0, 1.0),
+    # motor profile (issue #26): one-wheel tests, brake-mode limits, wheel speed loop (not simulated)
+    ("mot.test_wheels", 0.0, 0.0, 2.0), ("mot.brake_max_hz", 2000.0, 100.0, 10000.0),
+    ("mot.brake_duty_max", 3000.0, 500.0, 4095.0), ("mot.speed_loop", 0.0, 0.0, 1.0), ("mot.sl_kp", 0.006, 0.0, 0.1),
+    ("mot.sl_ki", 0.08, 0.0, 2.0), ("mot.sl_imax", 3.0, 0.0, 12.0), ("mot.sl_band", 0.3, 0.0, 3.0),
+    ("mot.k_l", 200.0, 10.0, 2000.0), ("mot.k_r", 200.0, 10.0, 2000.0),
 ]
 CELLS = 3
 

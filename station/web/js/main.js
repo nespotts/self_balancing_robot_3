@@ -3,6 +3,7 @@ import { state, on, send, connect, modeName, flag, robotAlive } from "./conn.js"
 import { toast } from "./ui.js";
 import { invalidate as mapInvalidate } from "./map.js";
 import "./drive.js";
+import "./native.js";   // Android app extras (tilt, gamepad, haptics); no-op in browsers
 import { plotsShown } from "./plots.js";
 import { sensorsShown } from "./sensors.js";
 import { tuneShown } from "./tune.js";

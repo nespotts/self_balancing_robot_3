@@ -20,9 +20,10 @@ KEYS = tuple("%s_%s" % (w, d) for w in WHEELS for d in DIRS)
 MOVE_MMS = 20.0
 V_OK = (6.0, 17.0)
 DEFAULT_HZ = 36621.0  # firmware before issue #22: EN PWM at 36.6 kHz, no hz=/drive= in the lines
-EXPECTED = {"a": 8, "b": 64, "c": 12}   # result lines per part (progress)
-PARTS = {1: "a", 2: "b", 3: "c", 4: "abc"}
-DURATION_S = {1: 45, 2: 42, 3: 14, 4: 80}  # rough, for a progress estimate
+EXPECTED = {"a": 8, "b": 64, "c": 12, "l": 10}   # result lines per part, both wheels (progress)
+PARTS = {1: "a", 2: "b", 3: "c", 4: "abc", 5: "ll", 6: "l", 7: "lll"}   # tests 5-7: tracking (ol0, ol1, cl)
+DURATION_S = {1: 45, 2: 42, 3: 14, 4: 80, 5: 75, 6: 38, 7: 110}  # rough, for a progress estimate
+TRACK_SEGS = ("r+", "r-", "s0", "s150", "st")
 
 
 # ------------------------------------------------------------------ input
@@ -83,13 +84,15 @@ def split_runs(items):
         f = it[2].split(",")
         kind = f[1] if len(f) > 1 else ""
         if kind == "begin":
-            cur = {"test": f[2], "status": "running", "a": [], "b": [], "c": [], "sum": [], "begin": it[2],
-                   "cfg": parse_cfg(it[2]), "t": it[1]}
+            cur = {"test": f[2], "status": "running", "a": [], "ad": [], "b": [], "c": [], "l": [], "sum": [],
+                   "begin": it[2], "cfg": parse_cfg(it[2]), "t": it[1]}
             runs.append(cur)
         elif cur is None:
             continue
-        elif kind in ("a", "b", "c"):
+        elif kind in ("a", "ad", "b", "c"):
             cur[kind].append(f)
+        elif kind == "l":
+            cur["l"].append(it[2])
         elif kind == "sum":
             cur["sum"].append(it[2])
         elif kind == "end":
@@ -197,8 +200,8 @@ def _r(v, n=4):
 # ------------------------------------------------------------------ analysis
 def analyze(runs, params, cfg, vref=None, vbatt=None, band=None):
     """Fit the runs of one drive config. Returns a JSON-ready dict (see report() for what is in it)."""
-    R = {"cfg": list(cfg), "cfg_name": cfg_name(cfg), "cfg_label": cfg_label(cfg), "warnings": [],
-         "a": None, "b": None, "c": None, "proposal": None}
+    R = {"cfg": list(cfg), "cfg_name": cfg_name(cfg), "cfg_label": cfg_label(cfg), "warnings": [], "notes": [],
+         "a": None, "b": None, "c": None, "track": None, "proposal": None}
     warn = []
 
     def vb_of(s):
@@ -206,6 +209,9 @@ def analyze(runs, params, cfg, vref=None, vbatt=None, band=None):
         if v is not None and V_OK[0] <= v <= V_OK[1]:
             return v
         if vbatt:
+            note = "pack reading invalid (%s V, balance lead not connected?): volts use --vbatt %.2f V" % (s, vbatt)
+            if note not in R["notes"] and not R["notes"]:
+                R["notes"].append(note)
             return vbatt
         warn.append("battery reading %s V invalid; volts unknown (use --vbatt)" % s)
         return None
@@ -230,7 +236,17 @@ def analyze(runs, params, cfg, vref=None, vbatt=None, band=None):
                 s, t = e.get("start", (None, None)), e.get("stop", (None, None))
                 rows.append({"wheel": w, "dir": d, "start_duty": s[0], "start_v": _r(s[1]), "stop_duty": t[0],
                              "stop_v": _r(t[1]), "vb": e.get("vb")})
-        R["a"] = {"status": ra["status"], "rows": rows}
+        R["a"] = {"status": ra["status"], "rows": rows, "ramp_down": {}}
+
+    # ---------------- test 1 ramp down while turning (mt,ad: wheel,dir,duty,volts,vbatt,speed)
+    AD = {}
+    if ra:
+        for f in ra["ad"]:
+            v, sp = volts(num(f[4]), f[6]), num(f[7])
+            if v is not None and sp is not None:
+                AD.setdefault((f[2], f[3]), []).append((v, abs(sp)))
+        R["a"]["ramp_down"] = {"%s_%s" % k: [[_r(v), _r(s)] for v, s in sorted(pts)] for k, pts in sorted(AD.items())}
+    kin = {}
 
     # ---------------- test b: speed curve
     B, fits, taus = {}, {}, {}
@@ -254,8 +270,14 @@ def analyze(runs, params, cfg, vref=None, vbatt=None, band=None):
             fit = linfit([v for v, _ in moving], [s for _, s in moving])
             if fit and fit[0] > 0 and pts:
                 k, c, res = fit
+                # speed vs volts while turning: test-1 ramp down (mt,ad) below the first steady step that moved
+                vmove = min((v for v, s in pts if s > MOVE_MMS), default=None)
+                low = sorted((v, s) for v, s in AD.get((w, d), []) if vmove is None or v < vmove - 0.3)
+                if low:
+                    low = [(low[0][0] - 0.25, 0.0)] + low
+                    kin[(w, d)] = low
                 fits[(w, d)] = {"k": k, "v0": -c / k, "res": res, "top": max(s for _, s in pts),
-                                "pts": sorted([(0.0, 0.0)] + pts)}
+                                "pts": sorted([(0.0, 0.0)] + low + [p for p in pts if vmove is None or p[0] >= vmove])}
         if signs:
             warn.append("encoder sign opposite to the command on: %s (check ENC direction / motor wiring)" % ", ".join(signs))
         keys = [(w, d) for w in WHEELS for d in DIRS]
@@ -308,6 +330,24 @@ def analyze(runs, params, cfg, vref=None, vbatt=None, band=None):
         R["c"] = {"status": rc["status"], "duty": num(f0[5]) if f0 else None,
                   "volts": _r(volts(num(f0[5]), f0[7])) if f0 else None, "rows": rows}
 
+    # ---------------- tests 5-7: tracking (mt,l lines; newest run that has them)
+    rl = pick(runs, "l")
+    if rl:
+        T = {}
+        for ln in rl["l"]:
+            f = ln.split(",")
+            m = re.search(r"rms=([-0-9.]+)", ln)
+            fl = re.search(r"flips=([-0-9.]+)", ln)
+            t63 = re.search(r"t63u=([-0-9.]+),t63d=([-0-9.]+)", ln)
+            T.setdefault((f[2], f[3]), {})[f[4]] = (float(m.group(1)) if m else None, float(fl.group(1)) if fl else None,
+                                                     list(t63.groups()) if t63 else None)
+        rows = []
+        for (ctl, w), d in sorted(T.items()):
+            st = d.get("st", (None, None, None))
+            rows.append({"ctl": ctl, "wheel": w, "rms": {s: d[s][0] for s in TRACK_SEGS if s in d},
+                         "flips_s0": d.get("s0", (None, None))[1], "t63": st[2]})
+        R["track"] = {"status": rl["status"], "rows": rows}
+
     # ---------------- summary for the config comparison
     S = {"start_v": [], "stop_v": [], "v0": [], "k": [], "resid": [], "top": [], "dwell": []}
     for row in (R["a"] or {}).get("rows", []):
@@ -322,11 +362,14 @@ def analyze(runs, params, cfg, vref=None, vbatt=None, band=None):
             S["top"].append(f["top"])
     for row in (R["c"] or {}).get("rows", []):
         S["dwell"].append(row["dwell_ms"])
-    R["summary"] = {"start_v": _r(_mean(S["start_v"])), "stop_v": _r(_mean(S["stop_v"])), "v0": _r(_mean(S["v0"])),
+    track = {}
+    for row in (R["track"] or {}).get("rows", []):
+        track.setdefault(row["ctl"], []).extend(v for v in row["rms"].values() if v is not None)
+    R["summary"] = {"track": {c: _r(sum(v) / len(v)) for c, v in track.items() if v}, "start_v": _r(_mean(S["start_v"])), "stop_v": _r(_mean(S["stop_v"])), "v0": _r(_mean(S["v0"])),
                     "k": _r(_mean(S["k"]), 2), "resid": _r(_mean(S["resid"]), 2), "top": _r(_mean(S["top"]), 1),
                     "dwell": _r(_mean(S["dwell"]), 1), "tau_ms": (R["b"] or {}).get("tau_ms", {})}
 
-    if not fits and not A:
+    if not fits and not A and not rl:
         R["warnings"] = sorted(set(warn))
         return R
 
@@ -409,6 +452,10 @@ def analyze(runs, params, cfg, vref=None, vbatt=None, band=None):
     if scales:
         pset["mot.left_scale"] = round(scales["left"], 3)
         pset["mot.right_scale"] = round(scales["right"], 3)
+    for w in WHEELS:   # mm/s per V above the dead zone: the speed loop and tracking tests (mot.k_l / k_r)
+        ks = [fits[(w, d)]["k"] for d in DIRS if (w, d) in fits]
+        if ks:
+            pset["mot.k_%s" % w[0]] = round(sum(ks) / len(ks), 1)
     R["proposal"] = {
         "vref": vref, "band": band, "dz": dz_rows,
         "scales": {w: _r(s, 3) for w, s in scales.items()} if scales else None,
@@ -440,6 +487,8 @@ def report(R):
     """The text tools/motor_fit.py prints for one config."""
     L = []
     p = L.append
+    for n in R.get("notes", []):
+        p("NOTE: " + n)
     if R["a"]:
         p("\n== a) dead zone (duty of 4095 / volts)            run status: %s" % R["a"]["status"])
         p("%-6s %-4s %12s %12s %8s" % ("wheel", "dir", "start", "stop", "vbatt"))
@@ -447,6 +496,9 @@ def report(R):
             p("%-6s %-4s %5s %5sV %5s %5sV %7sV" % (row["wheel"], row["dir"], fmt(row["start_duty"], "%.0f"),
                                                    fmt(row["start_v"]), fmt(row["stop_duty"], "%.0f"),
                                                    fmt(row["stop_v"]), fmt(row["vb"])))
+        for k, pts in R["a"].get("ramp_down", {}).items():
+            w, d = k.split("_")
+            p("ramp down while turning %s %s: %s" % (w, d, "  ".join("%.2fV:%.0f" % tuple(q) for q in pts[::3])))
     b = R["b"]
     if b:
         p("\n== b) steady speed (mm/s) vs motor volts          run status: %s" % b["status"])
@@ -484,6 +536,14 @@ def report(R):
                 "" if row["n_ok"] == row["n"] else "  (some never reversed in 2 s)"))
         p("stop = command -> wheel at its turning point; rev = until 2 deg back; dwell = rev - stop")
         p("(the encoder is on the gearbox output: free play shows up as dwell, not as an angle)")
+    tr = R.get("track")
+    if tr:
+        p("\n== tracking: rms speed error (mm/s), output sign flips/s        run status: %s" % tr["status"])
+        p("%-5s %-6s " % ("ctl", "wheel") + " ".join("%7s" % s for s in TRACK_SEGS) + "  flips s0   t63 up/down ms")
+        for row in tr["rows"]:
+            p("%-5s %-6s " % (row["ctl"], row["wheel"]) + " ".join("%7s" % fmt(row["rms"].get(s), "%.0f") for s in TRACK_SEGS) +
+              "  %9s   %s" % (fmt(row["flips_s0"], "%.1f"), "/".join(row["t63"]) if row["t63"] else "-"))
+        p("ol0 = open loop model 0 (v3 curve), ol1 = open loop model 1 (volts), cl = closed-loop speed loop")
     P = R["proposal"]
     if not P:
         for w in R["warnings"]:
@@ -512,8 +572,8 @@ def report(R):
             p("-> in the balancing range the volts model gives %.2fx the motor gain of the v3 curve; to start from the"
               " same loop gain multiply bal.kp / bal.ki / bal.kd by ~%.2f (then retune)" % (1 / g, g))
     p("\ntry it (on the Pi in ~/self_balancing_robot_3, robot balancing; mot.model 0 switches back;")
-    p("  mot.pwm_hz applies when the motors are off: disarm, set, re-arm):")
-    cmd = ["mot.pwm_hz=%.0f" % R["cfg"][1], "mot.model=1", "mot.vcomp=1", "mot.v_ref=%.1f" % P["vref"]]
+    p("  mot.drive_mode / mot.pwm_hz apply when the motors are off: disarm, set, re-arm):")
+    cmd = ["mot.drive_mode=%d" % R["cfg"][0], "mot.pwm_hz=%.0f" % R["cfg"][1], "mot.model=1", "mot.vcomp=1", "mot.v_ref=%.1f" % P["vref"]]
     cmd += ["%s=%.2f" % (row["param"], row["v"]) for row in sorted(P["dz"], key=lambda r: r["param"])]
     if P["scales"]:
         cmd += ["mot.left_scale=%.3f" % P["scales"]["left"], "mot.right_scale=%.3f" % P["scales"]["right"]]
@@ -528,14 +588,15 @@ def report(R):
 def compare(results):
     """One row per drive config: dead zone, linearity, time constant, reversal."""
     L = ["\n" + "=" * 100, "=== comparison (means over wheels and directions; volts = duty / 4095 * pack V)",
-         "%-9s %8s %8s %8s %10s %8s %9s %9s %9s" % ("config", "start V", "stop V", "fit V0", "k mm/s/V",
-                                                    "resid", "tau L/R", "top mm/s", "dwell ms")]
+         "%-9s %8s %8s %8s %10s %8s %9s %9s %9s  %s" % ("config", "start V", "stop V", "fit V0", "k mm/s/V",
+                                                        "resid", "tau L/R", "top mm/s", "dwell ms", "track rms ol0/ol1/cl")]
     for R in results:
         S = R["summary"]
         tau = "/".join(fmt(S["tau_ms"].get(w), "%.0f") for w in WHEELS)
-        L.append("%-9s %8s %8s %8s %10s %7s%% %9s %9s %9s" % (
+        trs = "/".join(fmt(S["track"].get(c), "%.0f") for c in ("ol0", "ol1", "cl"))
+        L.append("%-9s %8s %8s %8s %10s %7s%% %9s %9s %9s  %s" % (
             R["cfg_name"], fmt(S["start_v"]), fmt(S["stop_v"]), fmt(S["v0"]), fmt(S["k"], "%.1f"),
-            fmt(S["resid"], "%.1f"), tau, fmt(S["top"], "%.0f"), fmt(S["dwell"], "%.0f")))
+            fmt(S["resid"], "%.1f"), tau, fmt(S["top"], "%.0f"), fmt(S["dwell"], "%.0f"), trs))
     L.append("lower start/stop V and V0 = smaller dead zone; lower resid = straighter speed vs volts above it;")
     L.append("drive 0 = PWM on EN (coast in the off-time), drive 1 = PWM on IN (brake in the off-time)")
     return L
@@ -550,7 +611,8 @@ class LiveState:
 
     def reset(self):
         self.state, self.test, self.wait, self.part, self.result = "idle", 0, None, None, None
-        self.counts = {"a": 0, "b": 0, "c": 0}
+        self.counts = {"a": 0, "b": 0, "c": 0, "l": 0}
+        self.wheels = 2
         self.t_req = self.t_begin = self.t_end = None
         self.last = None
 
@@ -561,7 +623,7 @@ class LiveState:
         self.last = text
         if kind == "request":
             self.state, self.test, self.wait, self.part, self.result = "waiting", int(num(f[2]) or 0), None, None, None
-            self.counts = {"a": 0, "b": 0, "c": 0}
+            self.counts = {"a": 0, "b": 0, "c": 0, "l": 0}
             self.t_req, self.t_begin, self.t_end = t, None, None
         elif kind == "wait":
             if self.state != "running":
@@ -572,10 +634,14 @@ class LiveState:
         elif kind == "begin":
             self.state, self.wait, self.t_begin = "running", None, t
             self.test = int(num(f[2]) or self.test or 0)
-            self.counts = {"a": 0, "b": 0, "c": 0}
-        elif kind in ("a", "b", "c"):
+            self.counts = {"a": 0, "b": 0, "c": 0, "l": 0}
+            m = re.search(r"\bwheels=([0-9])", text)
+            self.wheels = 1 if m and m.group(1) in ("1", "2") else 2
+        elif kind in ("a", "b", "c", "l"):
             self.part = kind
             self.counts[kind] += 1
+        elif kind in ("ad", "tr", "lcfg", "cool", "warn", "sum"):
+            return False
         elif kind == "end":
             self.state, self.result, self.t_end, self.wait = "done", "ok", t, None
         elif kind == "abort":
@@ -590,8 +656,9 @@ class LiveState:
             return 0.0
         if self.state == "done":
             return 1.0
-        done = sum(min(1.0, self.counts[p] / EXPECTED[p]) for p in parts)
-        return round(done / len(parts), 3)
+        need = {p: EXPECTED[p] * parts.count(p) * self.wheels / 2.0 for p in set(parts)}
+        done = sum(min(1.0, self.counts[p] / need[p]) * parts.count(p) for p in need)
+        return round(min(1.0, done / len(parts)), 3)
 
     def to_dict(self):
         return {"state": self.state, "test": self.test, "wait": self.wait, "part": self.part,

@@ -178,7 +178,8 @@ class TestMotorFit(unittest.TestCase):
         self.assertEqual((P["mot.left_scale"], P["mot.right_scale"]), (1.0, 0.856))
         self.assertEqual((P["mot.model"], P["mot.vcomp"], P["mot.v_ref"]), (1.0, 1.0, 12.0))
         self.assertNotIn("mot.drive_mode", P)
-        self.assertAlmostEqual(R["proposal"]["gain_ratio"], 1.18, delta=0.01)
+        self.assertEqual((round(P["mot.k_l"]), round(P["mot.k_r"])), (166, 204))     # mm/s per V (speed loop)
+        self.assertAlmostEqual(R["proposal"]["gain_ratio"], 1.76, delta=0.01)   # (1.18 before the zero-speed steps left the curve)
         self.assertEqual(len(R["b"]["points"]["left_fwd"]), 16)
         json.dumps(out)                                       # goes to the browser as is
         text = "\n".join(mf.report(R))
@@ -272,7 +273,7 @@ class TestBridgeTools(unittest.TestCase):
             send = lambda **m: ws.send(json.dumps(m))
             pl = await wait_for(ws, lambda m: m["t"] == "presets")
             self.assertEqual(pl["list"][0]["name"], "v3 known good")
-            await wait_for(ws, lambda m: m["t"] == "params" and len(m["list"]) >= 62)
+            await wait_for(ws, lambda m: m["t"] == "params" and len(m["list"]) >= 72)
             names = {p["name"]: p for p in b.params.values()}
             send(t="set_param", id=names["tlm.hz"]["id"], value=400)
             send(t="set_mode", mode=lp.MODE_BALANCE)          # remote armed: the mode follows

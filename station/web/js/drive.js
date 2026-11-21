@@ -42,7 +42,7 @@ function buildModes() {
   });
 }
 
-function isStation() { return state.tlm && modeName(state.tlm.mode) === "STATION"; }
+export function isStation() { return state.tlm && modeName(state.tlm.mode) === "STATION"; }
 // With no RC remote the station's mode request is also the arm switch (SET_MODE != IDLE arms).
 export function remotePresent() { return !!state.tlm?.radio_ok; }
 export function disarmedNoRemote() { return robotAlive() && !flag("armed") && !remotePresent(); }
@@ -147,6 +147,8 @@ window.addEventListener("blur", () => { keys.clear(); joyEnd(); pump(true); });
 
 function command() {
   let x = stick.x, y = stick.y;
+  const ext = stick.active || keys.size ? null : extInput();
+  if (ext) { x = ext.x; y = ext.y; }
   if (keys.size) {
     y = (keys.has("f") ? 1 : 0) - (keys.has("b") ? 1 : 0);
     x = (keys.has("r") ? 1 : 0) - (keys.has("l") ? 1 : 0);
@@ -158,7 +160,7 @@ function command() {
 
 // Sends cmd_vel at 10 Hz while the stick/keys are held (the bridge stops forwarding after 300 ms of silence).
 function pump(now) {
-  const active = stick.active || keys.size > 0;
+  const active = stick.active || keys.size > 0 || !!extInput();
   if (active && isStation()) {
     if (now || performance.now() - lastSend > 90) { send({ t: "cmd_vel", ...command() }); lastSend = performance.now(); }
     sending = true;
@@ -168,6 +170,12 @@ function pump(now) {
   }
 }
 setInterval(() => pump(false), 100);
+
+// Extra inputs (Android app: tilt / gamepad, native.js). Each returns {x, y} (-1..1, before the curve) while it drives, else null.
+const inputs = [];
+export function addInput(fn) { inputs.push(fn); }
+function extInput() { for (const f of inputs) { const v = f(); if (v) return v; } return null; }
+export function driveNow() { pump(true); }
 
 // ---------- options ----------
 document.getElementById("speed-seg").addEventListener("click", (e) => {
