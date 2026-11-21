@@ -41,7 +41,8 @@ def main(argv=None):
             from station.bridge.__main__ import DEFAULT_WEB
             from station.bridge.bridge import Bridge
             b = Bridge("tcp://%s:%s" % (host or "127.0.0.1", port), DEFAULT_WEB, a.log_dir,
-                       http_port=a.http_port, map_dir=os.environ.get("SBR3_MAP_DIR", "~/sbr3-maps"))
+                       http_port=a.http_port, map_dir=os.environ.get("SBR3_MAP_DIR", "~/sbr3-maps"),
+                       preset_dir=os.environ.get("SBR3_PRESET_DIR", "~/sbr3-presets"))
             jobs.append(b.run())
             if a.tour:
                 jobs.append(tour(b))

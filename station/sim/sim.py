@@ -15,6 +15,7 @@ import random
 import time
 
 from station.bridge import link_protocol as lp
+from station.sim.motor_test import MM_PER_COUNT, SimMotorTest, TTWheel
 
 # Geometry and mass from the Fusion CAD (cad/robot_model.json on master)
 TRACK_MM = 126.8          # wheel separation (firmware odometry param says 123)
@@ -69,7 +70,19 @@ PARAMS = [
     ("rng.servo_hold_deg", -1.0, -1.0, 180.0), ("rng.obstacle_mm", 300.0, 0.0, 2000.0),
     ("rng.servo_dir", 1.0, -1.0, 1.0), ("rng.servo_min_deg", 5.0, 0.0, 90.0),
     ("rng.servo_max_deg", 175.0, 90.0, 180.0), ("rng.servo_deg_per_cmd", 1.0, 0.5, 1.5),
-]   # (the firmware's mot.test ... mot.dz_band params come after these; not simulated)
+    # wheels-up motor test (sim: robot on a stand, TT motors; station/sim/motor_test.py). mot.model / vcomp /
+    # v_ref / dz_* are listed (the Tune page applies motor fits to them) but the balance sim keeps the v3 curve.
+    ("mot.test", 0.0, 0.0, 7.0), ("mot.test_max", 4095.0, 500.0, 4095.0), ("mot.model", 0.0, 0.0, 1.0),
+    ("mot.vcomp", 0.0, 0.0, 1.0), ("mot.v_ref", 12.0, 6.0, 17.0), ("mot.dz_l_fwd", 2.0, 0.0, 8.0),
+    ("mot.dz_l_rev", 2.0, 0.0, 8.0), ("mot.dz_r_fwd", 2.0, 0.0, 8.0), ("mot.dz_r_rev", 2.0, 0.0, 8.0),
+    ("mot.dz_band", 0.01, 0.0, 0.2), ("rng.idle_off", 1.0, 0.0, 1.0), ("mot.pwm_hz", 36621.09, 100.0, 50000.0),
+    ("mot.drive_mode", 0.0, 0.0, 1.0),
+    # motor profile (issue #26): one-wheel tests, brake-mode limits, wheel speed loop (not simulated)
+    ("mot.test_wheels", 0.0, 0.0, 2.0), ("mot.brake_max_hz", 2000.0, 100.0, 10000.0),
+    ("mot.brake_duty_max", 3000.0, 500.0, 4095.0), ("mot.speed_loop", 0.0, 0.0, 1.0), ("mot.sl_kp", 0.006, 0.0, 0.1),
+    ("mot.sl_ki", 0.08, 0.0, 2.0), ("mot.sl_imax", 3.0, 0.0, 12.0), ("mot.sl_band", 0.3, 0.0, 3.0),
+    ("mot.k_l", 200.0, 10.0, 2000.0), ("mot.k_r", 200.0, 10.0, 2000.0),
+]
 CELLS = 3
 
 NAV_IDLE, NAV_TURNING, NAV_DRIVING, NAV_BLOCKED, NAV_ARRIVED = range(5)
@@ -312,6 +325,10 @@ class SimRobot:
         self.motor_l = self.motor_r = 0.0
         self.battery = 12.45
         self.push = 0.0               # sim-only disturbance (rad/s^2), see push()
+        self.mtest = SimMotorTest(self.log)   # wheels-up motor test (mot.test)
+        self.on_stand = False
+        self.tt = []                  # TT motors on the stand (see _motor_test_step)
+        self.enc_ring = []
         self.out = []                 # frames to send
         self.log("boot sim v4, params DEFAULTS, imu ok, radio %s" % ("ok" if remote else "ok (no remote)"))
 
@@ -598,6 +615,7 @@ class SimRobot:
             self.theta = math.copysign(lim, self.theta)
             self.theta_rate = 0.0
 
+        stand_pose = (self.X, self.Y, self.TH) if self.on_stand else None
         # move (stop at walls)
         w = math.degrees((self.vr - self.vl) / TRACK_MM)
         self.TH += w * dt
@@ -607,6 +625,8 @@ class SimRobot:
             self.X, self.Y = nx, ny
         else:
             self.vl = self.vr = self.v_prev = 0.0
+
+        self._motor_test_step(now, dt, pitch, pitch_rate, stand_pose)
 
         load = (abs(self.motor_l) + abs(self.motor_r)) / (2 * MOTOR_FULL)
         self.battery -= dt * 0.00002 * (1 + 10 * load)
@@ -651,6 +671,51 @@ class SimRobot:
                 "state": self.nav_state, "waypoint_count": min(255, len(self.waypoints)),
                 "nav_index": min(255, self.nav_index), "target_x_mm": tx, "target_y_mm": ty,
                 "distance_mm": math.hypot(tx - x, ty - y)}))
+
+    # ---------------------------------------------------------------- wheels-up motor test (src/motor_test.cpp)
+    def _motor_test_step(self, now, dt, pitch, pitch_rate, stand_pose):
+        """Sim-only stand: mot.test set in IDLE puts the robot upright on a stand with its wheels in the air;
+        arming into a driving mode takes it off. The test itself follows the firmware (interlocks, lines)."""
+        req = int(round(self.P("mot.test")))
+        if req and self.mode == lp.MODE_IDLE and not self.on_stand:
+            self.on_stand = True
+            self.theta = self.theta_rate = 0.0
+            self.tt = [TTWheel(0.82, v_start=6.12, v_stop=5.66), TTWheel(1.0)]   # left 18% weaker, stiffer
+            self.enc_ring = []
+            self.log("sim: robot on the stand, wheels in the air")
+        elif self.on_stand and self.mode != lp.MODE_IDLE:
+            self.on_stand = False
+            self.vl = self.vr = 0.0
+            self.log("sim: robot off the stand")
+        if self.on_stand:
+            if stand_pose:
+                self.X, self.Y, self.TH = stand_pose
+            self.theta = self.theta_rate = 0.0
+            vb = self.battery - 0.3 * (abs(self.mtest.duty[0]) + abs(self.mtest.duty[1])) / (2 * MOTOR_FULL)
+            for wh, duty in zip(self.tt, self.mtest.duty):
+                wh.step(duty / MOTOR_FULL * vb, dt)
+            enc = [wh.counts() for wh in self.tt]
+            self.enc_ring.append((now, enc))
+            while self.enc_ring and now - self.enc_ring[0][0] > 0.08 + 1e-9:
+                self.enc_ring.pop(0)
+            t0, e0 = self.enc_ring[0]
+            sp = [(e - c) * MM_PER_COUNT / (now - t0) if now > t0 else 0.0 for e, c in zip(enc, e0)]
+            self.vl, self.vr = self.tt[0].v, self.tt[1].v
+        else:
+            enc, sp, vb = [0, 0], [self.vl, self.vr], self.battery
+        self.mtest.step({
+            "now": now, "request": req, "armed": self.armed, "estop": False, "idle": self.mode == lp.MODE_IDLE,
+            "radio_live": self.radio_live(), "imu_ok": True, "enc_ok": True, "pitch": pitch,
+            "roll": self.rng.gauss(0, 0.2), "pitch_rate": pitch_rate, "enc": enc, "enc_t": now, "speed": sp,
+            "vbatt": vb, "max_duty": self.P("mot.test_max"), "pwm_hz": self.P("mot.pwm_hz"),
+            "drive_mode": int(self.P("mot.drive_mode"))})
+        if self.mtest.done:
+            self.mtest.done = False
+            pid = self.pidx["mot.test"]
+            self.params[pid][1] = 0.0
+            self.out += self.param_frames([pid])
+        if self.on_stand:
+            self.motor_l, self.motor_r = self.mtest.duty
 
     def _telemetry(self, o, pitch, pitch_rate, yaw_rate, w, batt_v):
         rng = self.rng

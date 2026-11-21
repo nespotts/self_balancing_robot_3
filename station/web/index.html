@@ -145,8 +145,9 @@
   </section>
 
   <!-- Tune -->
-  <section id="view-tune" class="view">
+  <section id="view-tune" class="view" data-sub="balance">
     <div class="tune-head">
+      <div class="seg tune-sub" id="tune-sub"><button data-v="balance" class="on">Balance</button><button data-v="motor">Motor test</button></div>
       <span id="tune-info" class="muted">Waiting for parameters…</span>
       <button id="tune-save" class="primary" title="Write the current values to the robot's EEPROM">Save to robot</button>
       <button id="tune-more" class="ghost" title="More">⋯</button>
@@ -155,7 +156,41 @@
         <button id="tune-defaults" class="warn">Restore firmware defaults…</button>
       </div>
     </div>
-    <div class="card tune-chart">
+    <!-- presets + scored runs (issue #16): station/web/js/tunetools.js -->
+    <div class="preset-bar tb-only">
+      <select id="preset-sel" title="Tuning presets (saved on the Pi)"></select>
+      <button id="preset-apply" title="Set the robot to this preset">Apply</button>
+      <button id="preset-more" class="ghost" title="Presets">⋯</button>
+      <div class="menu" id="preset-menu" hidden>
+        <button id="preset-save">Save current values as…</button>
+        <button id="preset-compare">Compare presets…</button>
+        <button id="preset-delete" class="warn">Delete this preset…</button>
+      </div>
+    </div>
+    <div class="card preset-cmp tb-only" id="preset-cmp" hidden>
+      <div class="pc-bar"><h3>Compare</h3><button id="cmp-close" class="ghost small" title="Close">✕</button></div>
+      <div class="pc-bar"><select id="cmp-a"></select><span class="muted">vs</span><select id="cmp-b"></select></div>
+      <div id="cmp-table" class="cmp-table"></div>
+      <label class="cmp-all"><input type="checkbox" id="cmp-all"> show equal values too</label>
+    </div>
+    <div class="card score-card tb-only" id="score-card">
+      <div class="sc-bar"><h3>Score</h3>
+        <span id="score-status" class="muted"></span>
+        <button id="score-last" class="small" title="Score the last seconds of balancing now">Last 20 s</button>
+        <button id="score-run" class="small primary" title="Mark a run: Start, balance / push it, Stop">Start</button>
+        <button id="score-more" class="ghost small" title="Score options">⋯</button>
+        <div class="menu" id="score-menu" hidden>
+          <div class="mrow"><span>Last</span><div class="seg" id="score-win"><button data-v="10">10 s</button><button data-v="20" class="on">20 s</button><button data-v="30">30 s</button><button data-v="60">60 s</button></div></div>
+          <button id="score-clear" class="warn">Clear run history</button>
+        </div>
+      </div>
+      <div id="score-hint" class="muted score-hint"></div>
+      <div id="score-tiles" class="score-tiles"></div>
+      <div id="score-hist" class="score-hist"></div>
+    </div>
+    <!-- wheels-up motor test (issue #16): station/web/js/motortest.js -->
+    <div class="tm-only" id="motor-view"></div>
+    <div class="card tune-chart tb-only">
       <div class="tc-bar">
         <h3>Balance loop</h3>
         <span id="tc-rate" class="muted"></span>
@@ -164,7 +199,7 @@
       </div>
       <div class="tc-plots" id="tc-plots"></div>
     </div>
-    <div id="tune-groups" class="tune-groups"></div>
+    <div id="tune-groups" class="tune-groups tb-only"></div>
   </section>
 
   <!-- Logs -->
