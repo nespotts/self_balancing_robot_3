@@ -8,6 +8,7 @@ import tempfile
 import time
 
 from . import link_protocol as lp
+from . import falls as falls_mod
 from .httpws import HttpServer, Response, check_origin
 from .mapping import Mapper
 from .planner import Planner
@@ -89,7 +90,7 @@ def _round_dict(d):
 class Bridge:
     def __init__(self, port, web_dir, log_dir, http_host="0.0.0.0", http_port=8080, baud=115200,
                  release_file=None, log_max_mb=DEFAULT_LOG_MAX_MB, quiet=False, map_dir=None,
-                 preset_dir="~/sbr3-presets", allow_any_origin=False, allow_hosts=(), allow_origins=()):
+                 preset_dir="~/sbr3-presets", allow_any_origin=False, allow_hosts=(), allow_origins=(), falls_dir=None):
         self.port = port
         self.baud = baud
         self.web_dir = web_dir
@@ -108,6 +109,10 @@ class Bridge:
         self.allow_origins = list(allow_origins)
         self.log = SessionLog(log_dir, log_max_mb)
         self.t_start = _now()
+        # black-box fall recorder (#50): ~/sbr3-falls on the Pi
+        self.falls = falls_mod.FallRecorder(falls_dir or os.path.join(self.log.dir, "falls"),
+                                            params=self.param_values, session=lambda: self.log.name if self.log.f else None,
+                                            say=self.say, clock=_now)
 
         self.link = None
         self.link_state = "waiting"     # waiting | connected | released
@@ -175,7 +180,11 @@ class Bridge:
         self._add_log("bridge", text)
         self.log.record("bridge", text)
 
+    def param_values(self):
+        return {p["name"]: p["value"] for p in self.params.values()}
+
     def _add_log(self, src, text):
+        self.falls.on_event("log" if src == "robot" else src, text)
         item = {"i": self.log_next, "t": round(_now() - self.t_start, 2), "src": src, "text": text}
         self.log_next += 1
         self.logs.append(item)
@@ -273,6 +282,8 @@ class Bridge:
         if self.link is None:
             return
         self.link = None
+        if not quiet:
+            self.falls.on_link_lost()
         self.log.stop()
         self.tlm_time = -10.0
         self.tools.on_lost()
@@ -302,6 +313,7 @@ class Bridge:
             self.tlm_count += 1
             self.tlm_time = _now()
             self.log.tlm(d)
+            self.falls.on_tlm(d, self.tlm_time)
             if d["radio_ok"] and not self.remote_seen:
                 self.remote_seen = True
                 self.push_status()
@@ -318,6 +330,7 @@ class Bridge:
         elif t == lp.MSG_RANGE:
             d = lp.decode_range(p)
             self.log.rng(d)
+            self.falls.on_range(d)
             self._add_range(d)
         elif t == lp.MSG_LOG:
             text = lp.decode_log(p)
@@ -468,6 +481,8 @@ class Bridge:
         for text in self.mapper.poll(now):                # occupancy grid tiles, ~2 Hz (#12)
             self.broadcast(text)
         self.planner.tick(now)
+        for meta in self.falls.tick(now):                 # a fall record was just saved
+            self.broadcast(json.dumps({"t": "fall", "fall": meta}, separators=(",", ":")))
         self.tools.tick(now)
         if self.params_dirty:
             self.params_dirty = False
@@ -605,6 +620,7 @@ class Bridge:
                 return {"t": "error", "code": "no_link", "text": "robot link down - STOP may not have reached the robot"}
             return None
         self.log.record("cmd", dict(m, who=who))
+        self.falls.on_event("cmd", dict(m, who=who))
         if t == "estop_release":
             return self.do_estop_release(who)
         if t == "set_mode":
@@ -613,6 +629,8 @@ class Bridge:
                 return {"t": "error", "text": "bad mode"}
             if mode != lp.MODE_IDLE and self.estop:
                 return {"t": "error", "code": "estop", "text": "E-stop is on: release it first"}
+            if mode == lp.MODE_IDLE:
+                self.falls.user_stop(who, event=False)
             self.send_mode(mode, _flag(m.get("arm")))
             if who != "planner" and mode not in (lp.MODE_GOTO, lp.MODE_EXPLORE):
                 self.planner.stop("stopped: mode %s from %s" % (lp.MODE_NAMES[mode], who))
@@ -724,6 +742,7 @@ class Bridge:
         self.estop = True
         self.estop_time = now
         self.log.record("cmd", {"t": "estop", "who": who})
+        self.falls.user_stop(who)
         self.say("E-STOP from %s" % who)
         self.push_status()
 
@@ -908,6 +927,10 @@ class Bridge:
             return Response.text("no such map", 404)
         return Response(200, ctype="image/png", file=p[:-5] + ".png")
 
+    async def api_falls(self, req):
+        # reads / parses record files: in a worker thread, never on the event loop
+        return await asyncio.get_running_loop().run_in_executor(None, falls_mod.handle_http, self.falls, req)
+
     def api_status(self, req):
         return Response.json(self.status())
 
@@ -926,6 +949,8 @@ class Bridge:
             ("*", "/api/logs/", self.api_logs),
             ("GET", "/api/map", self.api_map),
             ("GET", "/api/map/", self.api_map),
+            ("*", "/api/falls", self.api_falls),
+            ("*", "/api/falls/", self.api_falls),
         ]
         return HttpServer(self.web_dir, routes, "/ws", self.ws_handler, guard=guard)
 

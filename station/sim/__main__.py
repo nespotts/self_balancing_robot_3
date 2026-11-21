@@ -11,6 +11,14 @@ from .sim import SimServer
 from .tour import DriftRobot, tour
 
 
+async def shover(robot, every):
+    """Sim only: a hard shove every `every` s while the robot balances (big enough to topple it)."""
+    while True:
+        await asyncio.sleep(every)
+        if robot.mode != 0 and robot.ctl.out.get("upright"):
+            robot.push_robot(800.0)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m station.sim", description="SBR3 robot simulator (firmware v4)")
     ap.add_argument("--listen", default="127.0.0.1:5761", help="host:port of the fake Teensy link")
@@ -29,6 +37,8 @@ def main(argv=None):
     ap.add_argument("--head-error", type=float, default=0.0, metavar="DEG",
                     help="range-sensor head mounted this far CCW (+) of true; rng.servo_trim_deg -DEG fixes it")
     ap.add_argument("--tour", action="store_true", help="arm and drive a waypoint loop around the room (mapping demo)")
+    ap.add_argument("--shove", type=float, default=0.0, metavar="SECONDS",
+                    help="demo: knock the robot over every SECONDS while it balances (fills the Falls list)")
     ap.add_argument("--drift", type=float, default=0.0, metavar="DEG_PER_MIN",
                     help="odometry drift: heading gains this many deg/min and distances read 2 %% long")
     a = ap.parse_args(argv)
@@ -46,10 +56,13 @@ def main(argv=None):
             b = Bridge("tcp://%s:%s" % (host or "127.0.0.1", port), DEFAULT_WEB, a.log_dir,
                        http_host=a.host, http_port=a.http_port,
                        map_dir=os.environ.get("SBR3_MAP_DIR", "~/sbr3-maps"),
-                       preset_dir=os.environ.get("SBR3_PRESET_DIR", "~/sbr3-presets"))
+                       preset_dir=os.environ.get("SBR3_PRESET_DIR", "~/sbr3-presets"),
+                       falls_dir=os.environ.get("SBR3_FALLS_DIR", "~/sbr3-falls"))
             jobs.append(b.run())
             if a.tour:
                 jobs.append(tour(b))
+            if a.shove:
+                jobs.append(shover(robot, a.shove))
         await asyncio.gather(*jobs)
 
     try:

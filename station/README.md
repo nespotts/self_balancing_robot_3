@@ -52,8 +52,45 @@ Screenshots: `python -m station.tools.screenshots --url http://localhost:8080/ -
 | **Drive** | joystick / WASD in STATION mode |
 | **Sensors** | both range sensors live: mm, valid, angle, readings/s; last sweep around the robot; range vs time. ⋯ → park / trim / sweep width / direction, **hand test** (cover one sensor: its card lights up). Colours: front amber, rear magenta (map too) |
 | **Tune** | live P / I / D at the loop rate (**Full rate**), sliders apply at once, **Save to robot** writes EEPROM (when the motors are off); ⋯ → Restore defaults. Two views: **Balance** and **Motor test** (below) |
-| **Logs** | messages, session downloads (CSV / JSONL), link details |
+| **Logs** | **Falls** (below), messages, session downloads (CSV / JSONL), link details |
 
+## Falls: the black-box recorder (issue #50)
+
+<p>
+<img src="docs/screenshots/phone-falls.png" width="25%">
+<img src="docs/screenshots/phone-fall-detail.png" width="25%">
+<img src="docs/screenshots/desktop-falls.png" width="45%">
+</p>
+
+```mermaid
+flowchart LR
+  T[telemetry<br>last 5 s in RAM] --> D{armed + upright<br>then not?}
+  D -- "user stop, disarm" --> X[ignored]
+  D -- "tipped / motors cut / link lost" --> W[+2 s, worker thread] --> R[(~/sbr3-falls<br>fall-*.jsonl)] --> L[Logs > Falls]
+```
+
+Every fall is saved by itself: 5 s before + 2 s after (full telemetry rate, range readings, log lines, commands, the params then),
+about 100 KB at 100 Hz, 350 KB at 400 Hz. Newest first on **Logs → Falls**: tap one for the evidence, big plots and **Download record**.
+`~/sbr3-falls` keeps the last 200 files / 100 MB (`--falls-dir`). Cost on the Pi: one list append per frame; analysis and writing run in a thread.
+
+| Chip | Rule (first one listed is the cause) |
+|---|---|
+| Link lost | serial link closed while balancing |
+| Radio dropout | RC link dropped out in the last 4 s, then the mode fell to IDLE with the robot still upright (the 2026-11-21 firmware bug) |
+| Motors cut | mode left BALANCE with nobody asking, no radio trouble (not saved if the robot did not tip) |
+| Battery sag | supply dropped > 0.6 V in 2 s, or low-battery flag |
+| IMU / loop dip | loop rate < 85 %, telemetry stall, impossible pitch jump, frozen pitch |
+| Hit obstacle | range < obstacle distance in the direction of travel |
+| Wheel slip | left/right wheels disagree with equal motors, or wheel speed jumps without a motor change |
+| Oscillation | pitch error crossing zero ≥ 2.5 Hz with growing swings |
+| Speed loop ran away | lean target > 12° from upright |
+| Pushed / bump | pitch-rate spike > 100 °/s while balancing and the motors below full power |
+| Saturated | motors at ±1 for ≥ 150 ms just before the fall |
+
+E-stop, **Stop** / `set_mode IDLE` from any client, the remote's E-stop and its ARMED switch are **not** falls (counted as "ignored").
+Back-fill or test on old sessions: `python -m station.tools.falls_scan ~/sbr3-logs/<session>.jsonl`.
+Try it: `python -m station.sim --shove 12`, press **Arm & Balance**; the sim is knocked over every 12 s.
+API: `GET /api/falls`, `GET /api/falls/<id>` (`?raw=1` = the file), `DELETE /api/falls/<id>`; WebSocket `{"t":"fall","fall":{...}}` when one is saved.
 ### Tune → Balance: presets and scored runs (issue #16)
 
 <p>

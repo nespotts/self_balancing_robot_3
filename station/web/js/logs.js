@@ -1,6 +1,7 @@
 // Logs view: robot/bridge messages, recorded sessions (download), link details.
 import { state, on, send } from "./conn.js";
 import { el, sizeStr, toast } from "./ui.js";
+import { loadFalls } from "./falls.js";
 
 const msgs = document.getElementById("msgs"), sessions = document.getElementById("sessions");
 const linkInfo = document.getElementById("link-info"), relBtn = document.getElementById("serial-release");
@@ -23,6 +24,7 @@ function nameToDate(n) {
   return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}` : n;
 }
 export async function loadSessions() {
+  loadFalls();
   try {
     const r = await fetch("/api/logs");
     const d = await r.json();

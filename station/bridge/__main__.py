@@ -26,6 +26,8 @@ def build_parser():
     ap.add_argument("--preset-dir", default=os.environ.get("SBR3_PRESET_DIR", "~/sbr3-presets"),
                     help="tuning presets (Tune page)")
     ap.add_argument("--map-dir", default=os.environ.get("SBR3_MAP_DIR", "~/sbr3-maps"), help="saved occupancy maps")
+    ap.add_argument("--falls-dir", default=os.environ.get("SBR3_FALLS_DIR", "~/sbr3-falls"),
+                    help="black-box fall records (Logs page > Falls), capped at 200 files / 100 MB")
     ap.add_argument("--allow-any-origin", action="store_true",
                     default=os.environ.get("SBR3_ALLOW_ANY_ORIGIN", "") in ("1", "true", "yes"),
                     help="turn off the Origin / Host checks on /ws and /api/* (default: only pages served by the "
@@ -42,12 +44,13 @@ def main(argv=None):
     a = build_parser().parse_args(argv)
     b = Bridge(a.port, a.web, a.log_dir, a.host, a.http_port, a.baud, a.release_file, a.log_max_mb, a.quiet,
                preset_dir=a.preset_dir, map_dir=a.map_dir, allow_any_origin=a.allow_any_origin,
-               allow_hosts=a.allow_host, allow_origins=a.allow_origin)
+               allow_hosts=a.allow_host, allow_origins=a.allow_origin, falls_dir=a.falls_dir)
     try:
         asyncio.run(b.run())
     except KeyboardInterrupt:
         pass
     finally:
+        b.falls.flush()
         b.log.stop()
     return 0
 
