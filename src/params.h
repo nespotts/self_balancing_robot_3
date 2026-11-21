@@ -68,7 +68,10 @@
   X(MOT_DZ_R_REV,    "mot.dz_r_rev",       2.0f,      0.0f,    8.0f)     \
   X(MOT_DZ_BAND,     "mot.dz_band",        0.01f,     0.0f,    0.2f)     \
   /* range sweep idle off (issue #20, see range_sweep.h) */             \
-  X(RNG_IDLE_OFF,    "rng.idle_off",       1.0f,      0.0f,    1.0f)
+  X(RNG_IDLE_OFF,    "rng.idle_off",       1.0f,      0.0f,    1.0f)     \
+  /* L298N drive experiments (issue #22, see motors.h); applied while the motors are off */ \
+  X(MOT_PWM_HZ,      "mot.pwm_hz",         36621.09f, 100.0f,  50000.0f) \
+  X(MOT_DRIVE_MODE,  "mot.drive_mode",     0.0f,      0.0f,    1.0f)
 
 enum ParamId : uint16_t {
 #define PARAM_ENUM(id, name, def, mn, mx) P_##id,

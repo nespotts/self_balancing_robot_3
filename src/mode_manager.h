@@ -7,6 +7,8 @@
 //   STATION: MSG_CMD_VEL, zero if heartbeat lost or cmd older than LINK_CMD_VEL_TIMEOUT_MS
 //   BALANCE / GOTO / EXPLORE / HOLD: zero motion (navigation is issue #8)
 //   any change of the effective mode -> commanded motion zeroed, stored cmd_vel dropped
+//   mode requests act on change only; after boot the remote's current selection is just learned,
+//   so the robot stays IDLE until that selection changes (or the Pi sends SET_MODE)
 #pragma once
 #include <stdint.h>
 

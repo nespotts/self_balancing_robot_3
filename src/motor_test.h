@@ -23,6 +23,8 @@ struct MtIn {
   float speed_l = 0, speed_r = 0;             // mm/s (80 ms window)
   float vbatt = 0;                            // pack voltage (filtered), V
   float max_duty = 4095;                      // mot.test_max
+  float pwm_hz = 36621.09f;                   // drive config in use (issue #22), recorded in the
+  uint8_t drive_mode = 0;                     //   begin / sum / end lines as hz=<Hz>,drive=<0|1>
 };
 
 class MotorTest {
@@ -73,6 +75,8 @@ class MotorTest {
   bool done_ = false, need_begin_ = false, holding_ = false;
   float duty_[2] = {0, 0};
   float max_duty_ = 4095;
+  float hz_ = 0;      // drive config recorded at the start of the run
+  unsigned drive_ = 0;
   uint32_t t_req_us_ = 0, t_ok_us_ = 0, t_start_us_ = 0, deadline_us_ = 0, t_phase_us_ = 0, hold_until_us_ = 0;
   bool ok_timing_ = false;
   const char* last_block_ = nullptr;

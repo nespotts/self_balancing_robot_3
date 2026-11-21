@@ -5,9 +5,11 @@
   python3 tools/motor_fit.py --ssh robot         same, fetched from the Pi (run on the PC)
   python3 tools/motor_fit.py FILE [FILE ...]     session .jsonl, or any text with "mt,..." lines
   options: --vref 11.5 (model-1 reference voltage)  --vbatt 12.0 (use if the battery reading was bad)
+           --config all | latest | DRIVE:HZ   (default all: every drive config separately + a comparison)
 
-Reads the "mt,..." MSG_LOG lines (format in docs/firmware.md), uses the newest completed run of
-each test (a thresholds, b speed curve, c reversal), and prints:
+Reads the "mt,..." MSG_LOG lines (format in docs/firmware.md). Runs are grouped by drive config
+(mot.drive_mode, mot.pwm_hz from the begin line, issue #22; older logs = 0:36621); per config it
+uses the newest completed run of each test (a thresholds, b speed curve, c reversal), and prints:
   dead zone start/stop per wheel + direction (duty and volts), speed vs volts with a linear fit,
   left/right mismatch, reversal lag, motor time constant, v3 curve vs volts model, and the params
   to try.  Everything is in volts (duty / 4095 * pack voltage at that moment), so a fit made at
@@ -18,6 +20,7 @@ import glob
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 
@@ -73,6 +76,26 @@ def read_ssh(host, name=None):
     return list(mt_lines_from_text(lines[1:])), [host + ":" + (lines[0] if lines else "?")]
 
 
+DEFAULT_HZ = 36621.0  # firmware before issue #22: EN PWM at 36.6 kHz, no hz=/drive= in the lines
+
+
+def parse_cfg(begin_line):
+    """(drive_mode, pwm_hz) from "mt,begin,...,hz=<Hz>,drive=<0|1>" (older firmware: (0, 36621))."""
+    m_hz = re.search(r"\bhz=([0-9.]+)", begin_line)
+    m_dr = re.search(r"\bdrive=([0-9]+)", begin_line)
+    return (int(m_dr.group(1)) if m_dr else 0, round(float(m_hz.group(1))) if m_hz else DEFAULT_HZ)
+
+
+def cfg_name(cfg):
+    return "%d:%.0f" % cfg
+
+
+def cfg_label(cfg):
+    d, hz = cfg
+    how = "PWM on EN, coast in the off-time" if d == 0 else "PWM on IN, brake in the off-time"
+    return "mot.drive_mode %d (%s), mot.pwm_hz %.0f" % (d, how, hz)
+
+
 def split_runs(items):
     """Group mt lines into runs (begin .. end/abort). Returns runs and the last param values."""
     runs, cur, params = [], None, {}
@@ -83,7 +106,8 @@ def split_runs(items):
         f = it[2].split(",")
         kind = f[1] if len(f) > 1 else ""
         if kind == "begin":
-            cur = {"test": f[2], "status": "running", "a": [], "b": [], "c": [], "sum": [], "begin": it[2]}
+            cur = {"test": f[2], "status": "running", "a": [], "b": [], "c": [], "sum": [], "begin": it[2],
+                   "cfg": parse_cfg(it[2])}
             runs.append(cur)
         elif cur is None:
             continue
@@ -176,26 +200,9 @@ def fmt(v, f="%.2f"):
 
 # ------------------------------------------------------------------ main
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("files", nargs="*")
-    ap.add_argument("--ssh", metavar="HOST", help="read the newest session log on HOST (e.g. robot)")
-    ap.add_argument("--vref", type=float, default=None, help="model-1 reference voltage (default mot.v_ref or 11.5)")
-    ap.add_argument("--vbatt", type=float, default=None, help="pack voltage to use when the logged one is invalid")
-    ap.add_argument("--band", type=float, default=None, help="mot.dz_band for the comparison (default from log or 0.01)")
-    a = ap.parse_args()
-
-    if a.ssh:
-        items, src = read_ssh(a.ssh, a.files[0] if a.files else None)
-    else:
-        items, src = read_local(a.files)
-    runs, params = split_runs(items)
-    print("source: %s" % ", ".join(src))
-    if not runs:
-        sys.exit("no motor test runs (mt,begin ...) found")
-    for r in runs:
-        print("  run test %s: %s  (%d a / %d b / %d c lines)" % (r["test"], r["status"], len(r["a"]), len(r["b"]), len(r["c"])))
-
+def analyze(runs, params, a, cfg):
+    """Print the analysis of the runs of one drive config; return a summary for the comparison."""
+    S = {"cfg": cfg}
     warn = []
 
     def vb_of(s):
@@ -228,6 +235,8 @@ def main():
                 s, t = e.get("start", (None, None)), e.get("stop", (None, None))
                 print("%-6s %-4s %5s %5sV %5s %5sV %7sV" % (w, d, fmt(s[0], "%.0f"), fmt(s[1]), fmt(t[0], "%.0f"),
                                                        fmt(t[1]), fmt(e.get("vb"))))
+                S.setdefault("start_v", []).append(s[1])
+                S.setdefault("stop_v", []).append(t[1])
 
     # ---------------- test b
     B, fits, taus = {}, {}, {}
@@ -271,9 +280,14 @@ def main():
                 f = fits.get((w, d))
                 if f:
                     print("%-6s %-4s %10.1f %6.2fV %8.1f%% %9.0f" % (w, d, f["k"], f["v0"], 100 * f["res"] / max(1, f["top"]), f["top"]))
+                    S.setdefault("v0", []).append(f["v0"])
+                    S.setdefault("k", []).append(f["k"])
+                    S.setdefault("resid", []).append(100 * f["res"] / max(1, f["top"]))
+                    S.setdefault("top", []).append(f["top"])
         for w in WHEELS:
             if taus.get(w):
                 print("time constant %s: median %.0f ms (63%% step response, 80 ms speed window removed)" % (w, median(taus[w])))
+                S.setdefault("tau", {})[w] = median(taus[w])
         kl = [fits[("left", d)]["k"] for d in DIRS if ("left", d) in fits]
         kr = [fits[("right", d)]["k"] for d in DIRS if ("right", d) in fits]
         if kl and kr:
@@ -308,6 +322,7 @@ def main():
                     continue
                 ms = lambda i: sum(x[i] for x in ok) / len(ok) if ok else None
                 dwell = (ms(1) - ms(0)) if ok else None
+                S.setdefault("dwell", []).append(dwell)
                 print("%-6s %-8s %4s %9s %9s %9s %10s%s" % (w, d, "%d/%d" % (len(ok), len(xs)), fmt(ms(0), "%.0f"), fmt(ms(1), "%.0f"),
                                                           fmt(dwell, "%.0f"), fmt(ms(2), "%.1f"), "" if len(ok) == len(xs) else "  (some never reversed in 2 s)"))
         print("stop = command -> wheel at its turning point; rev = until 2 deg back; dwell = rev - stop")
@@ -317,7 +332,7 @@ def main():
     if not fits and not A:
         for w_ in warn:
             print("WARNING: " + w_)
-        return
+        return S
     vref = a.vref or params.get("mot.v_ref") or 11.5
     band = a.band if a.band is not None else params.get("mot.dz_band", 0.01)
     print("\n== proposal (mot.model 1 = volts model, mot.vcomp 1, mot.v_ref %.1f V)" % vref)
@@ -398,8 +413,10 @@ def main():
             gain_ratio = slopes[0] / slopes[1]
             print("-> in the balancing range the volts model gives %.2fx the motor gain of the v3 curve; to start from the"
                   " same loop gain multiply bal.kp / bal.ki / bal.kd by ~%.2f (then retune)" % (1 / gain_ratio, gain_ratio))
-    print("\ntry it (on the Pi in ~/self_balancing_robot_3, robot balancing; mot.model 0 switches back):")
-    cmd = ["mot.model=1", "mot.vcomp=1", "mot.v_ref=%.1f" % vref]
+    print("\ntry it (on the Pi in ~/self_balancing_robot_3, robot balancing; mot.model 0 switches back;")
+    print("  mot.drive_mode / mot.pwm_hz apply when the motors are off: disarm, set, re-arm):")
+    cmd = ["mot.drive_mode=%d" % cfg[0], "mot.pwm_hz=%.0f" % cfg[1]]
+    cmd += ["mot.model=1", "mot.vcomp=1", "mot.v_ref=%.1f" % vref]
     cmd += ["mot.dz_%s_%s=%.2f" % (w[0], d, v) for (w, d), v in sorted(dz.items())]
     if scales:
         cmd += ["mot.left_scale=%.3f" % scales["left"], "mot.right_scale=%.3f" % scales["right"]]
@@ -407,6 +424,76 @@ def main():
     print("  (back: mot.model=0 mot.left_scale=%g mot.right_scale=%g; Save to robot / cfg.save keeps it)" % (cur["ls"], cur["rs"]))
     for w_ in sorted(set(warn)):
         print("WARNING: " + w_)
+    return S
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("files", nargs="*")
+    ap.add_argument("--ssh", metavar="HOST", help="read the newest session log on HOST (e.g. robot)")
+    ap.add_argument("--vref", type=float, default=None, help="model-1 reference voltage (default mot.v_ref or 11.5)")
+    ap.add_argument("--vbatt", type=float, default=None, help="pack voltage to use when the logged one is invalid")
+    ap.add_argument("--band", type=float, default=None, help="mot.dz_band for the comparison (default from log or 0.01)")
+    ap.add_argument("--config", default="all", metavar="all|latest|DRIVE:HZ",
+                    help="drive config(s) to fit: all (default, each separately + a comparison), latest, "
+                         "or e.g. 1:20000 = mot.drive_mode 1 at mot.pwm_hz 20000")
+    a = ap.parse_args()
+
+    if a.ssh:
+        items, src = read_ssh(a.ssh, a.files[0] if a.files else None)
+    else:
+        items, src = read_local(a.files)
+    runs, params = split_runs(items)
+    print("source: %s" % ", ".join(src))
+    if not runs:
+        sys.exit("no motor test runs (mt,begin ...) found")
+    for r in runs:
+        print("  run test %s: %-8s %s  (%d a / %d b / %d c lines)" % (r["test"], cfg_name(r["cfg"]), r["status"],
+                                                                    len(r["a"]), len(r["b"]), len(r["c"])))
+
+    configs = []  # in order of their newest run
+    for r in runs:
+        if r["cfg"] in configs:
+            configs.remove(r["cfg"])
+        configs.append(r["cfg"])
+    if a.config == "all":
+        sel = configs
+    elif a.config == "latest":
+        sel = configs[-1:]
+    else:
+        try:
+            d, hz = a.config.split(":")
+            want = (int(d), float(hz))
+        except ValueError:
+            sys.exit("--config: all, latest or DRIVE:HZ (e.g. 1:20000)")
+        sel = [c for c in configs if c[0] == want[0] and abs(c[1] - want[1]) <= 0.01 * want[1]]
+        if not sel:
+            sys.exit("no runs with %s (have: %s)" % (cfg_name(want), ", ".join(cfg_name(c) for c in configs)))
+    summaries = []
+    for cfg in sel:
+        print("\n" + "=" * 100)
+        print("=== %s   (newest run of each test with this config)" % cfg_label(cfg))
+        summaries.append(analyze([r for r in runs if r["cfg"] == cfg], params, a, cfg))
+    if len(summaries) > 1:
+        compare(summaries)
+
+
+def compare(summaries):
+    """One row per drive config: dead zone, linearity, time constant, reversal."""
+    print("\n" + "=" * 100)
+    print("=== comparison (means over wheels and directions; volts = duty / 4095 * pack V)")
+    print("%-9s %8s %8s %8s %10s %8s %9s %9s %9s" % ("config", "start V", "stop V", "fit V0", "k mm/s/V",
+                                                     "resid", "tau L/R", "top mm/s", "dwell ms"))
+    for S in summaries:
+        def m(key):
+            xs = [x for x in S.get(key, []) if x is not None]
+            return sum(xs) / len(xs) if xs else None
+        tau = "/".join(fmt(S.get("tau", {}).get(w), "%.0f") for w in WHEELS)
+        print("%-9s %8s %8s %8s %10s %7s%% %9s %9s %9s" % (
+            cfg_name(S["cfg"]), fmt(m("start_v")), fmt(m("stop_v")), fmt(m("v0")), fmt(m("k"), "%.1f"),
+            fmt(m("resid"), "%.1f"), tau, fmt(m("top"), "%.0f"), fmt(m("dwell"), "%.0f")))
+    print("lower start/stop V and V0 = smaller dead zone; lower resid = straighter speed vs volts above it;")
+    print("drive 0 = PWM on EN (coast in the off-time), drive 1 = PWM on IN (brake in the off-time)")
 
 
 if __name__ == "__main__":

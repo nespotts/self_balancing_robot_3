@@ -32,7 +32,7 @@ No sample → radio, Pi link, telemetry, battery, button. Nothing blocks the bal
 |---|---|
 | ESTOP flag | motors off now, latched until a packet without it; then ARMED must go off → on |
 | Not armed / IMU stale 25 ms | IDLE, motors off |
-| Boot | IDLE; remote must show ARMED off → on |
+| Boot | IDLE; remote must show ARMED off → on; stays IDLE until the remote's mode selection **changes** (or Pi `SET_MODE`) |
 | No remote, Pi sends SET_MODE ≠ IDLE | Pi arms (SET_MODE IDLE disarms) |
 | Remote present | remote's ARMED/ESTOP rule over the Pi |
 | Remote silent 250 ms | speed/turn ramp to 0, keeps balancing |
@@ -49,7 +49,14 @@ No sample → radio, Pi link, telemetry, battery, button. Nothing blocks the bal
 | STATION | `MSG_CMD_VEL`, if heartbeat < 500 ms and cmd < 300 ms |
 
 Mode requests act when they change: a remote mode-switch change, or each Pi `SET_MODE`.
-The remote's selection also applies when it (re)connects.
+
+```
+ boot ─> first packet: remote shows MANUAL ─> robot learns it, stays IDLE   (remote: Idle>Manual)
+         arm                               ─> still IDLE, motors off
+         remote selection changes           ─> that mode (e.g. pick Idle, then Manual)
+ dropout, reconnect, same selection         ─> mode kept (a Pi SET_MODE is not overwritten)
+ dropout, selection changed meanwhile       ─> the new selection
+```
 
 ## Params (Pi link `MSG_SET_PARAM`, live)
 
@@ -101,8 +108,11 @@ Gains are br3ttb units: ki per second, kd seconds.
 | mot.dz_l_fwd / l_rev / r_fwd / r_rev | 2.0 V | model 1 dead zone per wheel + direction |
 | mot.dz_band | 0.01 | model 1: below this \|u\| ramp 0 → dead zone (no kick on noise) |
 | rng.idle_off | 1 | 1 = servo off while disarmed / E-stop (sweep only): head to centre, 0.4 s, then no pulses |
+| mot.pwm_hz | 36621 | motor PWM frequency, 100–50000 Hz ² |
+| mot.drive_mode | 0 | 0 PWM on EN (coast in the off-time), 1 PWM on IN (brake in the off-time) ² (see L298N drive) |
 
-¹ applied between readings, only while the motors are off. Everything else applies at once.
+¹ applied between readings, only while the motors are off. ² applied only while both motors are off
+(disarm / IDLE / fallen; log line `mot: drive_mode …, pwm … Hz`). Everything else applies at once.
 
 EEPROM block has a name-layout CRC + value CRC; any mismatch → defaults (boot log says so).
 
@@ -204,7 +214,7 @@ the sensor's ~25° cone flattens the curve, so measure the travel by eye (step 1
 **Output** (Logs page / session log, `MSG_LOG`), volts = duty / 4095 × pack V at that moment:
 
 ```
-mt,begin,<test>,max=<duty>,vb=<V>,pitch=<deg>
+mt,begin,<test>,max=<duty>,vb=<V>,pitch=<deg>,hz=<mot.pwm_hz>,drive=<mot.drive_mode>   (sum/end lines end with hz=,drive= too)
 mt,a,<left|right>,<fwd|rev>,<start|stop>,<duty>,<volts>,<vbatt>,<speed mm/s>     (-1 = never moved)
 mt,b,<wheel>,<dir>,<duty>,<volts>,<vbatt>,<speed mm/s>,<t63 ms>
 mt,c,<wheel>,<new dir>,<rep>,<duty>,<volts>,<vbatt>,<to turning point ms>,<until 2° back ms>,<coast deg>
@@ -215,3 +225,25 @@ mt,sum,<a|b|c>,...      mt,end,<test>,ok,<s>,vb=<min>..<max>      mt,abort,<reas
 scale, how the v3 curve and the volts model map u → speed, and a `tune.py set mot.model=1 mot.vcomp=1 ...` line.
 A/B live with `mot.model` 0 / 1; the volts model has a different gain near 0, so retune `bal.*` (the tool suggests a
 starting factor). **Save to robot** keeps it. On a bench supply without the balance lead, vcomp does nothing (bad reading → 1×).
+
+## L298N drive (issue #22)
+
+```
+ mot.drive_mode 0 (v3)                       mot.drive_mode 1
+ EN  ┌┐ ┌┐ ┌┐  PWM                          EN  ────────── high
+ IN1 ──────── high  (fwd)                    IN1 ┌┐ ┌┐ ┌┐  PWM  (fwd)
+ IN2 ________ low                            IN2 ________ low
+ off-time: bridge off = coast (fast decay)   off-time: IN1 = IN2 = low = brake (slow decay)
+ command 0: coast                            command 0: brake (hold)
+ disarmed / IDLE / E-stop / fault: EN low, IN1 = IN2 = low = free, in both modes
+```
+
+| | |
+|---|---|
+| Direction change | the IN pin going low switches to GPIO low at once, then the other IN starts its PWM: both INs never high together |
+| Motor volts | ≈ duty × pack V in both modes; the linearity differs → run `mot.test=4` per config |
+| Timers | pins 4 (L EN), 5, 6, 9 on FlexPWM2 SM0–2, pins 7 (R EN), 8 on FlexPWM1 SM3: all six set to `mot.pwm_hz`. Servo (pin 2) is FlexPWM4: not affected |
+| Applies | only with both motors off; `motor_fit.py` groups runs by `drive:hz` (`--config latest` / `1:20000`, default all + comparison table) |
+
+A/B, robot in IDLE on the stand (motors off, so it applies at once): `tune.py set mot.drive_mode=1 mot.pwm_hz=4000`,
+armed, `mot.test=4`; repeat per config, then `motor_fit.py`.
