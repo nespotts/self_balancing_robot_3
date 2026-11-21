@@ -18,6 +18,9 @@
 //   nav.corridor_mm wide ahead / behind give front / rear distances, as a sensor range. Readings that hit
 //   lower than nav.floor_mm (sensor tipped down by the lean) are ignored. Slow down linearly from
 //   nav.slow_mm to rng.obstacle_mm. STATION commands get the same limit (main.cpp); MANUAL only the flag.
+// No range readings for 3 s (rng.enable 0, sensor fault): no obstacle stop is possible, so EXPLORE pauses
+//   (stands still, keeps its state) and GOTO drives at most nav.blind_speed (0 = GOTO pauses too).
+// Paused too while !upright or !live (nobody supervises, see ModeManager::supervised).
 #pragma once
 #include <stdint.h>
 
@@ -85,6 +88,8 @@ class Navigator {
   void updateHold(const NavIn& in);
   float holdSpeed(const NavIn& in, float x, float y);  // nav.hold_* position loop on the forward error
   void startBlocked(const NavIn& in);
+  bool blind(uint32_t now_ms) const;  // no RangeFrame for kBlindMs
+  void logBlind(uint8_t mode);
   void setTarget(const NavIn& in, float x, float y);
   void log(const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 
@@ -113,6 +118,8 @@ class Navigator {
   uint32_t pt_ms_[kPts] = {};
   uint8_t pt_head_ = 0, pt_n_ = 0;
   uint32_t last_range_ms_ = 0;
+  uint32_t sensed_ms_ = 0;            // last RangeFrame of any kind (valid or not)
+  static constexpr uint32_t kBlindMs = 3000;
   // status
   uint8_t sent_state_ = 0xFF, sent_idx_ = 0xFF, sent_n_ = 0xFF;
   uint32_t sent_ms_ = 0;

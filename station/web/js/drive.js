@@ -43,7 +43,8 @@ function buildModes() {
 }
 
 export function isStation() { return state.tlm && modeName(state.tlm.mode) === "STATION"; }
-// With no RC remote the station's mode request is also the arm switch (SET_MODE != IDLE arms).
+// With no RC remote the station arms the robot, but only from an explicit arm step: a set_mode with
+// "arm": true (two-tap Arm & Balance, the map's Go / Explore after a confirm). A plain set_mode never arms.
 export function remotePresent() { return !!state.tlm?.radio_ok; }
 export function disarmedNoRemote() { return robotAlive() && !flag("armed") && !remotePresent(); }
 
@@ -60,7 +61,7 @@ armBtn.onclick = () => {
     return;
   }
   armReset();
-  send({ t: "set_mode", mode: state.hello.modes.indexOf("BALANCE") });
+  send({ t: "set_mode", mode: state.hello.modes.indexOf("BALANCE"), arm: true });
   toast("Arming - stand the robot up");
 };
 
@@ -72,7 +73,7 @@ function updateArm() {
   armHint.textContent = !alive || armed ? "" : needArm ? "Motors are off. Arming starts balancing." :
     "Arm with the RC remote's switch.";
   if (!needArm) armReset();
-  modesEl.hidden = needArm;   // mode buttons would arm too: show them once armed
+  modesEl.hidden = needArm;   // mode buttons don't arm: show them once armed
 }
 
 function updateLock() {

@@ -160,20 +160,21 @@ void Motor::set(float cmd) {
   if (isnan(cmd)) cmd = 0;
   cmd_ = cmd;
   float duty;
-  if (speedLoop(cmd, duty)) {
-    drive(duty);
-    return;
+  if (!speedLoop(cmd, duty)) {
+    float pwm;
+    // Brake mode never with the v3 curve (issue #40): mode 1 is only entered with mot.model 1, and a live
+    // change to model 0 keeps the volts model until the next stop (then mode 0 is used).
+    if (P(P_MOT_MODEL) >= 0.5f || g_mode == 1) {
+      const float v_ref = P(P_MOT_V_REF);
+      const float dz = P((ParamId)(cmd >= 0 ? dz_fwd_ : dz_rev_));
+      pwm = motor_dz_volts(cmd / MOTOR_FULL, dz, v_ref, P(P_MOT_DZ_BAND)) / v_ref * MOTOR_FULL;
+    } else {
+      pwm = motor_curve(cmd, P(P_MOT_CURVE_EXP), P(P_MOT_KNEE_IN), P(P_MOT_KNEE_OUT));
+    }
+    pwm *= motors_vscale();
+    duty = cmd > 0 ? pwm : (cmd < 0 ? -pwm : 0.0f);
   }
-  float pwm;
-  if (P(P_MOT_MODEL) >= 0.5f) {
-    const float v_ref = P(P_MOT_V_REF);
-    const float dz = P((ParamId)(cmd >= 0 ? dz_fwd_ : dz_rev_));
-    pwm = motor_dz_volts(cmd / MOTOR_FULL, dz, v_ref, P(P_MOT_DZ_BAND)) / v_ref * MOTOR_FULL;
-  } else {
-    pwm = motor_curve(cmd, P(P_MOT_CURVE_EXP), P(P_MOT_KNEE_IN), P(P_MOT_KNEE_OUT));
-  }
-  pwm *= motors_vscale();
-  drive(cmd > 0 ? pwm : (cmd < 0 ? -pwm : 0.0f));
+  drive(motor_brake_cap(duty, g_mode, P(P_MOT_BRAKE_DUTY_MAX)));
 }
 
 void Motor::setRaw(float duty) {
@@ -219,14 +220,14 @@ void motors_begin() {
 }
 
 // mot.drive_mode 1 only at mot.pwm_hz <= mot.brake_max_hz (brake decay heats the L298N more at high
-// frequency: issues #23 / #26); above it: mode 0.
-static bool g_refused = false;
+// frequency: issues #23 / #26) and with mot.model 1 (issue #40); else mode 0 (motor_drive_refusal()).
+static uint8_t g_refused = MOTOR_DRIVE_OK;
 static uint8_t wantMode() {
   const bool want1 = P(P_MOT_DRIVE_MODE) >= 0.5f;
-  const bool ok = !want1 || wantHz() <= P(P_MOT_BRAKE_MAX_HZ);
-  if (!ok && !g_refused) g_cfg_changed = true;  // log the refusal once
-  g_refused = !ok;
-  return want1 && ok ? 1 : 0;
+  const uint8_t r = motor_drive_refusal(want1, wantHz(), P(P_MOT_BRAKE_MAX_HZ), P(P_MOT_MODEL));
+  if (r != MOTOR_DRIVE_OK && r != g_refused) g_cfg_changed = true;  // log the refusal once
+  g_refused = r;
+  return want1 && r == MOTOR_DRIVE_OK ? 1 : 0;
 }
 
 void motors_service() {
@@ -236,7 +237,7 @@ void motors_service() {
   applyConfig(wantHz(), mode);
 }
 
-bool motors_drive_mode_refused() { return g_refused; }
+uint8_t motors_drive_mode_refused() { return g_refused; }
 
 bool motors_test_begin(uint8_t drive_mode, float pwm_hz) {
   g_left.off();

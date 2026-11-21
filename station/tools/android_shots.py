@@ -109,7 +109,7 @@ async def main_async(url, browser, names):
         if want("android-drive-tilt") or want("android-landscape"):
             await nav(url + "#drive", 5)
             await ev("document.querySelector('#input-seg [data-v=tilt]').click();"
-                     "sbr3.send({t:'set_mode', mode: sbr3.state.hello.modes.indexOf('STATION')})")
+                     "sbr3.send({t:'set_mode', mode: sbr3.state.hello.modes.indexOf('STATION'), arm: true})")
             await asyncio.sleep(2.5)
         if want("android-drive-tilt"):
             r = (await ev("(()=>{const r=document.getElementById('joy').getBoundingClientRect();"

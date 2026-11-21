@@ -50,6 +50,7 @@ void Navigator::listChanged(bool replaced) {
 // ------------------------------------------------------------------ inputs
 
 void Navigator::addRange(const RangeFrame& f, uint32_t now_ms) {
+  sensed_ms_ = now_ms ? now_ms : 1;  // the sweep is running (a "no target" reading counts too)
   if (!f.valid || f.range_mm == 0) return;
   const float a = f.sensor_angle_deg;
   const float r = (float)f.range_mm + kSensorOut;
@@ -85,9 +86,22 @@ void Navigator::onModeChange(const NavIn& in) {
     hold_y_ = in.y;
   }
   if (navMode(in.mode)) {
-    if (!last_range_ms_ || in.now_ms - last_range_ms_ > 3000) log("nav: no range readings - obstacle stop is off");
+    warned_no_range_ = blind(in.now_ms);
+    if (warned_no_range_) logBlind(in.mode);
     if (in.mode != MODE_HOLD) log("nav: %u waypoints, going to %u", (unsigned)n_, (unsigned)idx_ + 1);
   }
+}
+
+// No RangeFrame for kBlindMs (rng.enable 0, sensors dead): no obstacle stop is possible (safety review #38).
+bool Navigator::blind(uint32_t now_ms) const { return !sensed_ms_ || now_ms - sensed_ms_ > kBlindMs; }
+
+void Navigator::logBlind(uint8_t mode) {
+  if (mode == MODE_EXPLORE || P(P_NAV_BLIND_SPEED) <= 0)
+    log("nav: no range readings - obstacle stop is off: %s paused", mode == MODE_EXPLORE ? "EXPLORE" : "GOTO");
+  else if (mode == MODE_GOTO)
+    log("nav: no range readings - obstacle stop is off: GOTO max %.0f mm/s", (double)P(P_NAV_BLIND_SPEED));
+  else
+    log("nav: no range readings - obstacle stop is off");
 }
 
 void Navigator::onPoseReset() {
@@ -209,14 +223,23 @@ void Navigator::updateGoto(const NavIn& in) {
   if (phase_ == DONE && idx_ < n_) phase_ = SEEK;
   const uint8_t ti = idx_ < n_ ? idx_ : n_ - 1;
   setTarget(in, wx_[ti], wy_[ti]);
-  const bool run = in.upright && in.live;  // else paused: stand still, keep the state
+  // No range readings: EXPLORE (wanders by itself) pauses; GOTO is capped at nav.blind_speed (0 = pauses).
+  const bool no_range = blind(in.now_ms);
+  if (no_range != warned_no_range_) {
+    warned_no_range_ = no_range;
+    if (no_range) logBlind(in.mode);
+    else log("nav: range readings back - obstacle stop on");
+  }
+  const float blind_v = P(P_NAV_BLIND_SPEED);
+  const bool blind_stop = no_range && (in.mode == MODE_EXPLORE || blind_v <= 0);
+  const bool run = in.upright && in.live && !blind_stop;  // else paused: stand still, keep the state
   if (phase_ == DONE) {  // arrived: hold the last point (a balancing robot rolls on after stopping)
     state_ = NAV_ARRIVED;
     obst_ = front_;
     if (run) speed_ = holdSpeed(in, tx_, ty_);
     return;
   }
-  const float vmax = fminf(P(P_NAV_MAX_SPEED), in.max_speed);
+  const float vmax = fminf(fminf(P(P_NAV_MAX_SPEED), in.max_speed), no_range ? blind_v : 1e9f);
   const float tmax = fminf(P(P_NAV_MAX_TURN), in.max_turn);
   const float arrive = P(P_NAV_ARRIVE_MM);
   const bool stopped = fabsf(in.speed) < P(P_NAV_STOP_SPEED) && fabsf(in.yaw_rate) < P(P_NAV_STOP_TURN);

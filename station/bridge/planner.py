@@ -356,6 +356,7 @@ class Planner:
         self.map_changed = False
         self.status = ""
         self.gen = 0                  # bumps with every user command (drops stale job results)
+        self.arm = False              # the next mode request carries the user's arm request (see command)
         self.pending = None
 
     # ---------------------------------------------------------- frames
@@ -391,7 +392,9 @@ class Planner:
     # ---------------------------------------------------------- commands
     def command(self, m, who="?"):
         """{"t": "plan", "action": "goto", "points": [[x, y], ...], "go": true}   (odometry frame, like goto)
-           {"t": "plan", "action": "explore"} | {"action": "stop"} | {"action": "set", "settings": {...}}"""
+           {"t": "plan", "action": "explore"} | {"action": "stop"} | {"action": "set", "settings": {...}}
+           goto / explore with "arm": true: the user confirmed arming (no remote): the planner's first
+           mode request carries the arm request; later ones never arm."""
         act = m.get("action")
         if act == "set":
             for k, v in (m.get("settings") or {}).items():
@@ -425,6 +428,7 @@ class Planner:
             if not goals:
                 return {"t": "error", "text": "no goal"}
             self.mode, self.goals, self.blacklist = "goto", goals[:20], []
+            self.arm = bool(m.get("arm"))
             self.started_at = self.clock()
             self.blocked_plans = 0
             self._start_job(self._plan_goto, go=True, force=True)
@@ -435,7 +439,9 @@ class Planner:
             self.blocked_plans = 0
             self._set_status("exploring")
             if self.b.tlm["mode"] != lp.MODE_EXPLORE:     # arm now (no remote): the sweep runs while armed
-                self.b.handle_command({"t": "set_mode", "mode": lp.MODE_EXPLORE}, "planner")
+                self.b.handle_command({"t": "set_mode", "mode": lp.MODE_EXPLORE, "arm": bool(m.get("arm"))},
+                                      "planner")
+            self.arm = False
             self._start_job(self._plan_explore, go=True, force=True)
             return None
         return {"t": "error", "text": "unknown plan action %r" % act}
@@ -447,6 +453,7 @@ class Planner:
         was = self.mode
         self.gen += 1
         self.pending = None
+        self.arm = False
         self.mode, self.path, self.goals, self.goal = "idle", [], [], None
         if was != "idle" and why:
             self._set_status(why)
@@ -535,7 +542,8 @@ class Planner:
         if go:
             mode = lp.MODE_GOTO if self.mode == "goto" else lp.MODE_EXPLORE
             if not self.b.tlm or self.b.tlm["mode"] != mode:
-                self.b.handle_command({"t": "set_mode", "mode": mode}, "planner")
+                self.b.handle_command({"t": "set_mode", "mode": mode, "arm": self.arm}, "planner")
+            self.arm = False
 
     def _plan_goto(self, pose):
         cm = self.costmap()

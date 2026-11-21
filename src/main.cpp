@@ -51,7 +51,7 @@ static bool tlm_fresh = false;
 static uint32_t last_tlm_us = 0;
 static bool hello_pending = true;
 static uint16_t param_stream = P_COUNT;  // next ParamInfo to send (P_COUNT = idle)
-static bool save_wait_logged = false;
+static bool save_wait_logged = false, defaults_wait_logged = false;
 
 // ------------------------------------------------------------------ helpers
 
@@ -175,7 +175,8 @@ static void buildTelemetry(uint32_t t_us) {
   f.vel_out_deg = o.vel_out;
   f.step = step_count;
   f.remote_flags = (modes.estop() ? LINK_RF_ESTOP : 0) | (modes.armWait() ? LINK_RF_ARM_WAIT : 0) |
-                   (modes.radioPresent(now_ms) ? LINK_RF_PRESENT : 0);
+                   (modes.radioPresent(now_ms) ? LINK_RF_PRESENT : 0) |
+                   (modes.linkEstop() ? LINK_RF_LINK_ESTOP : 0) | (modes.handoverWait() ? LINK_RF_NAV_HANDOVER : 0);
   f.nav_state = nav.state();
   f.nav_index = nav.index();
   tlm_fresh = true;
@@ -279,7 +280,11 @@ static void onLinkFrame(uint8_t type, const uint8_t* p, uint8_t len) {
   const uint32_t now_ms = millis();
   switch (type) {
     case MSG_HEARTBEAT:
-      if (len >= sizeof(HeartbeatFrame)) modes.onPiHeartbeat(now_ms);
+      if (len >= sizeof(HeartbeatFrame)) {
+        HeartbeatFrame hb;
+        memcpy(&hb, p, sizeof(hb));
+        modes.onPiHeartbeat(now_ms, hb.clients);  // clients 0 = nobody watching: not supervision (#38)
+      }
       break;
     case MSG_CMD_VEL:
       if (len >= sizeof(CmdVelFrame)) {
@@ -289,7 +294,11 @@ static void onLinkFrame(uint8_t type, const uint8_t* p, uint8_t len) {
       }
       break;
     case MSG_SET_MODE:
-      if (len >= sizeof(SetModeFrame)) modes.onPiSetMode(p[0], now_ms);
+      if (len >= sizeof(SetModeFrame)) {
+        const SetModeResult r = modes.onPiSetMode(p[0], now_ms);
+        if (r == SETMODE_ESTOP) link.log("SET_MODE %u ignored: station E-stop latched (release it first)", (unsigned)p[0]);
+        else if (r == SETMODE_NOT_ARMED) link.log("SET_MODE %u ignored: not armed (arm first)", (unsigned)p[0]);
+      }
       break;
     case MSG_SET_PARAM:
       if (len >= sizeof(SetParamFrame)) {
@@ -318,7 +327,26 @@ static void onLinkFrame(uint8_t type, const uint8_t* p, uint8_t len) {
       }
       break;
     case MSG_EVENT:
-      if (len >= sizeof(EventFrame)) handleEvent(p[0]);
+      if (len < sizeof(EventFrame)) break;
+      if (p[0] == EVT_LINK_ESTOP) {  // latching station E-stop (issue #41)
+        const bool was = modes.linkEstop();
+        modes.onLinkEstop();
+        modes.update(now_ms, imu.healthy(micros()), limits());
+        motors_stop();
+        motors_active = false;
+        ctl.disengage();
+        if (!was) link.log("E-STOP (station): latched, motors off");
+      } else if (p[0] == EVT_LINK_ESTOP_RELEASE) {
+        if (modes.linkEstop()) {
+          modes.onLinkEstopRelease();
+          link.log(modes.radioPresent(now_ms) ? "E-stop released: re-arm with the remote (ARMED off -> on)"
+                                              : "E-stop released: arm from the station to continue");
+        }
+      } else if (p[0] == EVT_LINK_ARM) {
+        modes.onLinkArm(now_ms);
+      } else {
+        handleEvent(p[0]);
+      }
       break;
     default:
       break;
@@ -330,6 +358,9 @@ static void onLinkFrame(uint8_t type, const uint8_t* p, uint8_t len) {
 static void controlStep() {
   const ImuSample& s = imu.sample();
   const uint32_t now_ms = millis();
+  // A gap longer than IMU_STALE_US (IMU stall / self-reset, a blocking call): the motors were (or should
+  // have been) stopped, so balancing restarts through the re-engage window, never with stale I / D (#39).
+  if (have_step && s.t_us - last_step_us > IMU_STALE_US) ctl.disengage();
   float dt = have_step ? (float)(s.t_us - last_step_us) * 1e-6f : imu.nominalDt();
   if (dt <= 0.0f || dt > 0.05f) dt = imu.nominalDt();
   have_step = true;
@@ -420,7 +451,7 @@ static void motorTestPoll(uint32_t now_us, uint32_t now_ms) {
   in.now_us = now_us;
   in.request = (uint8_t)lroundf(P(P_MOT_TEST));
   in.armed = modes.armed();
-  in.estop = modes.estop();
+  in.estop = modes.estop() || modes.linkEstop();
   in.idle = modes.mode() == MODE_IDLE;
   in.radio_live = modes.radioLive(now_ms);
   in.imu_ok = imu.healthy(now_us);
@@ -489,6 +520,7 @@ static void background() {
   if (motors_active && now_us - last_step_us > IMU_STALE_US) {
     motors_stop();
     motors_active = false;
+    ctl.disengage();  // re-engage check + settle when samples come back (issue #39)
   }
 
   ControlPacket pkt;
@@ -498,9 +530,10 @@ static void background() {
     radio.setAck(buildRadioTelemetry(pkt.seq));
   }
   modes.update(now_ms, imu.healthy(now_us), limits());
-  if (!modes.motorsAllowed() && motors_active) {  // E-stop / disarm: don't wait for the next step
+  if (!modes.motorsAllowed() && motors_active) {  // E-stop / disarm / IMU fault: don't wait for the next step
     motors_stop();
     motors_active = false;
+    ctl.disengage();
   }
   uint8_t ev;
   while (modes.takeEvent(ev)) handleEvent(ev);
@@ -509,9 +542,12 @@ static void background() {
   motors_service();
   static bool cfg_log = false;
   if (motors_take_config_changed()) cfg_log = true;
-  if (cfg_log && link.log("mot: drive_mode %u (%s), pwm %.0f Hz", (unsigned)motors_drive_mode(),
-                          motors_drive_mode() ? "IN PWM, brake decay" : (motors_drive_mode_refused() ? "EN PWM, coast decay; drive_mode 1 refused above mot.brake_max_hz" : "EN PWM, coast decay"),
-                          (double)motors_pwm_hz()))
+  static const char* const kRefused[] = {"", "; drive_mode 1 refused above mot.brake_max_hz",
+                                         "; drive_mode 1 refused: needs mot.model 1"};
+  const uint8_t refused = motors_drive_mode_refused();
+  if (cfg_log && link.log("mot: drive_mode %u (%s%s), pwm %.0f Hz", (unsigned)motors_drive_mode(),
+                          motors_drive_mode() ? "IN PWM, brake decay" : "EN PWM, coast decay",
+                          kRefused[refused < 3 ? refused : 0], (double)motors_pwm_hz()))
     cfg_log = false;
 
   if (imu.dataReady()) return;
@@ -563,12 +599,6 @@ static void background() {
   imu.service(now_ms, motors_off);
   radio.service(now_ms, motors_off);
   if (const char* s = sweep.serviceSlow(now_ms, motors_off)) link.log("%s", s);
-  if (g_param_defaults_requested) {
-    g_param_defaults_requested = false;
-    params_reset_defaults();
-    param_stream = 0;
-    link.log("params: defaults restored (not saved)");
-  }
   if (g_param_save_requested) {
     if (motors_off) {
       g_param_save_requested = false;
@@ -576,6 +606,19 @@ static void background() {
       link.log(params_save() ? "params: saved" : "params: SAVE FAILED");
     } else if (!save_wait_logged) {
       save_wait_logged = link.log("params: save waits until the motors are off");
+    }
+  }
+  // cfg.defaults swaps every gain / limit at once: only with the motors off, like cfg.save (issue #42).
+  // After a pending save, so a save asked for earlier never writes the defaults.
+  if (g_param_defaults_requested) {
+    if (motors_off) {
+      g_param_defaults_requested = false;
+      defaults_wait_logged = false;
+      params_reset_defaults();
+      param_stream = 0;
+      link.log("params: defaults restored (not saved)");
+    } else if (!defaults_wait_logged) {
+      defaults_wait_logged = link.log("params: defaults wait until the motors are off");
     }
   }
 }

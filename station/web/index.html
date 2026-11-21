@@ -26,8 +26,12 @@
     <button data-view="tune" title="Tune"><svg viewBox="0 0 24 24"><path d="M6 3v18M12 3v18M18 3v18"/><circle cx="6" cy="14" r="2.2" class="fill"/><circle cx="12" cy="8" r="2.2" class="fill"/><circle cx="18" cy="16" r="2.2" class="fill"/></svg><span>Tune</span></button>
     <button data-view="logs" title="Logs"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><span>Logs</span></button>
   </nav>
-  <button id="stop" class="stop" title="E-stop: motors off (Space / Esc)">STOP</button>
+  <button id="stop" class="stop" title="E-stop: motors off and latched (Space / Esc)">STOP</button>
 </header>
+<div class="estop-bar" id="estop-bar" hidden>
+  <span>E-STOP on: motors locked off</span>
+  <button id="estop-release" title="Clear the E-stop (the robot stays disarmed)">Release E-stop</button>
+</div>
 
 <main>
   <!-- Map (main view) -->

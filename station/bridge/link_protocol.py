@@ -1,4 +1,4 @@
-"""Link protocol v3 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
+"""Link protocol v4 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
 
 Frame: 0xA5 0x5A | type u8 | len u8 | payload[len] | crc16 u16 LE
 crc16 = CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over type, len and payload.
@@ -7,7 +7,7 @@ Pure Python, 3.8+.
 """
 import struct
 
-LINK_PROTOCOL_VERSION = 3
+LINK_PROTOCOL_VERSION = 4
 LINK_SYNC1 = 0xA5
 LINK_SYNC2 = 0x5A
 LINK_MAX_PAYLOAD = 200
@@ -41,6 +41,12 @@ EVT_NONE, EVT_MARK_WAYPOINT, EVT_CLEAR_WAYPOINTS, EVT_GO_HOME, EVT_RESET_POSE, E
 EVT_COUNT = 6
 EVENT_NAMES = ["NONE", "MARK_WAYPOINT", "CLEAR_WAYPOINTS", "GO_HOME", "RESET_POSE", "START_SCAN"]
 
+# Link-only EventFrame.event values (link_protocol.h LinkEvent, v4). Never from the remote.
+EVT_LINK_ESTOP = 0x80          # station E-stop: IDLE + disarm, latched; no mode request can start the motors
+EVT_LINK_ESTOP_RELEASE = 0x81  # clears the latch only (still IDLE + disarmed; then the normal arming rules)
+EVT_LINK_ARM = 0x82            # explicit arm request: the next SET_MODE != IDLE within LINK_ARM_WINDOW_MS arms
+LINK_ARM_WINDOW_MS = 500
+
 TLM_ARMED = 0x01
 TLM_UPRIGHT = 0x02
 TLM_FAILSAFE = 0x04
@@ -59,7 +65,10 @@ GOTO_MAX_POINTS = 16
 LINK_RF_ESTOP = 0x01      # E-stop latched (from the remote)
 LINK_RF_ARM_WAIT = 0x02   # arming needs the remote's ARMED switch off -> on
 LINK_RF_PRESENT = 0x04    # remote packets in the last second (radio_ok = last 250 ms)
-RF_BITS = {"estop": LINK_RF_ESTOP, "arm_wait": LINK_RF_ARM_WAIT, "present": LINK_RF_PRESENT}
+LINK_RF_LINK_ESTOP = 0x08    # v4: station E-stop latched (until EVT_LINK_ESTOP_RELEASE)
+LINK_RF_NAV_HANDOVER = 0x10  # v4: GOTO/EXPLORE/HOLD paused: remote lost; needs it back or a station SET_MODE
+RF_BITS = {"estop": LINK_RF_ESTOP, "arm_wait": LINK_RF_ARM_WAIT, "present": LINK_RF_PRESENT,
+           "link_estop": LINK_RF_LINK_ESTOP, "nav_handover": LINK_RF_NAV_HANDOVER}
 
 # NavState (NavStatusFrame.state, TelemetryFrame.nav_state)
 NAV_IDLE, NAV_TURNING, NAV_DRIVING, NAV_BLOCKED, NAV_ARRIVED, NAV_HOLDING = range(6)

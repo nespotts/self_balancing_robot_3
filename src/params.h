@@ -106,7 +106,9 @@
   X(NAV_BACKOFF_MM,  "nav.backoff_mm",     0.0f,      0.0f,    500.0f)   \
   X(NAV_HOLD_KP,     "nav.hold_kp",        2.0f,      0.0f,    20.0f)    \
   X(NAV_HOLD_MAX,    "nav.hold_max_speed", 150.0f,    0.0f,    1000.0f)  \
-  X(NAV_HOLD_DB_MM,  "nav.hold_db_mm",     15.0f,     0.0f,    200.0f)
+  X(NAV_HOLD_DB_MM,  "nav.hold_db_mm",     15.0f,     0.0f,    200.0f)   \
+  /* safety review #38: GOTO without range readings (rng.enable 0): speed cap, 0 = refuse */ \
+  X(NAV_BLIND_SPEED, "nav.blind_speed",    150.0f,    0.0f,    1500.0f)
 
 enum ParamId : uint16_t {
 #define PARAM_ENUM(id, name, def, mn, mx) P_##id,

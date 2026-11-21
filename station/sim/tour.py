@@ -117,7 +117,7 @@ def drive_offline(robot, on_range, points=TOUR, max_s=240.0, on_step=None):
             if t == lp.MSG_RANGE:
                 on_range(lp.decode_range(p))
 
-    robot.set_mode(lp.MODE_BALANCE)
+    robot.set_mode(lp.MODE_BALANCE, arm=True)
     t_end = robot.t + 2.5
     while robot.t < t_end:
         if robot.step_n % 40 == 0:
@@ -179,7 +179,7 @@ class OfflineBridge:
             set_list(r, pts, replace)
             self.waypoints = pts if replace else self.waypoints + pts
         elif m["t"] == "set_mode":
-            r.set_mode(m["mode"])
+            r.set_mode(m["mode"], arm=bool(m.get("arm")))
 
     def update(self):
         r = self.robot
@@ -201,7 +201,7 @@ def plan_offline(robot, mapper, command, max_s=300.0, on_step=None):
             if t == lp.MSG_RANGE:
                 mapper.on_range(lp.decode_range(p))
 
-    robot.set_mode(lp.MODE_BALANCE)
+    robot.set_mode(lp.MODE_BALANCE, arm=True)
     t_end = robot.t + 2.5
     while robot.t < t_end:
         if robot.step_n % 40 == 0:
@@ -235,7 +235,7 @@ async def tour(bridge, points=TOUR, loops=0, quiet=False):
     while not (bridge.tlm and bridge.hello):
         await asyncio.sleep(0.2)
     await asyncio.sleep(1.0)
-    bridge.handle_command({"t": "set_mode", "mode": lp.MODE_BALANCE}, "tour")
+    bridge.handle_command({"t": "set_mode", "mode": lp.MODE_BALANCE, "arm": True}, "tour")
     await asyncio.sleep(2.5)
     n = 0
     while loops == 0 or n < loops:

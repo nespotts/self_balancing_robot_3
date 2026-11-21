@@ -30,16 +30,19 @@ No sample → radio, Pi link, telemetry, battery, button. Nothing blocks the bal
 
 | Condition | Result |
 |---|---|
-| ESTOP flag | motors off now, latched until a packet without it; then ARMED must go off → on |
-| Not armed / IMU stale 25 ms | IDLE, motors off |
+| Remote ESTOP flag | motors off now, latched until a packet without it; then ARMED must go off → on |
+| **Station STOP** (`EVT_LINK_ESTOP`) | motors off now, disarmed, **latched**: every mode request (remote selector, `SET_MODE`, GO_HOME) is ignored until the station's **Release E-stop** (`EVT_LINK_ESTOP_RELEASE`); after it still IDLE + disarmed: arm again |
+| Not armed / IMU stale 25 ms | IDLE, motors off; controller disengaged (re-engage window + `ctl.settle_ms` when samples return) |
 | Boot | IDLE; remote must show ARMED off → on; stays IDLE until the remote's mode selection **changes** (or Pi `SET_MODE`) |
-| No remote, Pi sends SET_MODE ≠ IDLE | Pi arms (SET_MODE IDLE disarms) |
+| No remote: arm | only an explicit arm step: `EVT_LINK_ARM`, then `SET_MODE` ≠ IDLE within 500 ms (UI two-tap Arm, Go / Explore confirm). A plain `SET_MODE` only changes an armed robot's mode; `SET_MODE` IDLE disarms |
 | Remote present | remote's ARMED/ESTOP rule over the Pi |
 | Remote silent 250 ms | speed/turn ramp to 0, keeps balancing |
+| Remote gone 1 s in GOTO / EXPLORE / HOLD | stays paused (balancing, zero motion) until the remote is back or the station sends a `SET_MODE` (handover, `remote_flags` 0x10). Never resumes on the Pi heartbeat alone |
 | Mode change | commanded motion → 0, heading target reset |
 | Tilt > `bal.cutoff_deg` | motors off, integrators reset |
 | Back within `bal.reengage_deg` of balance | balance again; steer + velocity after `ctl.settle_ms` |
 | Encoder fault | velocity loop off (balance + heading only) |
+| `cfg.defaults` / `cfg.save` while the motors run | wait until the motors are off (log `params: … wait …`); a pending save runs first |
 
 | Mode | Drives from |
 |---|---|
@@ -50,8 +53,22 @@ No sample → radio, Pi link, telemetry, battery, button. Nothing blocks the bal
 | GOTO, EXPLORE | waypoint list (see Navigation), if supervised ¹ |
 | HOLD | hold the position HOLD started at, if supervised ¹ |
 
-¹ supervised = remote packets < 250 ms, or (no remote for 1 s) Pi heartbeat < 500 ms. Else: stand still.
+¹ supervised = remote packets < 250 ms, or (no remote for 1 s) Pi heartbeat < 500 ms **with `clients` > 0**
+(a browser / the app is connected; the planner does not count) and no pending handover. Else: stand still.
 Speed ≤ `drv.max_speed` × remote speed limit (while the remote is present).
+No range readings for 3 s (`rng.enable 0`): EXPLORE pauses, GOTO ≤ `nav.blind_speed` (0 = pauses).
+
+```
+ STOP (station) ──> IDLE, disarmed, LATCHED ──── any mode request: ignored
+                                │
+                     Release E-stop (confirm)
+                                v
+                       IDLE, disarmed ──┬─ remote present: ARMED off → on, then pick a mode
+                                        └─ no remote: Arm step (arm request + SET_MODE)
+
+ GOTO under the remote ── remote gone 1 s ──> paused (balancing) ──┬─ remote back ──> GOTO again
+                                                                   └─ station SET_MODE ──> station in charge
+```
 
 Mode requests act when they change: a remote mode-switch change, or each Pi `SET_MODE`.
 
@@ -92,7 +109,7 @@ Gains are br3ttb units: ki per second, kd seconds.
 | tlm.hz | 100 | |
 | rng.enable | 0 | 1 = range sweep on (starts at boot, or live when motors are off); 0 = off, servo limp |
 | cfg.save | — | set 1 → write EEPROM (when motors off) |
-| cfg.defaults | — | set 1 → defaults (not saved) |
+| cfg.defaults | — | set 1 → defaults, not saved (when motors off) |
 | rng.servo_trim_deg | 0 | ± added to every servo command: **horn fix** (see Range sweep) |
 | rng.sweep_deg | 170 | head travel (inside the SG90's ~180°); two sensors → 360° less two 10° gaps |
 | rng.steps | 16 | positions per pass (170/15 = 11.3° apart) |
@@ -114,10 +131,10 @@ Gains are br3ttb units: ki per second, kd seconds.
 | mot.dz_band | 0.01 | model 1: below this \|u\| ramp 0 → dead zone (no kick on noise) |
 | rng.idle_off | 1 | 1 = servo off while disarmed / E-stop (sweep only): head to centre, 0.4 s, then no pulses |
 | mot.pwm_hz | 36621 | motor PWM frequency, 100–50000 Hz ² |
-| mot.drive_mode | 0 | 0 PWM on EN (coast in the off-time), 1 PWM on IN (brake in the off-time) ², **mode 1 only at pwm_hz ≤ brake_max_hz** (see L298N drive) |
+| mot.drive_mode | 0 | 0 PWM on EN (coast in the off-time), 1 PWM on IN (brake in the off-time) ², **mode 1 only at pwm_hz ≤ brake_max_hz and with mot.model 1** (see L298N drive) |
 | mot.test_wheels | 0 | motor test drives 0 both, 1 left only, 2 right only (the other: EN low, INs low) |
 | mot.brake_max_hz | 2000 | drive_mode 1 refused above this mot.pwm_hz (mode 0 used, logged; the test aborts) |
-| mot.brake_duty_max | 3000 | motor test in drive_mode 1: duty cap (with mot.test_max) |
+| mot.brake_duty_max | 3000 | drive_mode 1 duty cap: motor test (with mot.test_max) **and balancing**; 4095 once the brake heat checks are done |
 | mot.speed_loop | 0 | 1 = closed-loop wheel speed motor layer (experimental, see Wheel speed loop) |
 | mot.sl_kp / sl_ki / sl_imax / sl_band | 0.006 / 0.08 / 3 / 0.3 | speed loop: V per mm/s, V per mm, integrator limit V, dead-zone taper V |
 | mot.k_l / k_r | 200 | mm/s per V above the dead zone (motor_fit.py `k`); speed loop + tracking tests |
@@ -138,6 +155,7 @@ Gains are br3ttb units: ki per second, kd seconds.
 | nav.floor_mm | 50 | ignore hits lower than this (floor, when leaning) |
 | nav.backoff_mm | 0 | when blocked, back off this far (rear checked too) |
 | nav.hold_kp / hold_max_speed / hold_db_mm | 2 /s / 150 mm/s / 15 mm | HOLD position loop |
+| nav.blind_speed | 150 mm/s | GOTO speed cap with no range readings for 3 s (`rng.enable 0`); 0 = GOTO pauses too. EXPLORE always pauses |
 
 ¹ applied between readings, only while the motors are off. ² applied only while both motors are off
 (disarm / IDLE / fallen; log line `mot: drive_mode …, pwm … Hz`). Everything else applies at once.
@@ -229,7 +247,7 @@ GOTO and EXPLORE follow the list the same way; HOLD holds the spot it started at
 | Floor | lean tips the head; a hit lower than `nav.floor_mm` above the floor is ignored |
 | Slow-down | `nav.slow_mm` → `rng.obstacle_mm`: speed limit falls linearly (≥ `nav.min_speed`) |
 | Applies to | GOTO, EXPLORE, HOLD, STATION. MANUAL: `TLM_OBSTACLE` only |
-| No sweep | `rng.enable 0` → no points → no obstacle stop (log `nav: no range readings …` when a nav mode starts) |
+| No sweep | `rng.enable 0` (no RangeFrame for 3 s) → no obstacle stop → **EXPLORE paused**, **GOTO ≤ `nav.blind_speed`** (log `nav: no range readings - obstacle stop is off: …`) |
 | Pose reset | clears the list, points and hold point |
 | GO_HOME | list = [first waypoint, or the origin], mode GOTO (never arms) |
 | NavStatusFrame | at once on a change of state / index / count, else 2 Hz in GOTO/EXPLORE/HOLD; `obstacle_mm` = blocking range |
@@ -354,6 +372,8 @@ starting factor). **Save to robot** keeps it. On a bench supply without the bala
 | Timers | pins 4 (L EN), 5, 6, 9 on FlexPWM2 SM0–2, pins 7 (R EN), 8 on FlexPWM1 SM3: all six set to `mot.pwm_hz`. Servo (pin 2) is FlexPWM4: not affected |
 | Applies | only with both motors off; `motor_fit.py` groups runs by `drive:hz` (`--config latest` / `1:2000`, default all + comparison table) |
 | Brake limit | **mode 1 only at `mot.pwm_hz` ≤ `mot.brake_max_hz` (2000)**; above it mode 0 is used and the log says `drive_mode 1 refused`. The 36.6 kHz brake-mode smoke (#22/#23) was the binding left motor, but high-frequency brake decay also heats the L298N more |
+| Brake + model | **mode 1 only with `mot.model 1`** (brake + v3 curve is far too hot near 0, motor-profile.md); else mode 0, log `drive_mode 1 refused: needs mot.model 1`. Set `mot.model=1` first. A live change to model 0 keeps the volts model until the next stop |
+| Brake duty | balancing in mode 1: duty ≤ `mot.brake_duty_max` (3000) |
 
 A/B, robot in IDLE on the stand (motors off, so it applies at once): `tune.py set mot.drive_mode=1 mot.pwm_hz=1000`,
 armed, `mot.test=4`; repeat per config, then `motor_fit.py`. Results: [motor-profile.md](motor-profile.md).

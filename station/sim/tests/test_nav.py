@@ -18,11 +18,12 @@ def payload(frame):
 
 
 class NavRun:
-    """Steps the sim with Pi heartbeats (no remote: SET_MODE arms) and collects what it sends."""
+    """Steps the sim with Pi heartbeats (no remote: arm request + SET_MODE arms) and collects what it sends."""
 
     def __init__(self, seed=1):
         self.r = SimRobot(seed=seed)
         self.logs, self.navs, self.tlm = [], [], []
+        self.hb = HB                   # heartbeat payload (clients = 1)
 
     def frame(self, f):
         self.r.on_frame(f[2], payload(f))
@@ -31,7 +32,7 @@ class NavRun:
         r = self.r
         end = r.t + seconds
         while r.t + r.dt <= end:
-            r.on_frame(lp.MSG_HEARTBEAT, HB)
+            r.on_frame(lp.MSG_HEARTBEAT, self.hb)
             r.run_until(min(end, r.t + 0.05), max_steps=100000)
             for f in r.out:
                 t, p = f[2], payload(f)
@@ -51,6 +52,7 @@ class NavRun:
         facing where it faced at boot, then switch to `mode`."""
         r = self.r
         th0 = r.TH
+        self.frame(lp.encode_event(lp.EVT_LINK_ARM))   # explicit arm request (no remote)
         self.frame(lp.encode_set_mode(lp.MODE_BALANCE))
         self.assertTrue(self.run(10.0, lambda s: s.r.ctl.upright and s.r.t > 3.0 and abs(s.r.speed_f) < 40))
         r.ctl.heading_sp += th0 - r.TH
@@ -83,6 +85,74 @@ class TestParamsMatchFirmware(unittest.TestCase):
 
     def test_state_names(self):
         self.assertEqual(lp.NAV_STATE_NAMES[simmod.NAV_HOLDING], "holding")
+
+
+class TestSafety(unittest.TestCase):
+    """Safety review rules (issues #38 #41), same as src/mode_manager.cpp / navigator.cpp."""
+
+    def moved(self, n, seconds):
+        x0, y0 = n.pos()
+        n.run(seconds)
+        x, y = n.pos()
+        return math.hypot(x - x0, y - y0)
+
+    def test_no_clients_no_motion(self):
+        n = NavRun(seed=11)
+        n.frame(lp.encode_goto([(1500.0, 0.0)]))
+        n.stand_up(lp.MODE_GOTO)
+        n.run(1.0)
+        n.hb = lp.encode_heartbeat(0, 0)[4:-2]          # the bridge runs, nobody is connected
+        n.run(1.0)                                      # (ramp down)
+        self.assertLess(self.moved(n, 2.0), 150.0)      # (balancing sway; driving would be ~500 mm)
+        self.assertLess(max(abs(t["cmd_speed_mms"]) for t in n.tlm[-100:]), 1.0)
+        self.assertEqual(n.r.mode, lp.MODE_GOTO)        # still armed + balancing, just paused
+        n.hb = HB                                       # a browser connects again
+        self.assertGreater(self.moved(n, 3.0), 150.0)
+
+    def test_explore_paused_without_range(self):
+        n = NavRun(seed=12)
+        n.r.set_param(n.r.pidx["rng.enable"], 0.0)
+        n.frame(lp.encode_goto([(1500.0, 0.0)]))
+        n.run(4.0)                                      # no readings for > 3 s
+        n.stand_up(lp.MODE_EXPLORE)
+        n.run(0.5)
+        self.assertLess(self.moved(n, 3.0), 80.0)
+        self.assertTrue(any("EXPLORE paused" in l for l in n.logs), n.logs[-5:])
+
+    def test_goto_capped_without_range(self):
+        n = NavRun(seed=13)
+        n.r.set_param(n.r.pidx["rng.enable"], 0.0)
+        n.frame(lp.encode_goto([(2500.0, 0.0)]))
+        n.run(4.0)
+        n.stand_up(lp.MODE_GOTO)
+        self.assertTrue(n.run(20.0, lambda s: s.r.nav.state == lp.NAV_DRIVING))
+        n.run(3.0)
+        self.assertLessEqual(max(abs(t["cmd_speed_mms"]) for t in n.tlm[-100:]), n.r.P("nav.blind_speed") + 1)
+        self.assertTrue(any("GOTO max 150" in l for l in n.logs), n.logs[-5:])
+
+    def test_link_estop_latches(self):
+        n = NavRun(seed=14)
+        n.stand_up(lp.MODE_STATION)
+        n.run(0.5)
+        self.assertEqual(n.r.mode, lp.MODE_STATION)
+        n.frame(lp.encode_event(lp.EVT_LINK_ESTOP))
+        n.run(0.2)
+        self.assertEqual(n.r.mode, lp.MODE_IDLE)
+        self.assertTrue(n.tlm[-1]["remote_flags"] & lp.LINK_RF_LINK_ESTOP)
+        n.frame(lp.encode_event(lp.EVT_LINK_ARM))       # arm step while latched: ignored
+        n.frame(lp.encode_set_mode(lp.MODE_BALANCE))
+        n.run(0.3)
+        self.assertEqual(n.r.mode, lp.MODE_IDLE)
+        self.assertIn("SET_MODE 1 ignored: station E-stop latched (release it first)", n.logs)
+        n.frame(lp.encode_event(lp.EVT_LINK_ESTOP_RELEASE))
+        n.frame(lp.encode_set_mode(lp.MODE_BALANCE))   # release alone never arms
+        n.run(0.3)
+        self.assertEqual(n.r.mode, lp.MODE_IDLE)
+        self.assertFalse(n.tlm[-1]["remote_flags"] & lp.LINK_RF_LINK_ESTOP)
+        n.frame(lp.encode_event(lp.EVT_LINK_ARM))
+        n.frame(lp.encode_set_mode(lp.MODE_BALANCE))
+        n.run(0.3)
+        self.assertEqual(n.r.mode, lp.MODE_BALANCE)
 
 
 class TestGoto(unittest.TestCase):

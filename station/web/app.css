@@ -60,6 +60,9 @@ svg .fill { fill: currentColor; stroke: none; }
   box-shadow: 0 2px 10px rgba(212, 42, 42, .35); }
 .stop:hover { border-color: #fff; }
 .stop.flash { animation: flash .6s ease-out; }
+.estop-bar { flex: none; display: flex; align-items: center; justify-content: center; gap: 12px; padding: 6px 12px;
+  background: #3a0d0d; border-bottom: 2px solid var(--stop); color: #ffd6d6; font-weight: 700; font-size: 14px; }
+.estop-bar button { padding: 6px 14px; background: var(--surface-3); border-color: #ff7070; color: #fff; font-weight: 600; }
 @keyframes flash { from { box-shadow: 0 0 0 10px rgba(255, 80, 80, .6); } to { box-shadow: 0 0 0 0 rgba(255, 80, 80, 0); } }
 
 /* tabs: bottom bar on phones */
