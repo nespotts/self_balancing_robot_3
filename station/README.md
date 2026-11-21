@@ -25,6 +25,7 @@ Try it: `python -m station.sim`, open http://localhost:8080/ (`--host 0.0.0.0` s
 | **Sensors** | both range sensors, last sweep |
 | **Tune** | live PID, **Find balance point**, presets, motor test |
 | **Plots** | any signal vs time |
+| **Health** | green / amber / red **preflight** before you arm, battery **minutes left**, one tile per part |
 | **Logs** | messages, **Falls**, downloads |
 
 <p>
@@ -57,5 +58,13 @@ Falls (black-box recorder):
 <img src="docs/screenshots/phone-stale-stop.png" width="30%">
 </p>
 <p>Falls list, Find balance point, no-data badge</p>
+
+Health (preflight checklist, battery minutes, tiles; it only looks, it never arms):
+
+<p>
+<img src="docs/screenshots/phone-health.png" width="30%">
+<img src="docs/screenshots/phone-health-fault.png" width="30%">
+</p>
+<p>All green, an encoder fault</p>
 
 More: [Android app](android/README.md) | [features in detail](../docs/station-features.md) | [API, install, flashing contract](../docs/api.md)

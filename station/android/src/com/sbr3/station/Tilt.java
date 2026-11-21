@@ -7,6 +7,7 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.os.SystemClock;
 import java.util.Locale;
+import java.util.function.IntSupplier;
 
 /** Rotation-vector sensor -> tilt {pitch, roll, t} events (degrees, screen frame; see TiltMath) at up to `hz`. */
 final class Tilt implements SensorEventListener {
@@ -14,6 +15,7 @@ final class Tilt implements SensorEventListener {
     private final Sensor sensor;
     private final float[] r = new float[9];
     private volatile int rotation;
+    private volatile IntSupplier rotationSource;   // asked on every sample: the display can turn 180 degrees without a config change
     private boolean wanted, running;
     private long periodMs = 33, lastEmit;
 
@@ -27,6 +29,8 @@ final class Tilt implements SensorEventListener {
     boolean available() { return sensor != null; }
 
     void setRotation(int rot) { rotation = rot; }
+
+    void setRotationSource(IntSupplier s) { rotationSource = s; }
 
     /** From the page (any thread). */
     synchronized void start(int hz) {
@@ -58,8 +62,12 @@ final class Tilt implements SensorEventListener {
         if (now - lastEmit < periodMs - 4) return;
         lastEmit = now;
         SensorManager.getRotationMatrixFromVector(r, e.values);
-        double[] pr = TiltMath.pitchRoll(r, rotation);
-        Events.emit("tilt", String.format(Locale.ROOT, "{\"pitch\":%.2f,\"roll\":%.2f,\"t\":%d}", pr[0], pr[1], now));
+        IntSupplier src = rotationSource;
+        int rot = src != null ? src.getAsInt() & 3 : rotation & 3;
+        rotation = rot;
+        double[] pr = TiltMath.pitchRoll(r, rot);
+        // "rot" travels with the sample: the page drops samples from a different screen frame than at the press
+        Events.emit("tilt", String.format(Locale.ROOT, "{\"pitch\":%.2f,\"roll\":%.2f,\"rot\":%d,\"t\":%d}", pr[0], pr[1], rot, now));
     }
 
     @Override public void onAccuracyChanged(Sensor s, int accuracy) { }

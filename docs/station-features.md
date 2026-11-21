@@ -10,7 +10,31 @@
 | **Drive** | joystick / WASD in STATION mode |
 | **Sensors** | both range sensors live: mm, valid, angle, readings/s; last sweep around the robot; range vs time. ⋯ → park / trim / sweep width / direction, **hand test** (cover one sensor: its card lights up). Colours: front amber, rear magenta (map too) |
 | **Tune** | live P / I / D at the loop rate (**Full rate**), sliders apply at once, **Save to robot** writes EEPROM (when the motors are off); ⋯ → Restore defaults. Two views: **Balance** and **Motor test** (below) |
+| **Health** | **Preflight** (IMU, loop ~400 Hz, encoders, battery, remote or station, E-stop, range sensors): green / amber / red, **never arms anything**. **Battery**: volts, percent and **minutes left** (also in the top bar); a tile each for link, loop, IMU, encoders, range sensors, radio, Pi, logs disk, firmware. Tap a tile for its reason. Details below |
 | **Logs** | **Falls** (below), messages, session downloads (CSV / JSONL), link details |
+
+## Health (issue #51)
+
+<p><img src="../station/docs/screenshots/phone-health.png" width="25%"> <img src="../station/docs/screenshots/phone-health-fault.png" width="25%"></p>
+
+The bridge sends one `health` message a second (it reads `/proc` and `/sys/class/thermal` once a second, nothing heavier). Rules live in `station/bridge/health.py`; the page only draws them.
+
+| Part | Green | Amber | Red |
+|---|---|---|---|
+| Loop | ≥ 90 % of `ctl.rate_hz` | ≥ 70 % | below |
+| IMU, encoders | no fault in telemetry `error_code` | | fault code 1-4 |
+| Range sensors (if `rng.enable`) | ≥ 4 readings/s | some | none |
+| Radio (once a remote was seen) | answering, no gaps | gaps > 100 ms, or < 90 % of 50 pkt/s (from the firmware's `radio:` line) | lost: failsafe |
+| Battery | above `batt.low_cell` + 0.15 V per cell, ≥ 5 min | nearly empty | `low_batt` or below the limit |
+| Pi | < 70 C, CPU < 90 % | hot or busy | ≥ 80 C |
+| Logs disk | ≥ 2 GB free | < 2 GB | < 0.3 GB, or the session log is off |
+| E-stop | released | | latched |
+
+- **Minutes left**: the bridge fits `volts = a + b·time + c·load` over the last 10 min (load = mean |motor duty|), so the sag while driving is not taken for discharge. Minutes = (volts at your usual load − 3 × `batt.low_cell`) / −b. It needs about 2 min of data; a LiPo drops faster near empty, so near the end it is optimistic. The percent comes from the sag-corrected resting cell voltage.
+- **Bench supply**: pack reading under 3 V (no balance lead): "bench supply", no minutes, battery counts as fine.
+- The firmware sends the pack voltage only, so "per cell" is pack ÷ 3.
+- Not done here: the wheels-up spin test of each wheel (encoder sign / count). That commands the motors, so it stays in Tune → Motor test.
+- API: `health` WebSocket message, `GET /api/health`, and `health` inside `GET /api/state`.
 
 ## Falls: the black-box recorder (issue #50)
 

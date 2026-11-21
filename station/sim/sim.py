@@ -721,6 +721,10 @@ class SimRobot:
         self.rs_measuring = False
         self.motor_l = self.motor_r = 0.0
         self.battery = 12.45
+        self.drain = 0.00002          # V/s at no load (x11 at full duty); --drain speeds it up for demos
+        self.bench = False            # sim-only: no balance lead, the battery taps read ~0 V (Health page: "bench supply")
+        self.fault = 0                # sim-only: telemetry error_code (1 IMU init, 2 IMU stale, 3 / 4 encoder)
+        self.radio_log_at = 10.0      # the firmware prints its radio stats line every 10 s while packets arrive
         self.push = 0.0               # sim-only disturbance (rad/s^2), see push()
         self.mtest = SimMotorTest(self.log)   # wheels-up motor test (mot.test)
         self.on_stand = False
@@ -1018,7 +1022,7 @@ class SimRobot:
         self._motor_test_step(now, dt, pitch, pitch_rate, stand_pose)
 
         load = (abs(self.motor_l) + abs(self.motor_r)) / (2 * MOTOR_FULL)
-        self.battery -= dt * 0.00002 * (1 + 10 * load)
+        self.battery -= dt * self.drain * (1 + 10 * load)
         batt_v = self.battery - 0.5 * load
 
         # params: cfg.save waits until the motors are off (src/main.cpp)
@@ -1052,6 +1056,10 @@ class SimRobot:
         if now - self.last_tlm >= period - 1e-9:
             self.last_tlm = now
             self.out.append(self._telemetry(o, pitch, pitch_rate, yaw_rate, w, batt_v))
+
+        if self.remote and now >= self.radio_log_at:
+            self.radio_log_at = now + 10.0
+            self.log("radio: 50.0 pkt/s, gaps>100ms 0 (max 32 ms), bad 0, multi 0, ack fail 0, poll max 61 us")
 
         self._range_step(now, pitch)
 
@@ -1120,7 +1128,7 @@ class SimRobot:
             status |= lp.TLM_PI_LINK
         if self.nav.obst_flag:
             status |= lp.TLM_OBSTACLE
-        if batt_v / CELLS < self.P("batt.low_cell"):
+        if not self.bench and batt_v / CELLS < self.P("batt.low_cell"):
             status |= lp.TLM_LOW_BATT
         if self.mode in (lp.MODE_GOTO, lp.MODE_EXPLORE):
             if self.nav.active():
@@ -1128,7 +1136,7 @@ class SimRobot:
             if self.nav.state == NAV_ARRIVED:
                 status |= lp.TLM_NAV_DONE
         return lp.encode_telemetry({
-            "t_us": self.t_us(), "mode": self.mode, "status": status, "error_code": 0,
+            "t_us": self.t_us(), "mode": self.mode, "status": status, "error_code": self.fault,
             "radio_ok": 1 if self.radio_live() else 0,
             "pitch_deg": pitch, "pitch_rate_dps": pitch_rate, "roll_deg": rng.gauss(0, 0.2),
             "heading_deg": th, "yaw_rate_dps": yaw_rate,
@@ -1137,7 +1145,7 @@ class SimRobot:
             "wheel_left_mms": self.vl + rng.gauss(0, 3), "wheel_right_mms": self.vr + rng.gauss(0, 3),
             "balance_target_deg": o["balance_target"],
             "motor_left": self.motor_l / MOTOR_FULL, "motor_right": self.motor_r / MOTOR_FULL,
-            "battery_v": batt_v + rng.gauss(0, 0.01), "loop_hz": self.loop_hz,
+            "battery_v": 0.0 if self.bench else batt_v + rng.gauss(0, 0.01), "loop_hz": self.loop_hz,
             "bal_p": o["bal_p"], "bal_i": o["bal_i"], "bal_d": o["bal_d"], "steer_out": o["steer"],
             "vel_out_deg": o["vel_out"], "step": self.step_n & 0xFFFFFFFF,
             "remote_flags": (lp.LINK_RF_PRESENT if self.radio_live() else 0) |

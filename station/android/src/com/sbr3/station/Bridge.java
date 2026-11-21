@@ -10,14 +10,14 @@ import org.json.JSONObject;
 
 /**
  * window.SBR3Native (page -> Java). Only answers while a trusted page is shown (the bundled find screen or a
- * private-LAN robot page; see MainActivity.isTrusted). Events come back through window.__sbr3.emit(name, json).
+ * private-LAN robot page; see MainActivity.trusted / HostPolicy). Events come back through window.__sbr3.emit(name, json).
  */
 final class Bridge {
     private final MainActivity act;
 
     Bridge(MainActivity a) { act = a; }
 
-    private boolean ok() { return act.trusted; }
+    private boolean ok() { return act.trusted(); }
 
     @JavascriptInterface public String appInfo() {
         if (!ok()) return "{}";
@@ -99,6 +99,11 @@ final class Bridge {
     /** "auto" (follows the phone, ignores the rotation lock), "landscape", "portrait". Remembered. */
     @JavascriptInterface public void setOrientation(String mode) {
         if (ok()) act.runOnUiThread(() -> act.setOrientation(mode));
+    }
+
+    /** The drive pad's rectangles [[l,t,r,b],..] in CSS px: the system Back swipe doesn't start from them (API 29+). */
+    @JavascriptInterface public void gestureRects(String json) {
+        if (ok() && json != null && json.length() < 512) act.runOnUiThread(() -> act.setGestureRects(json));
     }
 
     @JavascriptInterface public String getOrientation() { return act.orientation(); }

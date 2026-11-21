@@ -36,6 +36,9 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--head-error", type=float, default=0.0, metavar="DEG",
                     help="range-sensor head mounted this far CCW (+) of true; rng.servo_trim_deg -DEG fixes it")
+    ap.add_argument("--bench", action="store_true", help="battery taps read ~0 V, like a bench supply with no balance lead")
+    ap.add_argument("--drain", type=float, default=None, metavar="V_PER_MIN",
+                    help="battery discharge at no load, volts per minute (default 0.0012: real packs last hours)")
     ap.add_argument("--tour", action="store_true", help="arm and drive a waypoint loop around the room (mapping demo)")
     ap.add_argument("--shove", type=float, default=0.0, metavar="SECONDS",
                     help="demo: knock the robot over every SECONDS while it balances (fills the Falls list)")
@@ -46,6 +49,9 @@ def main(argv=None):
     remote = a.remote or a.remote_disarmed
     robot = DriftRobot(remote=remote, remote_armed=not a.remote_disarmed, seed=a.seed, head_error_deg=a.head_error,
                        drift_deg_min=a.drift, drift_scale=0.02 if a.drift else 0.0)
+    robot.bench = a.bench
+    if a.drain is not None:
+        robot.drain = a.drain / 60.0
     server = SimServer(robot, host or "127.0.0.1", int(port), a.garbage)
 
     async def run():

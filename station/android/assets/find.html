@@ -193,6 +193,8 @@ on.findDone = (d) => {
   else if (hits.length) pick(hits);
   else set("none", "Robot not found", noWifi ? "No Wi-Fi: join the robot's network, then search again." : "Nothing answered on port 8080.");
 };
+// Wi-Fi came, went or changed while this screen is up: look again (not while the user types an address or it is opening)
+on.net = () => { if (["search", "pick", "none"].includes(document.body.dataset.s)) search(); };
 on.probe = (d) => {
   $("go").disabled = false;
   if (d.ok) connect(d.addr, d.kind);
