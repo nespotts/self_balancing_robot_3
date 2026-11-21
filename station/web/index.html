@@ -19,7 +19,7 @@
   <span class="pill" id="pill-armed"><span class="txt">—</span></span>
   <button class="pill" id="pill-batt" title="Battery and health"><span class="txt">— V</span></button>
   <nav class="tabs" id="tabs">
-    <button data-view="drive" title="Drive" class="tab-drive"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" class="fill"/></svg><span>Drive</span></button>
+    <button data-view="drive" title="Control: the phone as the remote" class="tab-drive"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" class="fill"/></svg><span>Control</span></button>
     <button data-view="map" title="Map"><svg viewBox="0 0 24 24"><path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/></svg><span>Map</span></button>
     <button data-view="sensors" title="Sensors"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.2" class="fill"/><path d="M8.2 8.2a5.4 5.4 0 0 0 0 7.6M15.8 8.2a5.4 5.4 0 0 1 0 7.6M5.1 5.1a9.8 9.8 0 0 0 0 13.8M18.9 5.1a9.8 9.8 0 0 1 0 13.8"/></svg><span>Sensors</span></button>
     <button data-view="plots" title="Plots"><svg viewBox="0 0 24 24"><path d="M3 17l5-6 4 3 4-7 5 5"/><path d="M3 21h18"/></svg><span>Plots</span></button>
@@ -27,6 +27,7 @@
     <button data-view="health" title="Health"><svg viewBox="0 0 24 24"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg><span>Health</span></button>
     <button data-view="logs" title="Logs"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg><span>Logs</span></button>
   </nav>
+  <button id="disarm" class="disarm" hidden title="Disarm: motors off, no latch (STOP is the emergency stop)">Disarm</button>
   <button id="stop" class="stop" title="E-stop: motors off and latched (Space / Esc)">STOP</button>
 </header>
 <div class="estop-bar" id="estop-bar" hidden>
@@ -96,6 +97,7 @@
       <div class="tile"><b id="rd-pitch">0.0</b><span>° pitch</span></div>
       <div class="tile"><b id="rd-head">0</b><span>° heading</span></div>
     </div>
+    <div class="ctl-who" id="ctl-who" hidden></div>
     <div class="arm-box" id="arm-box" hidden>
       <button id="arm-btn" class="arm">Arm &amp; Balance</button>
       <p id="arm-hint" class="muted"></p>

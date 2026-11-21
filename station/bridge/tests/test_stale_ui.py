@@ -23,6 +23,7 @@ from station.bridge.tests.test_hardening import Rig
 from station.bridge.tests.test_native_drive import free_port
 from station.tools.screenshots import BROWSERS, Cdp
 
+LABEL = {"GOTO": "Go to", "EXPLORE": "Explore"}
 BROWSER = next((b for b in BROWSERS if os.path.exists(b)), None)
 SHOTS = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "screenshots")
 HOOK = r"""
@@ -112,11 +113,11 @@ class TestStaleUi(unittest.TestCase):
                 self.assertEqual(await self.ev(tap % name + ".textContent"), "Tap again")
                 await self.ev(tap % name + ".click()")
                 self.assertEqual(await self.ev("__sent.filter(m => m.t === 'set_mode').map(m => m.mode)"), [mode])
-                self.assertEqual(await self.ev(tap % name + ".textContent"), name)
+                self.assertEqual(await self.ev(tap % name + ".textContent"), LABEL[name])
                 await self.ev("__sent.length = 0")
             await self.ev(tap % "GOTO" + ".click()")                       # armed, then left alone: it forgets
             await asyncio.sleep(3.3)
-            self.assertEqual(await self.ev(tap % "GOTO" + ".textContent"), "GOTO")
+            self.assertEqual(await self.ev(tap % "GOTO" + ".textContent"), "Go to")
             self.assertEqual(await self.ev("__sent.filter(m => m.t === 'set_mode').length"), 0)
             # one tap modes (IDLE / STATION ...) still go at once
             await self.ev(tap % "IDLE" + ".click()")

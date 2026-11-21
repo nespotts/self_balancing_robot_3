@@ -1,5 +1,6 @@
 // Entry: tabs, top bar, STOP. Views live in their own modules.
 import { state, on, send, connect, modeName, flag, robotAlive } from "./conn.js";
+import { remotePresent } from "./drive.js";
 import { toast } from "./ui.js";
 import { invalidate as mapInvalidate } from "./map.js";
 import { places, openSheet } from "./places.js";
@@ -50,6 +51,17 @@ document.getElementById("estop-release").onclick = () => {
   if (!send({ t: "estop_release" })) toast("Not connected - release not sent", 3000);
 };
 stopBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); estop(); });   // fire on touch-down, not release
+
+// ---------- Disarm ----------
+// SET_MODE IDLE. No remote: the robot disarms (src/mode_manager.cpp onPiSetMode). With an RC remote present its ARMED
+// switch rules: the robot goes IDLE (motors off) but stays armed until the switch goes off. Never latches: arm again to drive.
+const disarmBtn = document.getElementById("disarm");
+const MODE_PILL = { STATION: "MANUAL", MANUAL: "RC DRIVE" };
+disarmBtn.onclick = () => {
+  const i = state.hello?.modes?.indexOf("IDLE");
+  if (i == null || i < 0 || !send({ t: "set_mode", mode: i })) { toast("Not connected - disarm not sent!", 3000); return; }
+  toast(remotePresent() ? "Motors off. The RC remote's ARMED switch still says armed" : "Disarmed", 2500);
+};
 window.addEventListener("keydown", (e) => {
   if ((e.code === "Space" || e.code === "Escape") && !e.target.closest("input, textarea")) { e.preventDefault(); estop(); }
 });
@@ -81,16 +93,21 @@ function updateTop() {
   if (lost && !rcLost) toast("RC remote lost - the robot stops driving and keeps balancing", 4000);
   rcLost = lost;
   const alive = robotAlive();
-  setPill(pMode, t && alive ? modeName(t.mode) : "—", t && alive && t.mode !== 0 ? "mode-on" : "");
+  setPill(pMode, t && alive ? (MODE_PILL[modeName(t.mode)] || modeName(t.mode)) : "—", t && alive && t.mode !== 0 ? "mode-on" : "");
   const latched = estopLatched();
   estopBar.hidden = !latched;
+  // Disarm: one tap, motors off, no latch. Shown while armed (the RC remote's own switch may still say armed).
+  const armedNow = !!(state.connected && t && flag("armed") && !latched);
+  const rcIdle = remotePresent() && t && t.mode === 0;   // nothing left to turn off
+  disarmBtn.hidden = !(armedNow && !rcIdle);
+  document.body.classList.toggle("is-armed", armedNow);   // narrow screens: the Disarm button says armed
   // GOTO / EXPLORE / HOLD paused because the RC remote was lost: needs it back, or a mode from here (link v4: 0x10)
   const handover = !!(t && alive && (t.remote_flags & 0x10));
   if (handover && !navHandover) toast("Remote lost: the robot stopped and waits. Pick the mode here to take over.", 5000);
   navHandover = handover;
   if (latched) setPill(pArmed, "E-STOP", "estop");
   else if (t && alive && (t.remote_flags & 1)) setPill(pArmed, "RC E-STOP", "estop");   // link v3: LINK_RF_ESTOP
-  else if (t && alive) setPill(pArmed, flag("armed") ? (flag("upright") ? "ARMED" : "ARMED·DOWN") : "SAFE", flag("armed") ? "armed" : "");
+  else if (t && alive) setPill(pArmed, flag("armed") ? (flag("upright") ? "ARMED" : "DOWN") : "SAFE", flag("armed") ? (flag("upright") ? "armed" : "armed down") : "");
   else setPill(pArmed, "—");
   if (t && alive) {       // + "~18m" once the bridge has learned the discharge trend (Health page)
     const bm = state.health?.battery;
