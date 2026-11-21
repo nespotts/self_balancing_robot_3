@@ -244,7 +244,7 @@ class TestNativeDrive(unittest.TestCase):
             self.assertGreater(c[-1][1], 50, "forward speed")
             self.assertEqual(c[-1][2], 0, "no turn with roll inside the dead-band")
             await self.wait_active(b)
-            self.assertTrue(await self.ev("__calls.some(c => c[0] === 'vibrate')"), "buzz on press")
+            self.assertFalse(await self.ev("__calls.some(c => c[0] === 'vibrate')"), "no haptics")
             # roll right -> turn right (negative = clockwise)
             await self.ev("__tilt.roll = 20")
             await asyncio.sleep(0.4)

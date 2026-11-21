@@ -47,7 +47,7 @@ import java.util.List;
 
 /**
  * Full-screen WebView: the bundled find screen (assets/find.html), then the robot's own web app from the bridge
- * (http://<pi>:8080/). Adds window.SBR3Native (Bridge) for tilt, gamepad, haptics, keep-awake and orientation.
+ * (http://<pi>:8080/). Adds window.SBR3Native (Bridge) for tilt, gamepad, keep-awake and orientation.
  */
 public class MainActivity extends Activity {
     static final String TAG = "BalanceBot";

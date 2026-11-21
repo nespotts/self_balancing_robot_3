@@ -2,7 +2,7 @@
 //   Tilt:    hold the pad (dead-man) and tilt the phone -> cmd_vel. Zeroed at the press; release = stop.
 //   Gamepad: left stick drives (STATION mode); B = STOP, X = IDLE, Y = BALANCE (twice to arm), A = STATION,
 //            L1 / R1 = speed limit.
-//   Haptics: E-stop, link loss, obstacle. Keeps the screen on while connected. Screen orientation in the Drive ⋯ menu.
+//   Keeps the screen on while connected. Screen orientation in the Drive ⋯ menu.
 // Native -> page events: window.__sbr3.emit(name, json): tilt, rotation, net, gamepad, gamepadButton, gamepads, pause, resume.
 // Page -> native besides the inputs: SBR3Native.gestureRects(json) keeps the pad clear of the system Back swipe.
 import { state, on, send, robotAlive, flag } from "./conn.js";
@@ -37,7 +37,6 @@ function init() {
   try { info = JSON.parse(N.appInfo()); } catch {}
   document.body.classList.add("native");
   document.head.append(el("link", { rel: "stylesheet", href: "native.css" }));
-  const buzz = (p) => { try { N.vibrate(JSON.stringify(p)); } catch {} };
 
   const joy = document.getElementById("joy"), knob = document.getElementById("joy-knob");
   const wrapEl = joy.closest(".joy-wrap"), opts = document.querySelector(".drive-opts");
@@ -102,7 +101,6 @@ function init() {
     try { joy.setPointerCapture(e.pointerId); } catch {}
     hold = { id: e.pointerId, p0: tilt.pitch, r0: tilt.roll, rot: tilt.rot };
     joy.classList.add("active", "held");
-    buzz([0, 18]);
     driveNow();
   }, true);
   for (const t of ["pointerup", "pointercancel", "lostpointercapture"]) {
@@ -162,7 +160,6 @@ function init() {
     switch (d.name) {
       case "B": {
         if (!send({ t: "estop" })) toast("Not connected - STOP not sent!", 3000);
-        buzz([0, 250]);
         const s = document.getElementById("stop");
         s.classList.remove("flash"); void s.offsetWidth; s.classList.add("flash");
         break;
@@ -196,21 +193,19 @@ function init() {
   });
   try { window.__sbr3.emit("gamepads", N.gamepads()); } catch {}
 
-  // ---------- release + haptics on robot state ----------
-  let wasEstop = false, wasAlive = false, wasObstacle = false, lastObstacleBuzz = 0;
+  // ---------- release on robot state ----------
+  let wasEstop = false, wasAlive = false, wasObstacle = false;
   on("status", (s) => {
-    if (s.estop && !wasEstop) buzz([0, 300]);
     wasEstop = !!s.estop;
   });
   on("tlm", () => {
     if (hold && !isStation()) release();
     const ob = flag("obstacle"), now = performance.now();
-    if (ob && !wasObstacle && now - lastObstacleBuzz > 2000) { buzz([0, 60, 50, 60]); lastObstacleBuzz = now; }
     wasObstacle = ob;
   });
   setInterval(() => {
     const alive = !!robotAlive();
-    if (wasAlive && !alive) { buzz([0, 120, 80, 120, 80, 120]); release(); }
+    if (wasAlive && !alive) release();
     wasAlive = alive;
   }, 250);
   on("conn", (up) => {
