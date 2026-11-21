@@ -557,10 +557,12 @@ void MotorTest::runB(const MtIn& in, bool new_enc) {
     // wheel (above this run's test-1 start duty, else 25 % of max). Below that the wheel is just coasting
     // down from the previous step, and "slowing" is not binding (false aborts on 2026-11-21: right wheel
     // at duty 256 with ref 596 mm/s, left at duty 938 with ref 701 mm/s).
+    // Same margin as the stall check: start volts + kStallMarginV (near the dead zone the speed
+    // lurches between stuck and moving - 2026-11-21: left at 6.75 V, start 6.42 V, ref 447 -> 121).
     const int dI = di(dir_);
-    const float drive_min = a_start_[w][dI] > 0 ? 1.05f * a_start_[w][dI] : 0.25f * max_duty_;
-    if (sel(w) && !drop_ref_ok_[w] && el >= kBDropRefUs && fabsf(duty_[w]) >= drive_min &&
-        fabsf(sp[w]) > kDropMinMms) {
+    const bool driven = a_start_v_[w][dI] > 0 ? volts(fabsf(duty_[w]), in) >= a_start_v_[w][dI] + kStallMarginV
+                                               : fabsf(duty_[w]) >= 0.25f * max_duty_;
+    if (sel(w) && !drop_ref_ok_[w] && el >= kBDropRefUs && driven && fabsf(sp[w]) > kDropMinMms) {
       drop_ref_ok_[w] = true;
       drop_ref_[w] = fabsf(sp[w]);
       drop_on_[w] = false;
