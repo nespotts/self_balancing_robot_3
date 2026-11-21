@@ -21,7 +21,7 @@ import os
 import re
 import time
 
-from .occgrid import Grid
+from .occgrid import MAX_CELLS, Grid
 from .places import HOME, Places
 from . import scanmatch
 
@@ -41,6 +41,7 @@ DEFAULTS = {
     "min_mm": 40.0,             # closer readings are ignored (the robot itself, crosstalk)
     "cone_deg": 12.0,           # free-space wedge width (VL53L0X field of view is ~25 deg)
     "hit_arc_deg": 5.0,         # the target is marked on an arc this wide (where in the cone it is is unknown)
+    "range_weight": True,       # near hits: narrow + strong; far hits: weak; near free space counts double
     "correct": False,           # scan-to-map pose correction (odometry drift)
 }
 LIMITS = {"pitch_limit_deg": (0.5, 45), "no_target_mm": (0, 4000), "max_hit_mm": (100, 8000),
@@ -48,11 +49,13 @@ LIMITS = {"pitch_limit_deg": (0.5, 45), "no_target_mm": (0, 4000), "max_hit_mm":
 
 
 class Mapper:
-    def __init__(self, map_dir="~/sbr3-maps", say=None, size_m=20.0, res_mm=25.0):
+    def __init__(self, map_dir="~/sbr3-maps", say=None, size_m=20.0, res_mm=25.0, max_cells=MAX_CELLS):
         self.dir = os.path.abspath(os.path.expanduser(map_dir))
         self.say = say or (lambda text: None)
         self.size_m, self.res_mm = size_m, res_mm
-        self.grid = Grid(size_m, res_mm)
+        self.max_cells = max_cells
+        self.grid = Grid(size_m, res_mm, max_cells=max_cells)
+        self.warned = None               # last grid warning that was announced
         self.settings = dict(DEFAULTS)
         self._load_settings()
         self.name = None                 # map last saved / loaded
@@ -169,7 +172,7 @@ class Mapper:
                 # free space stops 1 cell + 3 % short of the target (range noise), so a noisy reading
                 # does not erase the wall cell another reading just marked
                 self.grid.integrate_wedge(ox, oy, a, half, r - self.grid.res - 0.03 * r, r,
-                                         hit_half=math.radians(S["hit_arc_deg"]) / 2)
+                                         hit_half=math.radians(S["hit_arc_deg"]) / 2, rw=S["range_weight"])
             else:
                 self.grid.integrate_wedge(ox, oy, a, half, S["max_hit_mm"])
         else:
@@ -200,6 +203,10 @@ class Mapper:
         self.last_send = now
         t0 = time.perf_counter()
         out = []
+        if self.grid.warning != self.warned:
+            self.warned = self.grid.warning
+            if self.warned:
+                self.say(self.warned)
         if self.full_pending:
             self.full_pending = False
             self.grid.take_dirty()
@@ -228,7 +235,9 @@ class Mapper:
         return out
 
     def stats(self):
-        return dict(self.n, cpu_pct=round(self.cpu_pct, 2),
+        g = self.grid
+        return dict(self.n, cpu_pct=round(self.cpu_pct, 2), mem_mb=round(g.mem_mb(), 1),
+                    size_m=[round(g.W * g.res / 1000.0, 1), round(g.H * g.res / 1000.0, 1)], warning=g.warning,
                     pitch_ref=None if self.pitch_ref is None else round(self.pitch_ref, 2),
                     match=self.matcher.last)
 
@@ -384,7 +393,7 @@ class Mapper:
         if not p:
             raise ValueError("bad map name")
         with open(p, encoding="utf-8") as f:
-            g = Grid.from_json(f.read())
+            g = Grid.from_json(f.read(), self.max_cells)
         self.grid = g
         self.corr = [float(c) for c in g.meta.get("corr", [0, 0, 0])][:3]
         self.places = Places.read(self.places_path(name))

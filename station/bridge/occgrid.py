@@ -5,8 +5,15 @@ Stdlib only: it runs inside the bridge on the Pi.
 - One byte per cell in a bytearray: 128 = unknown (log-odds 0), +1 = UNIT nats. Updates go through
   256-entry lookup tables (add + clamp in one index), so a ray costs one list comprehension
   (integer Bresenham) and one `g[i] = lut[g[i]]` per cell.
-- The grid is fixed (default 20 x 20 m, 25 mm cells, centred on the odometry origin) and split
-  into tiles (1 m); changed tiles are tracked so browsers only get what changed.
+- The grid starts at 20 x 20 m (25 mm cells, centred on the odometry origin), is split into 1 m tiles
+  and grows by whole tiles when a reading reaches past its edge (one reallocation, rare; the hot path
+  stays one flat array). max_cells caps the memory (default 64 M cells = 64 MB, 200 x 200 m): past it
+  the reading is clipped as before and `warning` says so. Tile indices (dirty, touched, bbox_tiles,
+  tile_png) are relative to the grid's corner; tiles_msg() sends browsers absolute ones (world
+  mm / (tile size), stable while the grid grows). Saved files hold the initial area plus the touched tiles.
+- Range weighting (integrate_wedge rw=True): a hit up close is strong and narrow, a far one weak (a
+  25 degree beam only tells which cone the target is in, so a far hit must not wall off a doorway
+  next to it); a close reading's free space counts double, so it clears cells that far hits marked.
 - Tiles go to browsers as 8-bit greyscale PNGs (unknown grey, free white, occupied black).
 """
 import base64
@@ -18,6 +25,11 @@ import zlib
 UNIT = 0.05            # nats per stored step
 UNKNOWN = 128
 FORMAT = "sbr3-occgrid-1"
+MAX_CELLS = 64_000_000   # memory cap: one byte per cell
+# range weighting of a hit: weight (x the hit step) and arc width scale fall / rise linearly near -> far
+RW = {"near": 500.0, "far": 2000.0, "w_near": 1.6, "w_far": 0.4, "arc_near": 0.7, "arc_far": 1.0,
+      "arc_cap_mm": 120.0, "free_near_mm": 800.0}
+RW_LEVELS = 8
 
 
 def _clamp_byte(v):
@@ -48,18 +60,83 @@ class Grid:
     """size_m: side of the square map; res_mm: cell size; tile_m: tile side.
     hit / free: log-odds added for an occupied / free observation (nats); lo / hi: clamp (nats)."""
 
-    def __init__(self, size_m=20.0, res_mm=25.0, tile_m=1.0, hit=0.85, free=0.4, lo=-2.0, hi=3.5):
+    def __init__(self, size_m=20.0, res_mm=25.0, tile_m=1.0, hit=0.85, free=0.4, lo=-2.0, hi=3.5,
+                 max_cells=MAX_CELLS):
         self.res = float(res_mm)
         self.T = max(4, int(round(tile_m * 1000.0 / self.res)))         # cells per tile side
-        self.ntx = self.nty = max(1, int(math.ceil(size_m * 1000.0 / (self.res * self.T))))
-        self.W, self.H = self.ntx * self.T, self.nty * self.T
-        self.x0 = -self.W * self.res / 2.0                                # world mm of the cell (0, 0) corner
-        self.y0 = -self.H * self.res / 2.0
-        self.cells = bytearray([UNKNOWN]) * (self.W * self.H)
-        self.dirty = set()        # tiles changed since the last take_dirty()
-        self.touched = set()      # tiles ever changed (what a full update sends)
-        self.updates = 0          # rays integrated
+        n = max(1, int(math.ceil(size_m * 1000.0 / (self.res * self.T))))
+        self.init_n = (n, n)                  # tiles of the initial (centred) area
+        self.max_cells = int(max_cells)
+        self.warning = None                   # set when the memory cap stopped the map from growing
+        self.updates = 0                      # rays integrated
         self.set_model(hit, free, lo, hi)
+        self._start()
+
+    def _start(self):
+        """(Re)allocate the initial area, centred on the origin."""
+        nx, ny = self.init_n
+        self._set_area(-(nx // 2) * self.T, -(ny // 2) * self.T, nx * self.T, ny * self.T,
+                       bytearray([UNKNOWN]) * (nx * self.T * ny * self.T))
+        self.dirty = set()        # tiles changed since the last take_dirty() (relative to the corner)
+        self.touched = set()      # tiles ever changed (what a full update sends)
+        self.warning = None
+
+    def _set_area(self, cx0, cy0, W, H, cells):
+        """cx0, cy0: world cell (floor(mm / res)) of the grid's cell (0, 0); a multiple of the tile size."""
+        self.cx0, self.cy0, self.W, self.H, self.cells = cx0, cy0, W, H, cells
+        self.ntx, self.nty = W // self.T, H // self.T
+        self.x0, self.y0 = cx0 * self.res, cy0 * self.res                 # world mm of the (0, 0) corner
+        self.bx1, self.by1 = self.x0 + W * self.res, self.y0 + H * self.res
+
+    def tile_origin(self):
+        """Absolute tile index of the grid's tile (0, 0) (what tiles_msg adds)."""
+        return self.cx0 // self.T, self.cy0 // self.T
+
+    def mem_mb(self):
+        return len(self.cells) / 1e6
+
+    def _reshape(self, nx0, ny0, nx1, ny1):
+        """Grow to the world-cell rectangle [nx0, nx1) x [ny0, ny1) (tile aligned, contains the old one)."""
+        W, H, T = self.W, self.H, self.T
+        nW, nH = nx1 - nx0, ny1 - ny0
+        dx, dy = self.cx0 - nx0, self.cy0 - ny0
+        new = bytearray([UNKNOWN]) * (nW * nH)
+        old = self.cells
+        for j in range(H):
+            o = (j + dy) * nW + dx
+            new[o:o + W] = old[j * W:(j + 1) * W]
+        dtx, dty = dx // T, dy // T
+        self.dirty = {(a + dtx, b + dty) for a, b in self.dirty}
+        self.touched = {(a + dtx, b + dty) for a, b in self.touched}
+        self._set_area(nx0, ny0, nW, nH, new)
+
+    def _grow(self, xmin, xmax, ymin, ymax):
+        """Make the grid cover this world box (mm), with a tile of slack on the sides that grow.
+        False (and `warning` set) when that would pass max_cells."""
+        if not (math.isfinite(xmin) and math.isfinite(xmax) and math.isfinite(ymin) and math.isfinite(ymax)):
+            return False
+        r, T = self.res, self.T
+        a0, a1 = int(math.floor(xmin / r)), int(math.floor(xmax / r))
+        b0, b1 = int(math.floor(ymin / r)), int(math.floor(ymax / r))
+        ex0, ex1, ey0, ey1 = self.cx0, self.cx0 + self.W, self.cy0, self.cy0 + self.H
+        for slack in (1, 0):
+            nx0 = ex0 if a0 >= ex0 else (a0 // T - slack) * T
+            nx1 = ex1 if a1 < ex1 else (a1 // T + 1 + slack) * T
+            ny0 = ey0 if b0 >= ey0 else (b0 // T - slack) * T
+            ny1 = ey1 if b1 < ey1 else (b1 // T + 1 + slack) * T
+            if (nx1 - nx0) * (ny1 - ny0) <= self.max_cells:
+                self._reshape(nx0, ny0, nx1, ny1)
+                return True
+        if not self.warning:
+            self.warning = "map memory limit reached (%d MB, %.0f x %.0f m): readings beyond it are not mapped" % (
+                self.max_cells // 1000000, self.W * r / 1000.0, self.H * r / 1000.0)
+        return False
+
+    def _cover(self, xs, ys):
+        """Grow the grid to hold these world points when they reach past its edge."""
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        if x0 < self.x0 or x1 >= self.bx1 or y0 < self.y0 or y1 >= self.by1:
+            self._grow(x0, x1, y0, y1)
 
     # ------------------------------------------------------------ sensor model
     def set_model(self, hit=0.85, free=0.4, lo=-2.0, hi=3.5):
@@ -71,8 +148,16 @@ class Grid:
         # values already beyond the clamp (a map saved with other limits) are not pulled back
         self.hit_lut = bytes(v if v >= HI else min(HI, v + h) for v in range(256))
         self.free_lut = bytes(v if v <= LO else max(LO, v - f) for v in range(256))
+        self.free2_lut = bytes(v if v <= LO else max(LO, v - 2 * f) for v in range(256))
         self.weak_lut = bytes(v if v <= LO else max(LO, v - fw) for v in range(256))
         self.LO, self.HI = LO, HI
+        # range-weighted hits: level 0 (near) .. RW_LEVELS (far) -> (hit lut, arc width scale)
+        self.rw_levels = []
+        for k in range(RW_LEVELS + 1):
+            t = k / RW_LEVELS
+            hk = max(1, round(h * (RW["w_near"] + (RW["w_far"] - RW["w_near"]) * t)))
+            self.rw_levels.append((bytes(v if v >= HI else min(HI, v + hk) for v in range(256)),
+                                   RW["arc_near"] + (RW["arc_far"] - RW["arc_near"]) * t))
 
     # ------------------------------------------------------------ geometry
     def cell_of(self, x, y):
@@ -139,11 +224,14 @@ class Grid:
 
     def _mark(self, xs, ys):
         """Tiles covered by the bounding box of these world points -> dirty / touched."""
+        self._mark_box(min(xs), max(xs), min(ys), max(ys))
+
+    def _mark_box(self, xmin, xmax, ymin, ymax):
         r = self.res * self.T
-        tx0 = max(0, int((min(xs) - self.x0) // r))
-        tx1 = min(self.ntx - 1, int((max(xs) - self.x0) // r))
-        ty0 = max(0, int((min(ys) - self.y0) // r))
-        ty1 = min(self.nty - 1, int((max(ys) - self.y0) // r))
+        tx0 = max(0, int((xmin - self.x0) // r))
+        tx1 = min(self.ntx - 1, int((xmax - self.x0) // r))
+        ty0 = max(0, int((ymin - self.y0) // r))
+        ty1 = min(self.nty - 1, int((ymax - self.y0) // r))
         d = self.dirty
         for ty in range(ty0, ty1 + 1):
             for tx in range(tx0, tx1 + 1):
@@ -157,16 +245,19 @@ class Grid:
         free = set()
         xs, ys = [ox], [oy]
         for ex, ey in free_ends:
-            idx, _ = self.line(ox, oy, ex, ey)
-            free.update(idx)
             xs.append(ex)
             ys.append(ey)
+        if hit is not None:
+            xs.append(hit[0])
+            ys.append(hit[1])
+        self._cover(xs, ys)
+        for ex, ey in free_ends:
+            idx, _ = self.line(ox, oy, ex, ey)
+            free.update(idx)
         g = self.cells
         hi = None
         if hit is not None:
             hi = self.index(hit[0], hit[1])
-            xs.append(hit[0])
-            ys.append(hit[1])
             if hi is not None:
                 free.discard(hi)
         lut = self.weak_lut if weak else self.free_lut
@@ -214,13 +305,29 @@ class Grid:
                 spans.append((b + i0, b + i1 + 1))
         return spans
 
-    def integrate_wedge(self, ox, oy, a, half, r_free, hit=None, weak=False, hit_half=0.0):
+    def integrate_wedge(self, ox, oy, a, half, r_free, hit=None, weak=False, hit_half=0.0, rw=False):
         """One reading with a beam cone: cells in the wedge (half-angle `half` rad, out to r_free mm)
         are observed free. hit = range (mm) of the target on the beam centre, or None: the cells on
-        the arc at that range, +-hit_half rad wide, are observed occupied (and never also freed)."""
+        the arc at that range, +-hit_half rad wide, are observed occupied (and never also freed).
+        rw: range-weighted (see the module doc): hit evidence and arc width fall off with range, and the
+        free space counts double when the reading is closer than RW['free_near_mm']."""
+        r = max(r_free, hit or 0.0)
+        if r <= 0:
+            return
+        w = max(half, hit_half)
+        xs = [ox, ox + r * math.cos(a - w), ox + r * math.cos(a + w), ox + r * math.cos(a)]
+        ys = [oy, oy + r * math.sin(a - w), oy + r * math.sin(a + w), oy + r * math.sin(a)]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        if x0 < self.x0 or x1 >= self.bx1 or y0 < self.y0 or y1 >= self.by1:
+            self._grow(x0, x1, y0, y1)
         g = self.cells
         hits = []
+        hl = self.hit_lut
         if hit is not None:
+            if rw:
+                t = (hit - RW["near"]) / (RW["far"] - RW["near"])
+                hl, scale = self.rw_levels[int(RW_LEVELS * (0.0 if t < 0.0 else 1.0 if t > 1.0 else t) + 0.5)]
+                hit_half = min(hit_half * scale, RW["arc_cap_mm"] / hit)
             n = int(hit * hit_half / self.res)
             step = self.res / hit if hit > 0 else 0.0
             seen = set()
@@ -231,23 +338,19 @@ class Grid:
                     hits.append((i, g[i]))
         spans = self.wedge_spans(ox, oy, a, half, r_free) if r_free > 0 else []
         lut = self.weak_lut if weak else self.free_lut
+        if rw and not weak and r_free <= RW["free_near_mm"]:
+            lut = self.free2_lut                       # a close reading: its free space counts double
         for s, e in spans:
             g[s:e] = g[s:e].translate(lut)
-        hl = self.hit_lut
         for i, v in hits:
             g[i] = hl[v]
         if spans or hits:
-            r = max(r_free, hit or 0.0)
-            w = max(half, hit_half)
-            self._mark([ox, ox + r * math.cos(a - w), ox + r * math.cos(a + w), ox + r * math.cos(a)],
-                       [oy, oy + r * math.sin(a - w), oy + r * math.sin(a + w), oy + r * math.sin(a)])
+            self._mark_box(x0, x1, y0, y1)
             self.updates += 1
-    def reset(self):
-        self.cells[:] = bytearray([UNKNOWN]) * len(self.cells)
-        self.dirty.clear()
-        self.touched.clear()
-        self.updates = 0
 
+    def reset(self):
+        self._start()
+        self.updates = 0
     # ------------------------------------------------------------ tiles / images
     def take_dirty(self):
         d, self.dirty = self.dirty, set()
@@ -265,12 +368,15 @@ class Grid:
         return png_grey(self.T, self.T, self.tile_rows(tx, ty))
 
     def tiles_msg(self, tiles):
-        """[[tx, ty, base64 png], ...]"""
-        return [[tx, ty, base64.b64encode(self.tile_png(tx, ty)).decode("ascii")] for tx, ty in tiles]
+        """[[tx, ty, base64 png], ...] with absolute tile indices (world mm / tile size, floor): they
+        stay valid while the grid grows. Pass tiles from take_dirty() / touched of the same moment."""
+        ox, oy = self.tile_origin()
+        return [[tx + ox, ty + oy, base64.b64encode(self.tile_png(tx, ty)).decode("ascii")] for tx, ty in tiles]
 
     def info(self):
         return {"res_mm": self.res, "x0_mm": self.x0, "y0_mm": self.y0, "w": self.W, "h": self.H,
-                "tile": self.T, "ntx": self.ntx, "nty": self.nty}
+                "tile": self.T, "ntx": self.ntx, "nty": self.nty, "tox": self.cx0 // self.T,
+                "toy": self.cy0 // self.T, "mem_mb": round(self.mem_mb(), 1), "warning": self.warning}
 
     def bbox_tiles(self):
         """(tx0, ty0, tx1, ty1) of the touched tiles, or None."""
@@ -310,32 +416,59 @@ class Grid:
 
     # ------------------------------------------------------------ save / load
     def to_json(self, extra=None):
-        d = {"format": FORMAT, "res_mm": self.res, "tile": self.T, "ntx": self.ntx, "nty": self.nty,
-             "x0_mm": self.x0, "y0_mm": self.y0, "unit": UNIT, "model": self.model,
-             "touched": sorted(self.touched | self.dirty),
-             "cells": base64.b64encode(zlib.compress(bytes(self.cells), 6)).decode("ascii")}
+        """The initial area plus everything touched (a grown map is cropped to that, so a rarely
+        used huge allocation does not make saving slow)."""
+        T, W, ox0, oy0 = self.T, self.W, self.cx0, self.cy0
+        ix0, iy0 = -(self.init_n[0] // 2) * T, -(self.init_n[1] // 2) * T
+        x0, y0, x1, y1 = ix0, iy0, ix0 + self.init_n[0] * T, iy0 + self.init_n[1] * T
+        bb = self.bbox_tiles()
+        if bb:
+            x0, y0 = min(x0, ox0 + bb[0] * T), min(y0, oy0 + bb[1] * T)
+            x1, y1 = max(x1, ox0 + (bb[2] + 1) * T), max(y1, oy0 + (bb[3] + 1) * T)
+        x0, y0, x1, y1 = max(x0, ox0), max(y0, oy0), min(x1, ox0 + W), min(y1, oy0 + self.H)
+        if (x0, y0, x1, y1) == (ox0, oy0, ox0 + W, oy0 + self.H):
+            cells = bytes(self.cells)
+        else:
+            cells = b"".join(bytes(self.cells[(j - oy0) * W + x0 - ox0:(j - oy0) * W + x1 - ox0]) for j in range(y0, y1))
+        dtx, dty = (x0 - ox0) // T, (y0 - oy0) // T
+        d = {"format": FORMAT, "res_mm": self.res, "tile": T, "ntx": (x1 - x0) // T, "nty": (y1 - y0) // T,
+             "x0_mm": x0 * self.res, "y0_mm": y0 * self.res, "unit": UNIT, "model": self.model,
+             "init_n": list(self.init_n),
+             "touched": sorted((a - dtx, b - dty) for a, b in self.touched | self.dirty),
+             "cells": base64.b64encode(zlib.compress(cells, 6)).decode("ascii")}
         if extra:
             d.update(extra)
         return json.dumps(d, separators=(",", ":"))
 
     @classmethod
-    def from_json(cls, text):
+    def from_json(cls, text, max_cells=MAX_CELLS):
         d = json.loads(text)
         if d.get("format") != FORMAT:
             raise ValueError("not an sbr3 occupancy grid")
         g = cls.__new__(cls)
         g.res = float(d["res_mm"])
-        g.T, g.ntx, g.nty = int(d["tile"]), int(d["ntx"]), int(d["nty"])
-        g.W, g.H = g.ntx * g.T, g.nty * g.T
-        g.x0, g.y0 = float(d["x0_mm"]), float(d["y0_mm"])
+        g.T = int(d["tile"])
+        ntx, nty = int(d["ntx"]), int(d["nty"])
+        W, H = ntx * g.T, nty * g.T
+        cx0, cy0 = int(round(float(d["x0_mm"]) / g.res)), int(round(float(d["y0_mm"]) / g.res))
         cells = zlib.decompress(base64.b64decode(d["cells"]))
-        if len(cells) != g.W * g.H:
+        if len(cells) != W * H:
             raise ValueError("cell data size mismatch")
-        g.cells = bytearray(cells)
+        g.max_cells = int(max_cells)
+        g.warning = None
+        g.updates = 0
+        n = d.get("init_n") or [ntx, nty]
+        g.init_n = (int(n[0]), int(n[1]))
         g.dirty = set()
         g.touched = set(tuple(t) for t in d.get("touched", []))
-        g.updates = 0
         m = d.get("model") or {}
         g.set_model(**{k: float(m[k]) for k in ("hit", "free", "lo", "hi") if k in m})
+        g._set_area(cx0, cy0, W, H, bytearray(cells))
+        if cx0 % g.T or cy0 % g.T or W % g.T:       # a map saved with tiles not aligned to the world: pad it
+            T = g.T
+            old_touched = g.touched
+            g.touched = set()
+            g._reshape((cx0 // T) * T, (cy0 // T) * T, -((-(cx0 + W)) // T) * T, -((-(cy0 + H)) // T) * T)
+            g.touched = {(x, y) for x in range(g.ntx) for y in range(g.nty)} if old_touched else set()
         g.meta = {k: v for k, v in d.items() if k not in ("cells", "touched")}
         return g
