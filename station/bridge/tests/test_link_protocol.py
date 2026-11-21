@@ -37,7 +37,10 @@ def load_headers():
     """(link_h_text, radio_h_text, source) for the header version this mirror implements."""
     def read(rel):
         p = os.path.join(ROOT, rel)
-        return open(p).read() if os.path.exists(p) else None
+        if not os.path.exists(p):
+            return None
+        with open(p) as f:
+            return f.read()
     link, radio = read(REL_LINK), read(REL_RADIO)
     if _version(link) == lp.LINK_PROTOCOL_VERSION:
         return link, radio, "working tree"

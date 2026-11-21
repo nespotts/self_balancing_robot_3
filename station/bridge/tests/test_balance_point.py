@@ -1,4 +1,4 @@
-"""Find balance point (issue #52): the estimator, the state machine against a fake plant (fast, fake clock), and
+﻿"""Find balance point (issue #52): the estimator, the state machine against a fake plant (fast, fake clock), and
 the whole thing through the bridge API against the simulator (real time, deliberately wrong bal.offset_deg).
 Run: python -m unittest discover -s station -t ."""
 import asyncio
@@ -306,7 +306,7 @@ class TestWithSim(unittest.TestCase):
             # not before it stands (the routine refuses to start on a moving robot), then run on its own
             end = time.monotonic() + 15
             while True:
-                send(t="balpoint", action="start", auto=True, settle_s=6, window_s=8, rounds=4)
+                send(t="balpoint", action="start", auto=True, settle_s=3, window_s=4, rounds=4)
                 m = await wait_for(ws, lambda m: m["t"] in ("error", "balpoint_state", "ok"), 3)
                 if m["t"] != "error":
                     break

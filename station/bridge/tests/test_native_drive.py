@@ -74,7 +74,7 @@ def free_port():
     return p
 
 
-@unittest.skipIf(BROWSER is None, "no Chrome / Edge")
+@unittest.skipIf(BROWSER is None or os.environ.get("SBR3_FAST"), "no Chrome / Edge, or SBR3_FAST=1")
 class TestNativeDrive(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -106,6 +106,14 @@ class TestNativeDrive(unittest.TestCase):
     async def cmds(self, since):
         """cmd_vel sent by the page after page-time `since` (ms): [[t, speed, turn], ...]"""
         return await self.ev("__sent.filter(([t, m]) => m.t === 'cmd_vel' && t > %f).map(([t, m]) => [t, m.speed, m.turn])" % since)
+
+    async def wait_active(self, b, timeout=3.0):
+        """Poll for the bridge's cmd_active: it drops after any 300 ms gap between cmd_vel frames, and the
+        page's 100 ms timer can be delayed while headless Chrome is busy, so never assert the instant value (#28)."""
+        end = time.monotonic() + timeout
+        while not b.cmd_active and time.monotonic() < end:
+            await asyncio.sleep(0.02)
+        self.assertTrue(b.cmd_active, "bridge never saw cmd_vel")
 
     async def load(self, url):
         await self.cdp.call("Page.navigate", url="about:blank")
@@ -235,7 +243,7 @@ class TestNativeDrive(unittest.TestCase):
             self.assertGreaterEqual(len(c), 8, c)
             self.assertGreater(c[-1][1], 50, "forward speed")
             self.assertEqual(c[-1][2], 0, "no turn with roll inside the dead-band")
-            self.assertTrue(b.cmd_active)
+            await self.wait_active(b)
             self.assertTrue(await self.ev("__calls.some(c => c[0] === 'vibrate')"), "buzz on press")
             # roll right -> turn right (negative = clockwise)
             await self.ev("__tilt.roll = 20")
@@ -300,7 +308,7 @@ class TestNativeDrive(unittest.TestCase):
             await self.touch("touchStart", x, y)
             await self.ev("__tilt.pitch = -20")
             await asyncio.sleep(0.5)
-            self.assertTrue(b.cmd_active)
+            await self.wait_active(b)
             gone = time.monotonic()            # same clock as the bridge (time.monotonic)
             await self.cdp.call("Page.navigate", url="about:blank")
             moving = lambda: b.cmd_active and b.cmd != (0, 0)

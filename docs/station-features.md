@@ -142,6 +142,23 @@ flowchart LR
   G --> P[planner: A* / frontiers<br>worker thread] -- MSG_GOTO --> Robot
 ```
 
+### Places: Home, Couch, ...
+
+<p>
+<img src="../station/docs/screenshots/phone-places.png" width="30%">
+<img src="../station/docs/screenshots/phone-place-sheet.png" width="30%">
+<img src="../station/docs/screenshots/phone-places-menu.png" width="30%">
+</p>
+<p>Places on the map, tap a place, the menu</p>
+
+| | |
+|---|---|
+| save a place | long-press (right-click) the map: **Save place here...** and name it, or **Set Home here**; saved with the map |
+| tap a pin | **Go here**: a route around walls; ⋯ renames or deletes it |
+| **Home** | always there (green). Save a place called Home to move it; delete it to fall back to where the pose was last reset |
+| remote's **Go home** | the robot starts a straight line; the bridge swaps it for a planned route to Home when the robot is armed and a map exists. It never arms the robot |
+
+Browser API and the GO_HOME rules: [api.md](api.md#saved-places).
 Pi cost: 0.2 ms per reading (< 1 % of a core at 50/s); a route or frontier search 0.1-0.3 s in a worker thread.
 Offline: `python -m station.tools.mapbuild ~/sbr3-logs/<session>.jsonl -o map.png`.
 Drift correction (scan-to-map matching) is off by default: in the sim it does not beat plain odometry yet.

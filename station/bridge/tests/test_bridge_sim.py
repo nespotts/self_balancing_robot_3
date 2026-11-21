@@ -26,6 +26,13 @@ async def wait_for(ws, pred, timeout=5.0):
     raise AssertionError("timeout")
 
 
+async def until(pred, timeout=4.0):
+    """Poll instead of a fixed sleep (#49): returns as soon as pred() holds; the caller asserts the result."""
+    end = time.monotonic() + timeout
+    while not pred() and time.monotonic() < end:
+        await asyncio.sleep(0.02)
+
+
 class TestBridgeWithSim(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -95,7 +102,7 @@ class TestBridgeWithSim(unittest.TestCase):
             self.assertGreater(m["x_mm"], 50)
 
             # stop sending -> bridge stops cmd_vel after the timeout -> robot slows down
-            await asyncio.sleep(1.2)
+            await until(lambda: abs(b.tlm["cmd_speed_mms"]) < 1)
             m = b.tlm
             self.assertLess(abs(m["cmd_speed_mms"]), 1)
             self.assertFalse(b.cmd_active)
@@ -187,20 +194,20 @@ class TestBridgeWithSim(unittest.TestCase):
 
             # release the serial port (flashing) and re-attach
             await loop.run_in_executor(None, http_get, "/api/serial?release=1", b"")
-            await asyncio.sleep(1.3)
+            await until(lambda: b.link_state == "released")
             self.assertEqual(b.link_state, "released")
             await loop.run_in_executor(None, http_get, "/api/serial?release=0", b"")
-            await asyncio.sleep(1.3)
+            await until(lambda: b.link_state == "connected")
             self.assertEqual(b.link_state, "connected")
 
             # the release file (what the Pi flash script uses), and a stale one is ignored
             rel = os.path.join(self.tmp, "release")
             open(rel, "w").close()
-            await asyncio.sleep(0.6)
+            await until(lambda: b.link_state == "released")
             self.assertEqual(b.link_state, "released")
             old = time.time() - 3600
             os.utime(rel, (old, old))
-            await asyncio.sleep(1.5)
+            await until(lambda: b.link_state == "connected")
             self.assertEqual(b.link_state, "connected")
             os.remove(rel)
             ws.close()
