@@ -50,6 +50,11 @@ The Pi serves the web UI (`station/web`), including Tilt / Pad.
 - **Dead-man**: tilt drives only while a finger is on the pad. Let go → `cmd_vel 0` at once.
 - No tilt samples for 300 ms, a gamepad silent for 400 ms, the app in the background, Wi-Fi gone → stop.
   The bridge also stops forwarding 300 ms after the last command (`python -m unittest discover -s station -t .` checks all of this in Chrome).
+- **Leaving the app** (Home, screen off, Back > Exit, app switch, WebView crash) stops the robot from native code, not page JS
+  (a frozen WebView never runs JS): `AppStop.java` sends over HTTP `cmd_vel 0`, `plan stop`, then, only if the robot is in
+  GOTO / EXPLORE, armed and upright, `set_mode BALANCE`. So a **Go to / Explore stops and the robot keeps balancing** where it
+  is. It never E-stops or sets IDLE (that drops a balancing robot) and never arms: a disarmed or fallen robot is left alone.
+  STATION / BALANCE / HOLD just get the zero `cmd_vel`. No setting; the page's own JS stop still runs too.
 - Buzz: E-stop (long), link lost (3 short), obstacle (2 short).
 - Plain http only to private LAN addresses (10/8, 172.16/12, 192.168/16, loopback, link-local) and local names (single-label, .local, .lan, .internal, .home.arpa); anything else is blocked.
 
@@ -58,6 +63,7 @@ The Pi serves the web UI (`station/web`), including Tilt / Pad.
 | | |
 |---|---|
 | `src/.../MainActivity.java` | WebView, immersive, back, gamepad input, LAN-only guard |
+| `AppStop.java` | native stop when the app is left (cmd_vel 0, plan stop, GOTO/EXPLORE → BALANCE) |
 | `Finder.java`, `Lan.java` | finding the bridge (parallel probes, 48 threads, ~2 s for a /24) |
 | `Tilt.java`, `TiltMath.java` | rotation vector → pitch / roll in the screen's frame |
 | `Bridge.java` | `window.SBR3Native` (events back via `window.__sbr3.emit`) |

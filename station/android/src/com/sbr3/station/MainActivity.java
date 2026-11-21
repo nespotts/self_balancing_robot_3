@@ -294,7 +294,9 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onPause() {
-        // the page releases the dead-man and stops cmd_vel on "pause"; tilt + gamepad also go quiet (stale -> stop)
+        // the page releases the dead-man and stops cmd_vel on "pause"; tilt + gamepad also go quiet (stale -> stop).
+        // That is page JS, which a frozen / killed WebView never runs: stop from native code too (issue #32)
+        stopRobot();
         Events.emit("pause", "{}");
         tilt.pause();
         pads.zero();
@@ -303,7 +305,14 @@ public class MainActivity extends Activity {
         super.onPause();
     }
 
+    /** Native stop for the robot page being shown: zero cmd_vel, stop Go to / Explore, keep balancing (AppStop). */
+    void stopRobot() {
+        String a = robotAddr;
+        if (a != null) AppStop.run(a);
+    }
+
     @Override protected void onDestroy() {
+        stopRobot();
         finder.stop();
         tilt.stop();
         Events.detach(this);
@@ -323,7 +332,7 @@ public class MainActivity extends Activity {
         if (i > 0 && !h.getItemAtIndex(i - 1).getUrl().startsWith(FINDER)) { web.goBack(); return; }
         new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
             .setTitle("Leave the robot?")
-            .setMessage("The robot keeps its current mode (balancing stays on). Press STOP first if it's moving.")
+            .setMessage("Driving, Go to and Explore stop; balancing stays on.")
             .setPositiveButton("Exit", (d, w) -> finish())
             .setNeutralButton("Find robot", (d, w) -> loadFinder("?manual=1"))
             .setNegativeButton("Stay", null)
@@ -398,6 +407,7 @@ public class MainActivity extends Activity {
         @Override public boolean onRenderProcessGone(WebView v, RenderProcessGoneDetail d) {
             Log.e(TAG, "WebView renderer gone (crash=" + d.didCrash() + "); rebuilding it");
             if (v == web) {
+                stopRobot();   // the page that was driving is gone; no JS stop will come
                 String addr = robotAddr;
                 root.removeView(web);
                 web.destroy();
