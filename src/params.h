@@ -42,7 +42,20 @@
   X(TLM_HZ,          "tlm.hz",             100.0f,    1.0f,    1000.0f)  \
   X(RNG_ENABLE,      "rng.enable",         0.0f,      0.0f,    1.0f)     \
   X(CFG_SAVE,        "cfg.save",           0.0f,      0.0f,    1.0f)     \
-  X(CFG_DEFAULTS,    "cfg.defaults",       0.0f,      0.0f,    1.0f)
+  X(CFG_DEFAULTS,    "cfg.defaults",       0.0f,      0.0f,    1.0f)     \
+  X(RNG_SERVO_TRIM,  "rng.servo_trim_deg", 0.0f,      -45.0f,  45.0f)    \
+  X(RNG_SWEEP_DEG,   "rng.sweep_deg",      170.0f,    0.0f,    180.0f)   \
+  X(RNG_STEPS,       "rng.steps",          16.0f,     1.0f,    64.0f)    \
+  X(RNG_SETTLE_MS,   "rng.settle_ms",      40.0f,     0.0f,    500.0f)   \
+  X(RNG_BUDGET_MS,   "rng.timing_budget_ms", 33.0f,   20.0f,   200.0f)   \
+  X(RNG_LONG_RANGE,  "rng.long_range",     1.0f,      0.0f,    1.0f)     \
+  X(RNG_MAX_MM,      "rng.max_mm",         2000.0f,   50.0f,   8190.0f)  \
+  X(RNG_SERVO_HOLD,  "rng.servo_hold_deg", -1.0f,     -1.0f,   180.0f)   \
+  X(RNG_OBSTACLE_MM, "rng.obstacle_mm",    300.0f,    0.0f,    2000.0f)  \
+  X(RNG_SERVO_DIR,   "rng.servo_dir",      1.0f,      -1.0f,   1.0f)     \
+  X(RNG_SERVO_MIN,   "rng.servo_min_deg",  5.0f,      0.0f,    90.0f)    \
+  X(RNG_SERVO_MAX,   "rng.servo_max_deg",  175.0f,    90.0f,   180.0f)   \
+  X(RNG_SERVO_SCALE, "rng.servo_deg_per_cmd", 1.0f,   0.5f,    1.5f)
 
 enum ParamId : uint16_t {
 #define PARAM_ENUM(id, name, def, mn, mx) P_##id,

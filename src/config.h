@@ -12,7 +12,11 @@ constexpr uint8_t MOT_R_EN = 7, MOT_R_D1 = 8, MOT_R_D2 = 9;
 constexpr uint8_t RADIO_CE = 32, RADIO_CSN = 36;                // nRF24 on SPI
 constexpr uint8_t BATT_TAP1 = 14, BATT_TAP2 = 40, BATT_TAP3 = 41;
 constexpr uint8_t REBOOT_BTN = 31;
-// Lidar sweep (issue #7): servo 2, XSHUT 34/28, INT 35/29 - set in Lidar/lidar_scan.cpp
+// Range sweep (issue #7): servo + 2x VL53L0X on Wire (shared with the left AS5600).
+// Sensor 0 (0x30) faces forward with the head centred, sensor 1 (0x31) faces back.
+constexpr uint8_t RNG_SERVO = 2;
+constexpr uint8_t RNG_XSHUT0 = 34, RNG_INT0 = 35;
+constexpr uint8_t RNG_XSHUT1 = 28, RNG_INT1 = 29;
 }  // namespace pins
 
 // IMU: gyro-integrated rotation vector (no magnetometer), one report = quaternion + gyro.

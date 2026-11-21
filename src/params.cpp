@@ -17,8 +17,9 @@ bool g_param_save_requested = false;
 bool g_param_defaults_requested = false;
 
 // EEPROM layout: header, then P_COUNT floats.
-// layout_crc covers the param names in order, so adding/renaming/reordering params
+// layout_crc covers the first `count` param names in order, so renaming/reordering params
 // invalidates the saved block (defaults are used) instead of loading values into wrong slots.
+// Params appended at the end keep the older ones' saved values (the new ones start at default).
 static const uint32_t kMagic = 0x34524253;  // "SBR4"
 static const int kAddr = 0;
 
@@ -29,9 +30,9 @@ struct __attribute__((packed)) EepromHeader {
   uint16_t values_crc;
 };
 
-static uint16_t layoutCrc() {
+static uint16_t layoutCrc(uint16_t n = P_COUNT) {
   uint16_t crc = 0xFFFF;
-  for (uint16_t i = 0; i < P_COUNT; i++) {
+  for (uint16_t i = 0; i < n && i < P_COUNT; i++) {
     crc = link_crc16((const uint8_t*)kDefs[i].name, strlen(kDefs[i].name) + 1, crc);
   }
   return crc;
@@ -64,11 +65,13 @@ bool params_load() {
   params_reset_defaults();
   EepromHeader h;
   EEPROM.get(kAddr, h);
-  if (h.magic != kMagic || h.count != P_COUNT || h.layout_crc != layoutCrc()) return false;
+  // h.count < P_COUNT: saved by older firmware with fewer params (appended since) - keep those
+  if (h.magic != kMagic || h.count == 0 || h.count > P_COUNT || h.layout_crc != layoutCrc(h.count))
+    return false;
   float v[P_COUNT];
-  for (uint16_t i = 0; i < P_COUNT; i++) EEPROM.get(kAddr + (int)sizeof(h) + 4 * i, v[i]);
-  if (link_crc16((const uint8_t*)v, sizeof(v)) != h.values_crc) return false;
-  for (uint16_t i = 0; i < P_COUNT; i++) {
+  for (uint16_t i = 0; i < h.count; i++) EEPROM.get(kAddr + (int)sizeof(h) + 4 * i, v[i]);
+  if (link_crc16((const uint8_t*)v, h.count * sizeof(float)) != h.values_crc) return false;
+  for (uint16_t i = 0; i < h.count; i++) {
     if (i == P_CFG_SAVE || i == P_CFG_DEFAULTS) continue;
     params_set(i, v[i]);  // clamps to the current limits
   }

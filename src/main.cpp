@@ -9,7 +9,6 @@
 #include <math.h>
 #include <string.h>
 
-#include "Lidar/sweep_api.h"
 #include "battery.h"
 #include "config.h"
 #include "controller.h"
@@ -21,10 +20,12 @@
 #include "pi_link.h"
 #include "protocol/link_protocol.h"
 #include "protocol/radio_protocol.h"
+#include "range_sweep.h"
 #include "reboot_button.h"
 #include "remote_radio.h"
 
 static Imu imu;
+static RangeSweep sweep;
 static Odometry odom;
 static Controller ctl;
 static ModeManager modes;
@@ -89,8 +90,26 @@ static ModeLimits limits() {
   return l;
 }
 
+// Something closer than rng.obstacle_mm straight ahead while driving forward (flag only for now).
+static bool obstacleAhead(uint32_t now_ms) {
+  const uint16_t front = sweep.frontMm(now_ms);
+  const float lim = P(P_RNG_OBSTACLE_MM);
+  const bool forward = ctl.last().speed_sp > 10.0f || odom.speed_mms > 50.0f;
+  return front > 0 && lim > 0.0f && front < lim && forward;
+}
+
+static RangePose rangePose() {
+  RangePose p;
+  p.x_mm = odom.x_mm;
+  p.y_mm = odom.y_mm;
+  p.heading_deg = imu.heading();
+  p.pitch_deg = imu.sample().pitch_deg;
+  return p;
+}
+
 static uint8_t statusBits(uint32_t now_ms) {
   uint8_t st = 0;
+  if (obstacleAhead(now_ms)) st |= TLM_OBSTACLE;
   if (modes.armed()) st |= TLM_ARMED;
   if (ctl.last().upright) st |= TLM_UPRIGHT;
   if (!modes.radioLive(now_ms)) st |= TLM_FAILSAFE;
@@ -160,8 +179,8 @@ static TelemetryPacket buildRadioTelemetry(uint8_t ack_seq) {
   t.x_cm = clamp16(odom.x_mm / 10.0f);
   t.y_cm = clamp16(odom.y_mm / 10.0f);
   t.speed_mms = clamp16(odom.speed_mms);
-  t.range_front_mm = 0;  // lidar sweep: issue #7
-  t.range_rear_mm = 0;
+  t.range_front_mm = sweep.frontMm(now_ms);
+  t.range_rear_mm = sweep.rearMm(now_ms);
   t.waypoint_count = wp_count;
   t.nav_index = 0;
   t.error_code = errorCode(now_ms);
@@ -226,7 +245,8 @@ static void handleEvent(uint8_t ev) {
       link.log("GO_HOME: navigation not implemented yet (#8)");
       break;
     case EVT_START_SCAN:
-      link.log("START_SCAN: sweep not implemented yet (#7)");
+      link.log(P(P_RNG_ENABLE) >= 0.5f ? "START_SCAN: the sweep runs all the time while rng.enable = 1"
+                                       : "START_SCAN: rng.enable is 0");
       break;
     default:
       break;
@@ -321,6 +341,8 @@ static void controlStep() {
     enc_last_us = t;
     odom.update(t, imu.heading());
   }
+  // range sweep: a bounded slice of I2C work (a quarter of the step period), long before the next sample
+  if (sweep.started()) sweep.service(micros(), (uint32_t)(250000.0f / P(P_CTL_RATE_HZ)), rangePose());
   buildTelemetry(s.t_us);
 }
 
@@ -338,6 +360,8 @@ static void sendOutput(uint32_t now_us) {
       tlm_fresh = false;
     }
   }
+  RangeFrame rf;
+  while (sweep.peekFrame(rf) && link.send(MSG_RANGE, &rf, sizeof(rf))) sweep.popFrame();
 }
 
 static void background() {
@@ -381,6 +405,11 @@ static void background() {
       odom.update(now_us, imu.heading());
     }
     if (now_us - last_tlm_us >= 100000 && !tlm_fresh) buildTelemetry(now_us);
+    static uint32_t sweep_us = 0;
+    if (sweep.started() && now_us - sweep_us >= 2500) {
+      sweep_us = now_us;
+      sweep.service(now_us, 600, rangePose());
+    }
   }
 
   // IMU status line: 3 s after boot, whenever its health changes, and every 60 s
@@ -404,6 +433,7 @@ static void background() {
   const bool motors_off = !motors_active;
   imu.service(now_ms, motors_off);
   radio.service(now_ms, motors_off);
+  if (const char* s = sweep.serviceSlow(now_ms, motors_off)) link.log("%s", s);
   if (g_param_defaults_requested) {
     g_param_defaults_requested = false;
     params_reset_defaults();
@@ -437,9 +467,9 @@ void setup() {
   Wire1.begin();
   batt.begin();
   button.begin();
-  // VL53L0X + servo: only with rng.enable = 1 (applies at boot; sensors unplugged for now).
-  // Their init may re-begin Wire, so the clocks are set after it.
-  if (P(P_RNG_ENABLE) >= 0.5f) lidar_sweep_setup();
+  // VL53L0X + servo: only with rng.enable = 1 (or later, when it is set with the motors off).
+  // Their init re-begins Wire, so the clocks are set after it.
+  if (P(P_RNG_ENABLE) >= 0.5f) sweep.begin();
   Wire.setClock(I2C_CLOCK_HZ);
   Wire1.setClock(I2C_CLOCK_HZ);
   odom.begin();
@@ -448,6 +478,10 @@ void setup() {
   imu.begin();
   link.log("boot %s, params %s, imu %s, radio %s", FIRMWARE_ID, loaded ? "from EEPROM" : "DEFAULTS",
            imu.initialised() ? "ok" : "FAIL", radio.chipOk() ? "ok" : "FAIL");
+  if (sweep.started())
+    link.log("rng: sensor0 %s, sensor1 %s", sweep.sensorOk(0) ? "ok" : "FAIL", sweep.sensorOk(1) ? "ok" : "FAIL");
+  else
+    link.log("rng: off (rng.enable 0)");
   rate_t0_ms = millis();
 }
 
