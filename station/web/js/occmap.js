@@ -158,7 +158,8 @@ $("map-reset").onclick = () => {
 };
 
 // settings (map: mapper, route: planner)
-const NUM = [["set-margin", "plan", "margin_mm"], ["set-radius", "plan", "robot_radius_mm"],
+const NUM = [["set-margin", "plan", "margin_mm"], ["set-soft", "plan", "soft_mm"],
+             ["set-squeeze", "plan", "squeeze_mm"], ["set-radius", "plan", "robot_radius_mm"],
              ["set-pitch", "map", "pitch_limit_deg"], ["set-notarget", "map", "no_target_mm"]];
 export const routeOn = { get: () => $("set-route").checked };
 $("set-route").checked = store.get("route.on", true);

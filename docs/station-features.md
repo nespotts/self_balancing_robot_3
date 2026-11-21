@@ -132,9 +132,11 @@ Screenshots of these: `python -m station.tools.screenshots --url http://localhos
 |---|---|
 | grey / white / black | unknown / free / wall (25 mm cells, built on the Pi from every range reading) |
 | ⋯ → **Map** | on / off + opacity · **Save / Load map** (`~/sbr3-maps`) · **Clear map** |
-| ⋯ → Map & route settings | distance kept off walls, robot radius, tilt limit, “no target” handling, drift correction (experimental) |
+| ⋯ → Map & route settings | keep off walls (180 mm), prefer more room (300), narrow gaps: keep (35), robot radius (80), tilt limit, “no target” handling, drift correction (experimental). Route settings are saved (`~/sbr3-maps/planner.json`) |
 | **Go** with a map | the bridge plans a route (purple) around obstacles, re-plans when the robot is blocked |
 | **Explore** | drives to the nearest unmapped edge until none is left; STOP ends it |
+| Narrow gap | no route / frontier with the wall margin → plan again keeping only radius + “narrow gaps” (25 mm cells, sure walls only); explore then only goes for open space behind a gap, and stops after 6 such goals that show nothing new. Status: “squeezing through a narrow gap”; the robot slows down beside the walls (`nav.side_min_mm`). The sensor cone can draw a doorway under ~300 mm shut on the map: then it is not tried |
+| Robot stuck | robot log `nav: stuck` → it backs off, the next plans keep +100 mm more off walls (−50 per goal reached) |
 
 ```mermaid
 flowchart LR

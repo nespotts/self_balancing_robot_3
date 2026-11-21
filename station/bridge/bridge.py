@@ -348,6 +348,7 @@ class Bridge:
             self.health.on_log(text, _now())
             if text.startswith("pose reset"):     # remote or station: the default Home is where it happened
                 self.mapper.on_pose_reset()
+            self.planner.on_log(text)             # "nav: stuck": replan with a larger margin (#62)
             m = GO_HOME_RE.match(text)
             if m:       # GO_HOME from the remote or a station event: route it around obstacles (#53)
                 try:

@@ -10,6 +10,13 @@
 // 12.9 mm out from it, 189 mm above the axle.
 static constexpr float kAxisFwd = 26.0f, kSensorOut = 12.9f, kSensorHeight = 189.0f;
 static constexpr float kDeg = 0.017453292519943f;
+// Footprint 152 x 90 mm about the axle (#62). Turning in place, the corners sweep a circle of r 88.
+static constexpr float kHalfWidth = 76.0f;
+static constexpr float kSwingR = 105.0f;                  // 88 + margin: inside it, a turn in place scrapes
+static constexpr float kSideBack = 45.0f, kSideAhead = 300.0f;   // side window: body rear .. 300 ahead
+static constexpr float kBlockedTurnDeg = 30.0f;           // GOTO blocked by a wall alongside: turn away <= this
+static constexpr float kSideInner = 40.0f;                // |lateral| below this = straight ahead / behind
+static constexpr float kStuckDeg = 15.0f;                 // turning: progress = this much heading change
 
 static float clampf(float v, float lim) { return v > lim ? lim : (v < -lim ? -lim : v); }
 
@@ -45,6 +52,8 @@ void Navigator::listChanged(bool replaced) {
   blocked_ = latched_ = backing_ = false;  // a new / changed list always resumes
   blk_fwd_ = blk_rev_ = false;
   stop_since_ = 0;
+  stuck_ = away_ = away_done_ = false;
+  stuck_ms_ = 0;
 }
 
 // ------------------------------------------------------------------ inputs
@@ -77,6 +86,8 @@ void Navigator::onModeChange(const NavIn& in) {
   blk_fwd_ = blk_rev_ = false;
   driving_ = false;
   stop_since_ = 0;
+  stuck_ = away_ = away_done_ = false;
+  stuck_ms_ = 0;
   if (in.mode == MODE_GOTO || in.mode == MODE_EXPLORE) {
     if (idx_ >= n_) idx_ = 0;  // list done (or empty): start over
     phase_ = n_ ? SEEK : DONE;
@@ -115,13 +126,28 @@ void Navigator::onPoseReset() {
 
 void Navigator::updateObstacles(const NavIn& in) {
   const float c = cosf(in.heading * kDeg), s = sinf(in.heading * kDeg);
-  const float half = 0.5f * P(P_NAV_CORRIDOR_MM);
+  // With the side check on (#62), points beside the body (> its half width + 10) steer / slow it down
+  // instead of stopping it: a wall alongside or a door jamb is not in the way.
+  const float half = P(P_NAV_SIDE_MIN_MM) > 0 ? fminf(0.5f * P(P_NAV_CORRIDOR_MM), kHalfWidth + 10.0f)
+                                              : 0.5f * P(P_NAV_CORRIDOR_MM);
   const uint32_t age = (uint32_t)P(P_NAV_OBST_AGE_MS);
-  float front = 0, rear = 0;
+  float front = 0, rear = 0, gl = 0, gr = 0, near = 0, near_xr = 0;
   for (uint8_t i = 0; i < pt_n_; i++) {
     if (in.now_ms - pt_ms_[i] > age) continue;
     const float dx = px_[i] - in.x, dy = py_[i] - in.y;
     const float xr = dx * c + dy * s, yr = -dx * s + dy * c;
+    if (xr > -kSideBack && xr < kSideAhead && fabsf(yr) >= kSideInner) {  // beside the body: side gap
+      const float g = fmaxf(1.0f, fabsf(yr) - kHalfWidth);
+      float& gs = yr > 0 ? gl : gr;
+      if (gs == 0 || g < gs) gs = g;
+    }
+    if (fabsf(xr) > 30.0f) {  // ahead / behind, inside the corners' swing circle
+      const float r = hypotf(xr, yr);
+      if (r < kSwingR && (near == 0 || r < near)) {
+        near = r;
+        near_xr = xr;
+      }
+    }
     if (fabsf(yr) > half) continue;
     if (xr >= kAxisFwd) {  // ahead of the head: what sensor 0 would read straight ahead
       const float d = fmaxf(1.0f, xr - kAxisFwd - kSensorOut);
@@ -133,6 +159,66 @@ void Navigator::updateObstacles(const NavIn& in) {
   }
   front_ = front;
   rear_ = rear;
+  gap_l_ = gl;
+  gap_r_ = gr;
+  near_mm_ = near;
+  near_xr_ = near_xr;
+}
+
+// Side walls (#62): turn (deg/s, + = CCW = away from a right wall) away from walls closer than
+// nav.side_min_mm to the body side; *inside = how far the nearer one is inside it (0 = none).
+float Navigator::sideTurn(float* inside) const {
+  const float smin = P(P_NAV_SIDE_MIN_MM);
+  const float pl = smin > 0 && gap_l_ > 0 && gap_l_ < smin ? smin - gap_l_ : 0.0f;
+  const float pr = smin > 0 && gap_r_ > 0 && gap_r_ < smin ? smin - gap_r_ : 0.0f;
+  if (inside) *inside = fmaxf(pl, pr);
+  return P(P_NAV_SIDE_KP) * (pr - pl);
+}
+
+// Driving: steer away from side walls and slow down (linear to nav.min_speed at gap 0).
+void Navigator::sideAvoid(float vmax, float tmax) {
+  float inside = 0;
+  const float t = sideTurn(&inside);
+  if (inside <= 0) return;
+  turn_ = clampf(turn_ + t, tmax);
+  const float smin = P(P_NAV_SIDE_MIN_MM);
+  const float lim = fmaxf(P(P_NAV_MIN_SPEED), vmax * (smin - inside) / smin);
+  if (speed_ > lim) speed_ = lim;
+}
+
+// Stuck (#62): commanded to move (trying) but no progress for nav.stuck_ms.
+bool Navigator::stuckCheck(const NavIn& in, bool turning, bool trying) {
+  if (!trying || P(P_NAV_STUCK_MS) <= 0) return false;
+  stuck_seen_ = true;
+  const bool moved = turning ? fabsf(in.heading - stuck_h_) >= kStuckDeg
+                             : hypotf(in.x - stuck_x_, in.y - stuck_y_) >= P(P_NAV_STUCK_MM);
+  if (!stuck_ms_ || turning != stuck_turn_ || moved) {
+    stuck_ms_ = in.now_ms ? in.now_ms : 1;
+    stuck_x_ = in.x;
+    stuck_y_ = in.y;
+    stuck_h_ = in.heading;
+    stuck_turn_ = turning;
+    return false;
+  }
+  return in.now_ms - stuck_ms_ >= (uint32_t)P(P_NAV_STUCK_MS);
+}
+
+void Navigator::startStuck(const NavIn& in, bool turning) {
+  stuck_ = blocked_ = true;
+  blk_h_ = in.heading;
+  driving_ = true;  // so the BLOCKED branch runs (backs off) even if it was turning in place
+  stuck_ms_ = 0;
+  if (in.mode == MODE_EXPLORE) latched_ = true;
+  log("nav: stuck, no progress %s for %.1f s (waypoint %u/%u)", turning ? "turning" : "driving",
+      (double)(P(P_NAV_STUCK_MS) / 1000.0f), (unsigned)idx_ + 1, (unsigned)n_);
+  back_mm_ = P(P_NAV_STUCK_BACK);
+  backing_ = back_mm_ > 0;
+  back_x_ = in.x;
+  back_y_ = in.y;
+  back_ms_ = in.now_ms;
+  speed_ = turn_ = 0;
+  state_ = NAV_BLOCKED;
+  obst_ = front_;
 }
 
 float Navigator::limitSpeed(float v, float vmax, bool apply) {
@@ -188,6 +274,7 @@ void Navigator::update(const NavIn& in) {
   now_ms_ = in.now_ms;
   speed_ = turn_ = 0;
   obst_flag_ = false;
+  stuck_seen_ = false;
   updateObstacles(in);
   if (in.mode == MODE_GOTO || in.mode == MODE_EXPLORE) {
     updateGoto(in);
@@ -199,13 +286,16 @@ void Navigator::update(const NavIn& in) {
     if (n_) setTarget(in, wx_[idx_ < n_ ? idx_ : n_ - 1], wy_[idx_ < n_ ? idx_ : n_ - 1]);
     else dist_ = 0;
   }
+  if (!stuck_seen_) stuck_ms_ = 0;  // not trying to move this step: the no-progress window starts over
 }
 
 void Navigator::startBlocked(const NavIn& in) {
   blocked_ = true;
+  blk_h_ = in.heading;
   if (in.mode == MODE_EXPLORE) latched_ = true;
   log("nav: blocked, obstacle at %.0f mm (waypoint %u/%u)", (double)obst_, (unsigned)idx_ + 1, (unsigned)n_);
-  if (P(P_NAV_BACKOFF_MM) > 0) {
+  back_mm_ = P(P_NAV_BACKOFF_MM);
+  if (back_mm_ > 0) {
     backing_ = true;
     back_x_ = in.x;
     back_y_ = in.y;
@@ -315,28 +405,62 @@ void Navigator::updateGoto(const NavIn& in) {
   const bool far = dist_ > 2.0f * arrive;  // close in, the bearing is noisy: don't steer
   const float align = P(P_NAV_ALIGN_DEG);
   if (!blocked_) {
-    if (!driving_ && fabsf(e) < align) driving_ = true;
-    else if (driving_ && far && fabsf(e) > 3.0f * align) driving_ = false;
+    if (!driving_ && fabsf(e) < align) {
+      driving_ = true;
+      away_ = away_done_ = false;
+    } else if (driving_ && far && fabsf(e) > 3.0f * align) {
+      driving_ = false;
+    }
   }
   if (!driving_) {
-    turn_ = clampf(P(P_NAV_TURN_KP) * e, tmax);
     state_ = NAV_TURNING;
     obst_ = front_;
+    // something inside the corners' swing circle ahead / behind: first step straight away from it (#62)
+    if (!away_done_ && near_mm_ > 0 && P(P_NAV_STUCK_BACK) > 0) {
+      if (!away_) {
+        away_ = true;
+        away_x_ = in.x;
+        away_y_ = in.y;
+        away_ms_ = in.now_ms;
+        log("nav: too close to turn (%.0f mm), stepping %s", (double)near_mm_, near_xr_ > 0 ? "back" : "forward");
+      }
+      const float va = limitSpeed(near_xr_ > 0 ? -fmaxf(P(P_NAV_MIN_SPEED), 30.0f) : fmaxf(P(P_NAV_MIN_SPEED), 30.0f),
+                                  vmax, true);
+      if (!obst_flag_ && hypotf(in.x - away_x_, in.y - away_y_) < P(P_NAV_STUCK_BACK) &&
+          in.now_ms - away_ms_ < 4000) {
+        speed_ = va;
+        obst_ = front_;
+        return;
+      }
+      away_done_ = true;  // far enough (or the way out is blocked too): turn anyway
+    }
+    away_ = false;
+    obst_flag_ = false;
+    turn_ = clampf(P(P_NAV_TURN_KP) * e, tmax);
+    // target behind and a wall close at one side: turn the nose away from that wall (#62)
+    const float smin = P(P_NAV_SIDE_MIN_MM);
+    if (smin > 0 && fabsf(e) > 120.0f) {
+      const bool l = gap_l_ > 0 && gap_l_ < smin, r = gap_r_ > 0 && gap_r_ < smin;
+      if (l && (!r || gap_l_ < gap_r_)) turn_ = -fabsf(turn_);
+      else if (r) turn_ = fabsf(turn_);
+    }
+    if (stuckCheck(in, true, fabsf(turn_) >= P(P_NAV_STOP_TURN))) startStuck(in, true);
     return;
   }
   float v = P(P_NAV_SPEED_KP) * dist_ * fmaxf(0.0f, cosf(e * kDeg));
   v = fminf(fmaxf(v, P(P_NAV_MIN_SPEED)), vmax);
   float vl = limitSpeed(v, vmax, true);
-  if (latched_) obst_flag_ = true;  // EXPLORE: stays blocked until a new list
+  if (latched_ || stuck_) obst_flag_ = true;  // EXPLORE: stays blocked until a new list; stuck: backing off
   if (obst_flag_) {
     if (!blocked_) startBlocked(in);
     const float obst = obst_;
     vl = 0;
     if (backing_) {
       const float back = hypotf(in.x - back_x_, in.y - back_y_);
-      float vb = -fmaxf(P(P_NAV_MIN_SPEED), 30.0f);
+      // stuck: twice as fast (a balancing robot pressed against a wall barely follows the slowest speed)
+      float vb = -fmaxf(P(P_NAV_MIN_SPEED), 30.0f) * (stuck_ ? 2.0f : 1.0f);
       vb = limitSpeed(vb, vmax, true);
-      if (obst_flag_ || back >= P(P_NAV_BACKOFF_MM) || in.now_ms - back_ms_ > 5000) {
+      if (obst_flag_ || back >= back_mm_ || in.now_ms - back_ms_ > 5000) {
         backing_ = false;
         vb = 0;
       }
@@ -344,8 +468,12 @@ void Navigator::updateGoto(const NavIn& in) {
       obst_ = obst;  // report the obstacle ahead
       obst_flag_ = true;
     }
+    if (!backing_ && in.mode != MODE_EXPLORE) stuck_ = false;  // GOTO: backed off, try again
     speed_ = vl;
     turn_ = 0;
+    // GOTO, blocked with a wall alongside (heading into it): turn away from it a little, in place (#62)
+    if (!backing_ && !latched_ && !stuck_ && fabsf(in.heading - blk_h_) < kBlockedTurnDeg)
+      turn_ = clampf(sideTurn(nullptr), tmax);
     state_ = NAV_BLOCKED;
     return;
   }
@@ -353,7 +481,11 @@ void Navigator::updateGoto(const NavIn& in) {
   blocked_ = backing_ = false;
   speed_ = vl;
   turn_ = far ? clampf(P(P_NAV_TURN_KP) * e, tmax) : 0.0f;
+  sideAvoid(vmax, tmax);
   state_ = NAV_DRIVING;
+  // (not in the last 3 x arrive_mm: slow there, and a balancing robot rocks to and fro before it moves)
+  if (stuckCheck(in, false, dist_ > 3.0f * arrive && speed_ >= fmaxf(20.0f, 0.5f * P(P_NAV_MIN_SPEED))))
+    startStuck(in, false);
 }
 
 float Navigator::holdSpeed(const NavIn& in, float x, float y) {

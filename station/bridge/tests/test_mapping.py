@@ -14,8 +14,9 @@ import zlib
 from station.bridge import link_protocol as lp
 from station.bridge.mapping import Mapper
 from station.bridge.occgrid import GREY, UNKNOWN, Grid, png_grey
-from station.bridge.planner import BLOCKED, MARGIN, CostMap
-from station.sim.tour import TOUR, DriftRobot, drive_offline, plan_offline
+from station.bridge.planner import BLOCKED, DEFAULTS, MARGIN, CostMap
+from station.sim.sim import ROBOT_RADIUS, SimRobot, _box
+from station.sim.tour import TOUR, DriftRobot, OfflineBridge, drive_offline, plan_offline
 
 
 def png_size_and_pixels(data):
@@ -222,6 +223,22 @@ class TestCostMap(unittest.TestCase):
         # free space only (explore): the unknown beyond the box is not usable
         self.assertIsNone(cm.astar((0, 0), (2500, 0), unknown_ok=False))
 
+    def test_squeeze_through_narrow_gap(self):
+        # a wall across the free box (x = 1000) with a 300 mm gap at y = 0: shut with the 180 mm margin,
+        # open for the squeeze plan (radius 80 + 35 at 25 mm cells, #62)
+        g = wall_grid(y_range=(-1500, -150))
+        for y in range(150, 1500, 10):
+            for dx in (0, 25):
+                g.cells[g.index(1000 + dx, y)] = g.HI
+        self.assertIsNone(CostMap(g).astar((0, 0), (1400, 0), unknown_ok=False))
+        s = dict(DEFAULTS, margin_mm=DEFAULTS["squeeze_mm"])
+        path = CostMap(g, s, res_mm=g.res, sure_walls=True).astar((0, 0), (1400, 0), unknown_ok=False)
+        self.assertIsNotNone(path)
+        for (ax, ay), (bx, by) in zip(path, path[1:]):
+            if ax < 1000 <= bx or bx < 1000 <= ax:
+                y = ay + (by - ay) * (1000 - ax) / (bx - ax)
+                self.assertLess(abs(y), 150 - 76)                     # through the gap, body clear of the ends
+
     def test_frontiers(self):
         g = wall_grid()
         cm = CostMap(g)
@@ -298,6 +315,74 @@ class TestSimMapping(unittest.TestCase):
         x, y, _ = r.odom()
         self.assertLess(math.hypot(x - 2900, y - 1700), 150)
         self.assertGreater(close[0], 100)                          # never scraped a wall
+
+    def test_explore_through_narrow_doorway(self):
+        # issue #62: two rooms (x -1000..1000 and 1000..2500) joined by a 280 mm doorway near a corner: the wall
+        # margin (180) shuts it, the squeeze plan (radius + 35, 25 mm cells) gets through. Thin-beam robot: with
+        # the sensor cone (DriftRobot) the map itself often draws a doorway this narrow shut.
+        for width, seed in ((280.0, 5), (260.0, 3)):
+            r = SimRobot(seed=seed)
+            c = 600.0
+            r.room.segs = _box(750, 0, 3500, 2000) + [(1000, -1000, 1000, c - width / 2), (1000, c + width / 2, 1000, 1000)]
+            m = Mapper(tempfile.mkdtemp())
+            seen = {"x": -1e9, "close": 1e9}
+
+            def watch(robot, b):
+                seen["x"] = max(seen["x"], robot.X)
+                seen["close"] = min(seen["close"], robot.room.clearance(robot.X, robot.Y))
+            s, b = plan_offline(r, m, {"t": "plan", "action": "explore"}, max_s=400, on_step=watch)
+            self.assertIn("explore done", b.planner.status, b.lines[-5:])
+            self.assertTrue(any("narrow gap" in l for l in b.lines), b.lines)
+            self.assertGreater(seen["x"], 1000 + ROBOT_RADIUS + 20, width)  # all of it went through
+            self.assertGreater(seen["close"], ROBOT_RADIUS, width)     # without touching a jamb
+            free = sum(1 for x in range(1200, 2400, 100) for y in range(-900, 1000, 100)
+                       if m.grid.value(x, y) < UNKNOWN)
+            self.assertGreater(free / (12 * 19), 0.9, width)          # the far room is mapped
+
+
+class TestPlannerSettings(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def bridge(self):
+        return OfflineBridge(SimRobot(seed=1), Mapper(self.tmp))
+
+    def test_defaults_and_persisted(self):
+        p = self.bridge().planner
+        self.assertEqual((p.settings["margin_mm"], p.settings["soft_mm"]), (180.0, 300.0))
+        self.assertIsNone(p.command({"t": "plan", "action": "set", "settings": {"margin_mm": 150, "soft_mm": 9999,
+                                                                               "squeeze_mm": "x", "bogus": 1}}))
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "planner.json")))
+        p2 = self.bridge().planner                                 # bridge restart
+        self.assertEqual((p2.settings["margin_mm"], p2.settings["soft_mm"]), (150.0, 1000.0))
+        self.assertEqual(p2.settings["squeeze_mm"], DEFAULTS["squeeze_mm"])
+        self.assertNotIn("bogus", p2.settings)
+        self.assertEqual(Mapper(self.tmp).list(), [])              # not listed as a saved map
+        with open(os.path.join(self.tmp, "planner.json"), "w") as f:
+            f.write("{broken")
+        self.assertEqual(self.bridge().planner.settings, DEFAULTS)
+
+    def test_stuck_boosts_margin_then_decays(self):
+        b = self.bridge()
+        p = b.planner
+        p.on_log("nav: stuck, no progress driving for 2.5 s (waypoint 1/2)")
+        self.assertEqual(p.boost, 0.0)                             # not planning: ignored
+        p.mode = "explore"
+        p.on_log("nav: stuck, no progress driving for 2.5 s (waypoint 1/2)")
+        self.assertEqual(p.boost, 100.0)
+        self.assertIsNotNone(p.replan_at)
+        self.assertIn("stuck", p.status)
+        self.assertEqual([k for k, _cm in p._costmaps()], ["boost", "normal", "squeeze"])
+        for _ in range(3):
+            p.on_log("nav: stuck, no progress turning for 2.5 s (waypoint 1/2)")
+        self.assertEqual(p.boost, 200.0)                           # capped
+        p._success()
+        self.assertEqual(p.boost, 150.0)
+        p.on_log("nav: blocked, obstacle at 287 mm (waypoint 2/2)")
+        self.assertEqual(p.boost, 150.0)
 
 
 class TestBridgeMapApi(unittest.TestCase):
