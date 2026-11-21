@@ -48,6 +48,8 @@ class Odometry {
   bool leftOk() const { return left_.ok(); }
   bool rightOk() const { return right_.ok(); }
   bool ok() const { return left_.ok() && right_.ok(); }
+  int32_t leftCounts() const { return left_.counts(); }  // 4096 per wheel rev
+  int32_t rightCounts() const { return right_.counts(); }
   uint32_t lastUpdateUs() const { return last_us_; }
 
  private:
