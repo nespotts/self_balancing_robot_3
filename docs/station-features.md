@@ -5,12 +5,13 @@
 | | |
 |---|---|
 | **STOP** (or Space / Esc) | motors off, robot disarms, **latched**: no mode request (station, app, remote selector) starts the motors until **Release E-stop** (confirm), then arm again |
-| **Arm & Balance** | two taps. With no RC remote, the station arms the robot; with the remote, its switch does |
+| **Arm & Balance** | two taps. With no RC remote the phone arms the robot; with the remote, its switch does |
+| **Disarm** | next to STOP while armed. One tap = `SET_MODE IDLE`, no latch. No remote: the robot disarms (Arm shows again). With the RC remote on: motors off (IDLE) but its ARMED switch still rules, so the robot stays armed; the button goes away at IDLE |
 | **Map** | tap to add waypoints, **Go** (asks before it arms the robot): with a map, the route goes around walls. **Explore**: the robot maps the room by itself |
-| **Drive** | joystick / WASD in STATION mode |
+| **Control** (was Drive) | the phone as the remote: who is in charge (phone / RC remote), Arm, Balance / Hold / Manual (joystick, STATION) / Go to / Explore, Slow / Med / Fast, Tilt in the app. Landscape puts the pad on the right. Battery and link are the top-bar pills; Disarm and STOP sit beside them |
 | **Sensors** | both range sensors live: mm, valid, angle, readings/s; last sweep around the robot; range vs time. ⋯ → park / trim / sweep width / direction, **hand test** (cover one sensor: its card lights up). Colours: front amber, rear magenta (map too) |
 | **Tune** | live P / I / D at the loop rate (**Full rate**), sliders apply at once, **Save to robot** writes EEPROM (when the motors are off); ⋯ → Restore defaults. Two views: **Balance** and **Motor test** (below) |
-| **Health** | **Preflight** (IMU, loop ~400 Hz, encoders, battery, remote or station, E-stop, range sensors): green / amber / red, **never arms anything**. **Battery**: volts, percent and **minutes left** (also in the top bar); a tile each for link, loop, IMU, encoders, range sensors, radio, Pi, logs disk, firmware. Tap a tile for its reason. Details below |
+| **Health** | **Preflight** (IMU, loop ~400 Hz, encoders, battery, remote or station, E-stop, range sensors): green / amber / red, **never arms anything**. **Battery**: volts, percent and **minutes left** (also in the top bar); a tile each for link, loop, IMU, encoders, range sensors, RC remote (grey **off** when none is used: no alarm), Pi, logs disk, firmware. Tap a tile for its reason. Details below |
 | **Logs** | **Falls** (below), messages, session downloads (CSV / JSONL), link details |
 
 ## Health (issue #51)

@@ -16,11 +16,40 @@ Try it: `python -m station.sim`, open http://localhost:8080/ (`--host 0.0.0.0` s
 
 **STOP** (or Space / Esc) latches: **Release E-stop**, then arm again with the two-tap **Arm & Balance** (or the remote).
 
+## Quick start: the phone is the remote
+
+The RC remote is optional. Turn it off (or leave it home): the phone arms, drives and stops the robot.
+
+```mermaid
+flowchart LR
+  A["Control tab<br>Arm & Balance<br>(tap, tap again)"] --> B["Stand the robot up<br>Disarm + STOP show"]
+  B --> C["Pick a mode<br>Balance, Hold, Manual,<br>Go to, Explore"]
+  C --> D["Disarm<br>(motors off)"]
+  C --> E["STOP<br>(latches)"]
+```
+
+<p>
+<img src="docs/screenshots/phone-controller.png" width="30%">
+<img src="docs/screenshots/phone-controller-landscape.png" width="62%">
+</p>
+<p>Control screen: portrait, and landscape (the Android app's default)</p>
+
+| Button | What it does |
+|---|---|
+| **Arm & Balance** | two taps, only when disarmed |
+| **Disarm** | one tap, motors off, no latch (next to STOP while armed) |
+| **STOP** | emergency stop, latches until **Release E-stop** |
+| **Manual** | joystick (or **Tilt** in the app); **Go to** / **Explore** ask for a second tap |
+
+"Controlled by" says who arms: **this phone** (no RC remote) or the **RC remote**. With no remote there is no "RC LOST"
+alarm, and Health shows **RC remote: off** in grey. If the phone leaves the Wi-Fi or the app is closed, the robot stops
+driving by itself within ~6 s and keeps balancing: [safety](../docs/safety.md).
+
 ## Tour
 
 | Tab | |
 |---|---|
-| **Drive** | joystick / WASD, mode buttons, Tilt on the phone | 
+| **Control** | Arm / Disarm, mode buttons, joystick / WASD, Tilt on the phone |
 | **Map** | tap waypoints, **Go**, **Explore** |
 | **Sensors** | both range sensors, last sweep |
 | **Tune** | live PID, **Find balance point**, presets, motor test |

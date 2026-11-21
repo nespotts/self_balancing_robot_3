@@ -25,7 +25,14 @@ from station.tools.screenshots import BROWSERS, Cdp
 
 BROWSER = next((b for b in BROWSERS if os.path.exists(b)), None)
 SHOTS = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "screenshots")
-HOOK = "window.confirm = () => true; window.__sent = [];"
+HOOK = r"""
+window.confirm = () => true; window.__sent = [];
+const _send = WebSocket.prototype.send;
+WebSocket.prototype.send = function (d) {
+  try { const m = JSON.parse(d); if (m.t !== "hi" && m.t !== "cmd_vel") window.__sent.push(m); } catch (e) {}
+  return _send.call(this, d);
+};
+"""
 
 
 @unittest.skipIf(BROWSER is None or os.environ.get("SBR3_FAST"), "no Chrome / Edge, or SBR3_FAST=1")
@@ -138,7 +145,7 @@ class TestPhoneUi(unittest.TestCase):
             await self.ev("document.querySelector('#modes [data-name=STATION]').click()")
             await self.until("sbr3.state.tlm.mode === %d" % lp.MODE_STATION, what="Manual")
             await self.until("sbr3.state.tlm.status & %d" % lp.TLM_UPRIGHT, 15, "upright")
-            await asyncio.sleep(0.6)
+            await asyncio.sleep(3.6)                                   # (the Arming toast goes away)
             await self.shot("phone-controller.png")
             await self.size(915, 412)
             await self.fits("landscape 915, armed")
@@ -156,7 +163,7 @@ class TestPhoneUi(unittest.TestCase):
             if not remote:
                 await self.until("(sbr3.state.tlm.status & %d) === 0" % lp.TLM_ARMED, what="disarmed")
                 await self.until(self.vis("#arm-btn"), what="Arm is back")
-                self.assertFalse(await self.ev(self.vis("#disarm")))
+                await self.until("document.getElementById('disarm').hidden", what="Disarm gone once disarmed")
             else:
                 # the RC remote's switch still says armed: nothing left to turn off, the button goes away
                 self.assertTrue(await self.ev("(sbr3.state.tlm.status & %d) !== 0" % lp.TLM_ARMED))
@@ -169,7 +176,7 @@ class TestPhoneUi(unittest.TestCase):
             await self.ev("document.getElementById('stop').dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}))")
             await self.until("!document.getElementById('estop-bar').hidden", what="E-stop bar")
             self.assertEqual(await self.ev("document.querySelector('#pill-armed .txt').textContent"), "E-STOP")
-            self.assertFalse(await self.ev(self.vis("#disarm")))
+            await self.until("document.getElementById('disarm').hidden", what="no Disarm while latched")
             await self.ev("document.getElementById('estop-release').click()")
             await self.until("document.getElementById('estop-bar').hidden", what="released")
             if not remote:
