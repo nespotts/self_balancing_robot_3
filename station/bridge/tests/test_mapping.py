@@ -519,6 +519,18 @@ class TestBigMap(unittest.TestCase):
                 self.assertLessEqual(sum(1 for v in slot if v > OCC_BYTE), 3, label)         # open (the frame ends are 140 mm out)
                 self.assertLessEqual(g.value(2000, 0), OCC_BYTE, label)
 
+    def test_body_spot_is_free(self):
+        # a far cone hit drawn into a doorway goes once the robot drives over it (the readings look sideways)
+        from station.bridge.planner import OCC_BYTE
+        m = Mapper(tempfile.mkdtemp())
+        m.grid.integrate_wedge(0, 0, 0.0, math.radians(6), 1150, 1200, hit_half=math.radians(2.5), rw=True)
+        self.assertGreater(m.grid.value(1200, 0), OCC_BYTE)
+        for x in range(1000, 1401, 10):
+            m.on_range(reading(x=x, heading=0.0, angle=90.0, r=600))
+        self.assertLessEqual(m.grid.value(1200, 0), OCC_BYTE)
+        self.assertLess(m.grid.value(1200, -40), UNKNOWN)                  # (the beams look the other way)
+        self.assertEqual(m.grid.value(1200, -100), UNKNOWN)               # only the body's own spot
+
     def test_range_weight_marks(self):
         # near hits are strong and narrow, far hits weak; a close free reading clears a far hit
         g = Grid(size_m=8)

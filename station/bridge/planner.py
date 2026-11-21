@@ -33,6 +33,9 @@ FREE_BYTE = UNKNOWN + math.log(FREE_P / (1 - FREE_P)) / UNIT  # ~120
 CLASS_LUT = bytes(2 if v > OCC_BYTE else (1 if v < FREE_BYTE else 0) for v in range(256))
 # squeeze plans (#62): only sure walls count (~0.8). The sensor cone draws weak stray hits into a doorway
 # (just over OCC_BYTE) from beams that clip a jamb; those count as free there (seen, not a frontier).
+# Only for maps without range weighting (mapping "range_weight" off): with it, far hits are weak by design
+# (a wall seen from 1-2 m sits at ~140-155 and would vanish from a sure-walls map, letting squeeze routes and
+# frontiers through it), and close free readings already clear far stray hits out of doorways (#63).
 SURE_OCC_BYTE = 155
 SURE_LUT = bytes(2 if v > SURE_OCC_BYTE else (1 if v < FREE_BYTE or v > OCC_BYTE else 0) for v in range(256))
 FINAL_LUT = bytes([0, 1, 2, 2] + [0] * 252)
@@ -76,7 +79,8 @@ def clean_settings(s, base):
 
 
 class CostMap:
-    def __init__(self, grid, settings=None, res_mm=50.0, margin_m=1.0, sure_walls=False):
+    def __init__(self, grid, settings=None, res_mm=50.0, margin_m=1.0, sure_walls=False, specks=None):
+        """sure_walls: only sure walls count (SURE_LUT); specks: fill unknown specks (default: = sure_walls)."""
         S = dict(DEFAULTS, **(settings or {}))
         self.lut = SURE_LUT if sure_walls else CLASS_LUT
         self.g = grid
@@ -95,7 +99,7 @@ class CostMap:
         self.x0 = grid.x0 + self.fx0 * grid.res                    # world mm of the coarse (0, 0) corner
         self.y0 = grid.y0 + self.fy0 * grid.res
         self._classify()
-        if sure_walls:
+        if sure_walls if specks is None else specks:
             self._fill_specks()
         self.inner_r = (S["robot_radius_mm"] + min(30.0, S["margin_mm"])) / self.res
         self._inflate(S["robot_radius_mm"] + S["margin_mm"], S["soft_mm"])
@@ -308,10 +312,34 @@ class CostMap:
         return all(self.clear_line(a, b, unknown_ok, allow_start_zone=(k == 0))
                    for k, (a, b) in enumerate(zip(cells, cells[1:])))
 
+    def _opens_up(self, i, open_cm, look_mm=300.0):
+        """Squeezing: does frontier cell i lead into open space of open_cm? Either it lies there itself, or
+        straight on into the unknown beside it (up to look_mm, about the robot's radius + the normal margin)
+        there is unknown space outside open_cm's wall margin. Seen through a narrow doorway at an angle, the
+        far room shows only a strip along its own wall (all inside the margin) - the room itself is beyond."""
+        j = open_cm.cell(*self.center(i))
+        if j is None or open_cm.state[j] == 2:
+            return False                        # a weak wall hit (free here, a wall in the normal map)
+        if open_cm.cost[j] < MARGIN:
+            return True
+        w, n, st = self.w, len(self.state), self.state
+        ix, iy = i % w, i // w
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            for k in range(1, int(look_mm / self.res) + 1):
+                x, y = ix + dx * k, iy + dy * k
+                if not (0 <= x < w and 0 <= y * w + x < n) or st[y * w + x] != 0:
+                    break                       # known space or a wall ends the look (the first step must be unknown)
+                j = open_cm.cell(*self.center(y * w + x))
+                if j is None or open_cm.state[j] == 2:
+                    break                       # a wall in the normal map: not through it
+                if open_cm.cost[j] < MARGIN:
+                    return True
+        return False
+
     def _squeeze_goal(self, front, dist, parent, blacklist, black_r_mm, open_cm):
-        """Squeezing (#62): the nearest frontier cell that lies in open space (outside the wall margin of
-        open_cm, the normal costmap) - i.e. only reachable through a narrow gap. Frontier bits along walls
-        (inside the margin) are not worth squeezing for. One check per 100 mm block."""
+        """Squeezing (#62): the nearest frontier cell that leads into open space (outside the wall margin of
+        open_cm, the normal costmap; see _opens_up) - i.e. only reachable through a narrow gap. Frontier bits
+        along walls (inside the margin) are not worth squeezing for. One check per 100 mm block."""
         w, br2 = self.w, black_r_mm ** 2
         blocks = set()
         for i in sorted(set(front), key=lambda i: dist[i]):
@@ -324,8 +352,7 @@ class CostMap:
             cx, cy = self.center(i)
             if any((cx - bx) ** 2 + (cy - by) ** 2 < br2 for bx, by in blacklist):
                 continue
-            j = open_cm.cell(cx, cy)
-            if j is None or open_cm.cost[j] >= MARGIN:
+            if not self._opens_up(i, open_cm):
                 continue
             cells = []
             k = i
@@ -472,9 +499,11 @@ class Planner:
         if kind == "boost":
             s["margin_mm"] += self.boost
         elif kind == "squeeze":
-            # at the map's own 25 mm cells (at 50 mm a 280 mm doorway rounds shut), sure walls only
+            # at the map's own 25 mm cells (at 50 mm a 280 mm doorway rounds shut); sure walls only when the
+            # map is not range-weighted (see SURE_LUT)
             s["margin_mm"] = min(s["margin_mm"], s["squeeze_mm"])
-            return CostMap(g, s, res_mm=g.res, sure_walls=True)
+            rw = self.b.mapper.settings.get("range_weight", False)
+            return CostMap(g, s, res_mm=g.res, sure_walls=not rw, specks=True)
         return CostMap(g, s)
 
     def _costmaps(self):
@@ -764,7 +793,7 @@ class Planner:
         return ("fail", "no route to %.1f, %.1f m" % (fail[0] / 1000, fail[1] / 1000))
 
     def _plan_explore(self, pose):
-        fr, kind, normal = None, "normal", None
+        fr, kind, normal, held = None, "normal", None, None
         for kind, cm in self._costmaps():
             if kind == "squeeze" and self.squeeze_left <= 0:
                 break                 # tried enough narrow spots: the rest is done
@@ -772,10 +801,19 @@ class Planner:
                               open_cm=normal if kind == "squeeze" else None)
             if kind == "normal":
                 normal = cm
+            if fr and kind != "squeeze" and self.squeeze:
+                i = cm.cell(*pose[:2])
+                if i is None or cm.cost[i] >= MARGIN:
+                    # squeezing and still in the gap: the wide-margin map only gets out of it through its
+                    # escape zone, whose first leg may cut a jamb corner - get through on the squeeze map first
+                    held, fr = held or (fr, kind), None
+                    continue
             if fr:
                 if kind == "squeeze":
                     self._sq_free_now = cm.state.count(1)
                 break
+        if not fr and held:
+            fr, kind = held
         if not fr:
             if self.clock() - self.started_at < 8.0:
                 return ("wait", "exploring: looking around")

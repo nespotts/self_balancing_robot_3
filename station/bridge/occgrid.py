@@ -348,6 +348,26 @@ class Grid:
             self._mark_box(x0, x1, y0, y1)
             self.updates += 1
 
+    def clear_disc(self, x, y, r):
+        """Cells whose centre is within r mm of (x, y) are observed free: the robot's own body stands there
+        (a doorway it drove through is open, whatever far cone hits drew into it)."""
+        self._cover((x - r, x + r), (y - r, y + r))
+        res, W, g, lut = self.res, self.W, self.cells, self.free_lut
+        ix0, iy0 = self.cell_of(x - r, y - r)
+        ix1, iy1 = self.cell_of(x + r, y + r)
+        n = 0
+        for iy in range(max(0, iy0), min(self.H - 1, iy1) + 1):
+            dy = self.y0 + (iy + 0.5) * res - y
+            for ix in range(max(0, ix0), min(W - 1, ix1) + 1):
+                dx = self.x0 + (ix + 0.5) * res - x
+                if dx * dx + dy * dy <= r * r:
+                    i = iy * W + ix
+                    g[i] = lut[g[i]]
+                    n += 1
+        if n:
+            self._mark_box(x - r, x + r, y - r, y + r)
+            self.updates += 1
+
     def reset(self):
         self._start()
         self.updates = 0

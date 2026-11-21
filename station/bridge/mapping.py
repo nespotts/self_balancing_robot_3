@@ -42,10 +42,11 @@ DEFAULTS = {
     "cone_deg": 12.0,           # free-space wedge width (VL53L0X field of view is ~25 deg)
     "hit_arc_deg": 5.0,         # the target is marked on an arc this wide (where in the cone it is is unknown)
     "range_weight": True,       # near hits: narrow + strong; far hits: weak; near free space counts double
+    "body_free_mm": 50.0,       # the floor within this of the robot's centre is free (0 = off; body half width 76)
     "correct": False,           # scan-to-map pose correction (odometry drift)
 }
 LIMITS = {"pitch_limit_deg": (0.5, 45), "no_target_mm": (0, 4000), "max_hit_mm": (100, 8000),
-          "min_mm": (0, 500), "cone_deg": (0, 30), "hit_arc_deg": (0, 30)}
+          "min_mm": (0, 500), "cone_deg": (0, 30), "hit_arc_deg": (0, 30), "body_free_mm": (0, 150)}
 
 
 class Mapper:
@@ -60,6 +61,7 @@ class Mapper:
         self._load_settings()
         self.name = None                 # map last saved / loaded
         self.pitch_ref = None
+        self.body_at = None              # where the body was last marked free (body_free_mm)
         self.pitches = collections.deque(maxlen=51)
         self.corr = [0.0, 0.0, 0.0]      # map pose = corr o odometry pose: [dx mm, dy mm, dtheta deg]
         self.matcher = scanmatch.Matcher(self)
@@ -178,6 +180,12 @@ class Mapper:
         else:
             self.grid.integrate_wedge(ox, oy, a, half, S["no_target_mm"], weak=True)
             self.n["no_target"] += 1
+        rb = S["body_free_mm"]
+        # the body's own spot, once per cell moved (standing still adds nothing): a far cone hit drawn into
+        # a doorway goes once the robot has driven through it, whichever way it looked meanwhile
+        if rb > 0 and (self.body_at is None or math.hypot(x - self.body_at[0], y - self.body_at[1]) >= self.grid.res):
+            self.body_at = (x, y)
+            self.grid.clear_disc(x, y, rb)
         self.n["used"] += 1
         self.changed_since_save = True
 

@@ -133,12 +133,12 @@ Screenshots of these: `python -m station.tools.screenshots --url http://localhos
 |---|---|
 | grey / white / black | unknown / free / wall (25 mm cells, built on the Pi from every range reading) |
 | size | **grows with the robot**: starts 20 x 20 m, adds 1 m tiles whenever a reading reaches past the edge. Memory cap 64 MB (200 x 200 m): past it the bridge says so in the log and the map stops growing |
-| doorways | hits are range-weighted: close = narrow and strong, far = weak, and a close free reading counts double, so a 260-300 mm doorway is not walled off by far readings. Off: `range_weight` map setting |
+| doorways | hits are range-weighted: close = narrow and strong, far = weak, and a close free reading counts double, so a 260-300 mm doorway is not walled off by far readings. The floor under the robot (50 mm round its centre) is marked free, so a doorway it drove through stays open. Off: `range_weight` / `body_free_mm` = 0 map settings |
 | ⋯ → **Map** | on / off + opacity · **Save / Load map** (`~/sbr3-maps`) · **Clear map** |
 | ⋯ → Map & route settings | keep off walls (180 mm), prefer more room (300), narrow gaps: keep (35), robot radius (80), tilt limit, “no target” handling, drift correction (experimental). Route settings are saved (`~/sbr3-maps/planner.json`) |
 | **Go** with a map | the bridge plans a route (purple) around obstacles, re-plans when the robot is blocked |
 | **Explore** | drives to the nearest unmapped edge until none is left; STOP ends it |
-| Narrow gap | no route / frontier with the wall margin → plan again keeping only radius + “narrow gaps” (25 mm cells, sure walls only); explore then only goes for open space behind a gap, and stops after 6 such goals that show nothing new. Status: “squeezing through a narrow gap”; the robot slows down beside the walls (`nav.side_min_mm`). The sensor cone can draw a doorway under ~300 mm shut on the map: then it is not tried |
+| Narrow gap | no route / frontier with the wall margin → plan again keeping only radius + “narrow gaps” (25 mm cells; with range weighting off: sure walls only); explore then only goes for open space behind a gap (also when only a strip along the far room's wall is seen yet, with unknown open space right beyond it), keeps planning on this map until the robot is out of the gap, and stops after 6 such goals that show nothing new. Status: “squeezing through a narrow gap”; the robot slows down beside the walls (`nav.side_min_mm`). The sensor cone can draw a doorway under ~300 mm shut on the map: then it is not tried |
 | Robot stuck | robot log `nav: stuck` → it backs off, the next plans keep +100 mm more off walls (−50 per goal reached) |
 
 ```mermaid
