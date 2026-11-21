@@ -4,6 +4,7 @@ import { toast } from "./ui.js";
 import { SENS_RGB, SENS_NEW } from "./chart.js";
 import { drawOccMap, drawPlan, planActive, plan, onChange, routeOn, hasMap } from "./occmap.js";
 import { drawPlaces, hitPlace, openSheet, openPlaceMenu, onPlacesChange } from "./places.js";
+import { drawZones, zoneDraw, zoneDrawing, bindZones } from "./zones.js";
 
 const C = {
   bg: "#151514", grid: "#262624", grid2: "#30302d", axis: "#45453f",
@@ -35,6 +36,7 @@ const sx = (x) => W / 2 + (x - view.cx) * view.s;
 const sy = (y) => H / 2 - (y - view.cy) * view.s;
 const wx = (px) => view.cx + (px - W / 2) / view.s;
 const wy = (py) => view.cy - (py - H / 2) / view.s;
+bindZones({ sx, sy, wx, wy, redraw: () => { dirty = true; } });
 
 function piNow() { return piNowBase + (performance.now() - piNowAt); }
 
@@ -179,6 +181,7 @@ function draw() {
   ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
   if (layers.grid) drawGrid();
   drawOccMap(ctx, sx, sy, view.s);
+  drawZones(ctx, sx, sy, view.s);
   if (layers.track) drawTrack();
   drawPlan(ctx, sx, sy);
   if (layers.ranges) drawRanges();
@@ -280,12 +283,17 @@ function setFollow(v) { view.follow = v; document.getElementById("map-follow").c
 const LONG_MS = 550;
 let pressTimer = 0;
 // long-press (or right-click): save a place here (places.js)
-function placeMenuAt(px, py) { openPlaceMenu(px, py, wx(px), wy(py), W, H); }
+function placeMenuAt(px, py) { if (!zoneDrawing()) openPlaceMenu(px, py, wx(px), wy(py), W, H); }
 canvas.addEventListener("pointerdown", (e) => {
   if (e.pointerType === "mouse" && e.button !== 0) return;   // right-click: contextmenu below
   canvas.setPointerCapture(e.pointerId);
   ptrs.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
   clearTimeout(pressTimer);
+  if (ptrs.size === 1 && zoneDrawing() && zoneDraw.down(e.offsetX, e.offsetY)) {
+    gesture = { x: e.offsetX, y: e.offsetY, t: performance.now(), moved: 0, multi: false, long: false, zone: true };
+    return;                                     // drawing a rectangle / dragging a handle (zones.js)
+  }
+  if (ptrs.size === 2 && gesture && gesture.zone) { zoneDraw.cancel(); gesture.zone = false; }
   if (ptrs.size === 1) {
     const g = gesture = { x: e.offsetX, y: e.offsetY, t: performance.now(), moved: 0, multi: false, long: false };
     pressTimer = setTimeout(() => {
@@ -297,6 +305,7 @@ canvas.addEventListener("contextmenu", (e) => { e.preventDefault(); placeMenuAt(
 canvas.addEventListener("pointermove", (e) => {
   const p = ptrs.get(e.pointerId);
   if (!p) return;
+  if (ptrs.size === 1 && gesture && gesture.zone) { zoneDraw.move(e.offsetX, e.offsetY); p.x = e.offsetX; p.y = e.offsetY; return; }
   if (ptrs.size === 1) {
     const dx = e.offsetX - p.x, dy = e.offsetY - p.y;
     if (gesture) gesture.moved += Math.abs(dx) + Math.abs(dy);
@@ -306,11 +315,14 @@ canvas.addEventListener("pointermove", (e) => {
     }
   } else if (ptrs.size === 2) {
     const [a, b] = [...ptrs.values()];
-    const d0 = Math.hypot(a.x - b.x, a.y - b.y);
+    const d0 = Math.hypot(a.x - b.x, a.y - b.y), m0 = [(a.x + b.x) / 2, (a.y + b.y) / 2];
     p.x = e.offsetX; p.y = e.offsetY;
     const [a2, b2] = [...ptrs.values()];
-    const d1 = Math.hypot(a2.x - b2.x, a2.y - b2.y);
-    if (d0 > 0) zoomAt((a2.x + b2.x) / 2, (a2.y + b2.y) / 2, d1 / d0);
+    const d1 = Math.hypot(a2.x - b2.x, a2.y - b2.y), m1 = [(a2.x + b2.x) / 2, (a2.y + b2.y) / 2];
+    if (view.follow) setFollow(false);
+    view.cx -= (m1[0] - m0[0]) / view.s; view.cy += (m1[1] - m0[1]) / view.s;   // two fingers also pan
+    if (d0 > 0) zoomAt(m1[0], m1[1], d1 / d0);
+    dirty = true;
     return;
   }
   p.x = e.offsetX; p.y = e.offsetY;
@@ -318,11 +330,16 @@ canvas.addEventListener("pointermove", (e) => {
 function endPtr(e) {
   if (!ptrs.has(e.pointerId)) return;
   ptrs.delete(e.pointerId);
+  if (gesture && gesture.zone) {
+    if (ptrs.size === 0) { if (e.type === "pointerup") zoneDraw.up(e.offsetX, e.offsetY); else zoneDraw.cancel(); gesture = null; }
+    return;
+  }
   if (ptrs.size === 0 && gesture) {
     clearTimeout(pressTimer);
     if (!gesture.multi && !gesture.long && gesture.moved <= 8 && performance.now() - gesture.t < 600 && e.type === "pointerup") {
-      const pin = hitPlace(e.offsetX, e.offsetY, sx, sy);
-      if (pin) openSheet(pin);                       // tap a pin: Go here / more
+      const pin = zoneDrawing() ? null : hitPlace(e.offsetX, e.offsetY, sx, sy);
+      if (zoneDrawing()) zoneDraw.tap(e.offsetX, e.offsetY);   // drawing walls / zones (zones.js)
+      else if (pin) openSheet(pin);                  // tap a pin: Go here / more
       else { pending.push([wx(e.offsetX), wy(e.offsetY)]); updateBar(); dirty = true; }
     }
     gesture = null;
