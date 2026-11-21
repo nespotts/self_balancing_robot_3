@@ -108,6 +108,35 @@ SHOTS_TUNE = [
 ]
 
 
+# Falls list (issue #50): sim with a seeded falls dir and --shove, then
+#   python -m station.tools.screenshots --url http://localhost:8090/ --prep-falls falls
+OPEN_FALL = ("const rs=[...document.querySelectorAll('.frow')];const r=rs.find(x=>/ran away/.test(x.textContent))||rs[0];"
+             "if(r){r.querySelector('.fhead').click();setTimeout(()=>r.scrollIntoView({block:'start'}),700)}")
+SHOTS_FALLS = [
+    ("phone-falls", PHONE, "logs", "document.getElementById('view-logs').scrollTop=0", 2),
+    ("phone-fall-detail", PHONE, "logs", OPEN_FALL, 2.5),
+    ("desktop-falls", DESKTOP, "logs", OPEN_FALL, 2.5),
+]
+
+
+async def prep_falls(url, wait=40):
+    """Arm the sim (started with --shove 12): it is knocked over every 12 s, each fall lands in the list."""
+    u = urllib.parse.urlsplit(url)
+    ws = await WsClient.connect(u.hostname, u.port or 80)
+    ws.send(json.dumps({"t": "set_mode", "mode": 1}))
+    end = time.monotonic() + wait
+    while time.monotonic() < end:
+        try:
+            m = json.loads(await asyncio.wait_for(ws.recv(), 1))
+        except asyncio.TimeoutError:
+            continue
+        if m.get("t") == "fall":
+            print("fall:", m["fall"]["cause_label"])
+    ws.send(json.dumps({"t": "set_mode", "mode": 0}))
+    await asyncio.sleep(1)
+    ws.close()
+
+
 async def prep_tune(url):
     """Sim with --remote: three balancing runs with different presets scored, a saved preset, then a full
     wheels-up motor test (about 80 s) and a second one left running for the 'running' state."""
@@ -229,7 +258,7 @@ async def shoot(url, browser, names, port=9333):
         await cdp.call("Page.enable")
         os.makedirs(OUT, exist_ok=True)
         current = None
-        for name, (w, h, dpr, mobile), view, js, wait, *action in SHOTS + SHOTS_TUNE:
+        for name, (w, h, dpr, mobile), view, js, wait, *action in SHOTS + SHOTS_TUNE + SHOTS_FALLS:
             if names and name not in names:
                 continue
             if current != (w, h, dpr, mobile):
@@ -266,17 +295,22 @@ def main():
     ap.add_argument("--prep-map", action="store_true", help="explore the sim room first (map shots)")
     ap.add_argument("--browser", default=next((b for b in BROWSERS if os.path.exists(b)), None))
     ap.add_argument("--cdp-port", type=int, default=9333, help="headless browser debugging port")
+    ap.add_argument("--prep-falls", action="store_true", help="arm the sim (--shove 12) and wait for falls")
     ap.add_argument("--prep-tune", action="store_true", help="score runs + motor test first (sim with --remote)")
     ap.add_argument("names", nargs="*", help="only these shots (\"tune\" = the Tune tools shots)")
     a = ap.parse_args()
     if a.names == ["tune"]:
         a.names = [s[0] for s in SHOTS_TUNE]
+    if a.names == ["falls"]:
+        a.names = [s[0] for s in SHOTS_FALLS]
 
     async def run():
         if a.prep:
             await prep(a.url)
         if a.prep_tune:
             await prep_tune(a.url)
+        if a.prep_falls:
+            await prep_falls(a.url)
         if a.prep_map:
             await prep_map(a.url)
         await shoot(a.url, a.browser, a.names, a.cdp_port)
