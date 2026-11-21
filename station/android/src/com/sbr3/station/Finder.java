@@ -7,6 +7,7 @@ import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.nsd.NsdManager;
+import android.net.wifi.WifiManager;
 import android.net.nsd.NsdServiceInfo;
 import android.util.Log;
 import java.io.ByteArrayOutputStream;
@@ -44,6 +45,7 @@ final class Finder {
     private ExecutorService pool;
     private NsdManager nsd;
     private NsdManager.DiscoveryListener nsdListener;
+    private WifiManager.MulticastLock mcast;   // held while NSD runs: some phones drop mDNS packets otherwise
     private volatile int gen;
     private final ConcurrentHashMap<String, String> kinds = new ConcurrentHashMap<>();   // addr -> robot / sim
 
@@ -73,38 +75,14 @@ final class Finder {
         }
     }
 
-    /** {ip, prefix} of the Wi-Fi (or Ethernet) IPv4 address, or null. Binds the process to it if it isn't the default. */
-    String[] wifiIpv4() {
-        ConnectivityManager cm = (ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
-        if (cm == null) return null;
-        try {
-            for (Network n : cm.getAllNetworks()) {
-                NetworkCapabilities caps = cm.getNetworkCapabilities(n);
-                if (caps == null || !(caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                    || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))) continue;
-                LinkProperties lp = cm.getLinkProperties(n);
-                if (lp == null) continue;
-                for (LinkAddress la : lp.getLinkAddresses()) {
-                    InetAddress a = la.getAddress();
-                    if (a instanceof Inet4Address && !a.isLoopbackAddress()) {
-                        // Wi-Fi without internet (e.g. a robot hotspot) isn't the default network: route our sockets there
-                        if (!n.equals(cm.getActiveNetwork())) cm.bindProcessToNetwork(n);
-                        return new String[]{a.getHostAddress(), String.valueOf(la.getPrefixLength())};
-                    }
-                }
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "wifiIpv4: " + e);
-        }
-        return null;
-    }
-
+    /** {ip, prefix} of the Wi-Fi (or Ethernet) IPv4 address to scan, or null. Binds / unbinds the process (see Nets). */
+    String[] wifiIpv4(String lastHost) { return Nets.choose(ctx, lastHost); }
     void start(final String last) {
         stop();
         final int g;
         final ExecutorService p = Executors.newFixedThreadPool(THREADS);
         synchronized (lock) { g = ++gen; pool = p; }
-        String[] w = wifiIpv4();
+        String[] w = wifiIpv4(last == null ? null : Lan.hostOf(last));
         final List<String> targets = new ArrayList<>();
         if (last != null) targets.add(last);
         String lastHost = last == null ? null : Lan.hostOf(last);
@@ -238,6 +216,7 @@ final class Finder {
         try {
             nsd = (NsdManager) ctx.getSystemService(Context.NSD_SERVICE);
             if (nsd == null) return;
+            lockMulticast();
             final ExecutorService resolver = Executors.newSingleThreadExecutor();
             nsdListener = new NsdManager.DiscoveryListener() {
                 @Override public void onDiscoveryStarted(String t) { }
@@ -282,7 +261,29 @@ final class Finder {
         try { latch.await(3, TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
     }
 
+    private synchronized void lockMulticast() {
+        try {
+            WifiManager wm = (WifiManager) ctx.getSystemService(Context.WIFI_SERVICE);
+            if (wm == null || mcast != null) return;
+            mcast = wm.createMulticastLock("sbr3-nsd");
+            mcast.setReferenceCounted(false);
+            mcast.acquire();
+        } catch (Exception e) {
+            Log.w(TAG, "multicast lock: " + e);
+            mcast = null;
+        }
+    }
+
+    private synchronized void unlockMulticast() {
+        WifiManager.MulticastLock l = mcast;
+        mcast = null;
+        if (l != null) {
+            try { if (l.isHeld()) l.release(); } catch (Exception ignored) { }
+        }
+    }
+
     private void stopNsd() {
+        unlockMulticast();
         NsdManager n = nsd;
         NsdManager.DiscoveryListener l = nsdListener;
         nsdListener = null;

@@ -32,16 +32,16 @@ WebSocket.prototype.send = function (d) {
   try { const m = JSON.parse(d); if (m.t !== "hi") window.__sent.push([performance.now(), m]); } catch (e) {}
   return _send.call(this, d);
 };
-window.__tilt = { pitch: -35, roll: 2, on: true };
+window.__tilt = { pitch: -35, roll: 2, on: true, rot: 0 };
 window.SBR3Native = {
   appInfo: () => JSON.stringify({ version: "test", tilt: true, orientation: "auto" }),
   tiltStart: (hz) => __calls.push(["tiltStart", hz]), tiltStop: () => __calls.push(["tiltStop"]),
   vibrate: (p) => __calls.push(["vibrate", p]), keepAwake: (on) => __calls.push(["keepAwake", on]),
   gamepads: () => '{"list":[]}', setOrientation: (m) => __calls.push(["orient", m]), openFinder: () => {},
-  lastAddress: () => "",
+  lastAddress: () => "", gestureRects: (j) => __calls.push(["rects", j]),
 };
 setInterval(() => {
-  if (__tilt.on && window.__sbr3) __sbr3.emit("tilt", JSON.stringify({ pitch: __tilt.pitch, roll: __tilt.roll, t: 0 }));
+  if (__tilt.on && window.__sbr3) __sbr3.emit("tilt", JSON.stringify({ pitch: __tilt.pitch, roll: __tilt.roll, rot: __tilt.rot, t: 0 }));
 }, 33);
 """
 
@@ -270,6 +270,30 @@ class TestNativeDrive(unittest.TestCase):
             self.assertFalse(await self.ev("document.getElementById('joy').classList.contains('held')"))
             await self.touch("touchEnd")
             await self.ev("__tilt.on = true")
+
+            # the display turns 180 deg (ROTATION_90 -> 270) while held: samples are in the other frame -> let go (issue #31)
+            await self.ev("__tilt.roll = 2; __tilt.pitch = -35")
+            await asyncio.sleep(0.1)
+            await self.touch("touchStart", x, y)
+            self.assertTrue(await self.ev("document.getElementById('joy').classList.contains('held')"))
+            t0 = await self.ev("performance.now()")
+            await self.ev("__tilt.rot = 2")
+            await asyncio.sleep(0.3)
+            self.assertFalse(await self.ev("document.getElementById('joy').classList.contains('held')"), "released on rotation change")
+            c = await self.cmds(t0)
+            self.assertTrue(all(s == 0 and w == 0 for _, s, w in c), c)
+            await self.touch("touchEnd")
+            # the rotation event alone (no sample yet) also lets go; a new press in the new frame works
+            await self.touch("touchStart", x, y)
+            self.assertTrue(await self.ev("document.getElementById('joy').classList.contains('held')"), "new press in the new frame")
+            await self.ev("__sbr3.emit('rotation', JSON.stringify({rot: 0}))")
+            await asyncio.sleep(0.1)
+            self.assertFalse(await self.ev("document.getElementById('joy').classList.contains('held')"), "released on rotation event")
+            await self.touch("touchEnd")
+            await self.ev("__tilt.rot = 0")
+            # the pad reports its rectangle so the Back swipe does not start there
+            rects = await self.ev("(__calls.filter(c => c[0] === 'rects').pop() || [])[1] || \"\"")
+            self.assertTrue(rects.startswith("[[") and rects.count(",") == 3, rects)
 
             # page goes away while held (app killed / Wi-Fi gone) -> bridge stops within 300 ms
             await asyncio.sleep(0.2)

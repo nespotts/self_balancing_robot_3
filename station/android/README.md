@@ -56,7 +56,16 @@ The Pi serves the web UI (`station/web`), including Tilt / Pad.
   is. It never E-stops or sets IDLE (that drops a balancing robot) and never arms: a disarmed or fallen robot is left alone.
   STATION / BALANCE / HOLD just get the zero `cmd_vel`. No setting; the page's own JS stop still runs too.
 - Buzz: E-stop (long), link lost (3 short), obstacle (2 short).
-- Plain http only to private LAN addresses (10/8, 172.16/12, 192.168/16, loopback, link-local) and local names (single-label, .local, .lan, .internal, .home.arpa); anything else is blocked.
+- **Plain http only to the home network** (cleartext is on app-wide, so the code is the guard; `HostPolicy.java`):
+  private IPv4 literals (10/8, 172.16/12, 192.168/16, loopback, link-local) are trusted as typed; a **name** (`orangepi.local`, `router`) only
+  after it resolved to private addresses only, and it stays pinned to them (a new address later = refused until the Wi-Fi changes).
+  Anything else is blocked (403). Only the page's own host:port may load frames / sub-resources, so a foreign iframe never loads next to `SBR3Native`.
+  Links leave the app only as `http(s)` after a tap; `intent:` / `file:` / other schemes and redirects are dropped.
+- **Wi-Fi changes**: the app follows Wi-Fi / Ethernet while open. A robot hotspot without internet gets the app's traffic, and it is handed back
+  when that Wi-Fi goes or is no longer needed. The find screen rescans on a change; the drive page lets go of the dead-man on "Wi-Fi lost".
+  A page that crashes the browser engine is rebuilt 3 times a minute at most, then the find screen shows an error.
+- **Screen turn** (landscape <-> reverse landscape): the display rotation is read on every tilt sample and sent with it; turning the phone
+  while the pad is held lets go, hold again. The pad is excluded from the system Back swipe (Android 10+, `SBR3Native.gestureRects`).
 
 ## Files
 
@@ -65,6 +74,8 @@ The Pi serves the web UI (`station/web`), including Tilt / Pad.
 | `src/.../MainActivity.java` | WebView, immersive, back, gamepad input, LAN-only guard |
 | `AppStop.java` | native stop when the app is left (cmd_vel 0, plan stop, GOTO/EXPLORE → BALANCE) |
 | `Finder.java`, `Lan.java` | finding the bridge (parallel probes, 48 threads, ~2 s for a /24) |
+| `HostPolicy.java`, `Nets.java`, `NetPick.java` | who is trusted (names pinned) / which Wi-Fi to scan, bind, watch |
+| `RateLimit.java`, `GestureRects.java` | renderer-crash limit / Back-swipe exclusion rects |
 | `Tilt.java`, `TiltMath.java` | rotation vector → pitch / roll in the screen's frame |
 | `Bridge.java` | `window.SBR3Native` (events back via `window.__sbr3.emit`) |
 | `assets/find.html` | start / find screen |

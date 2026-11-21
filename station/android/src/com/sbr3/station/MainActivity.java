@@ -11,8 +11,11 @@ import android.content.res.Configuration;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.util.Log;
 import android.graphics.drawable.GradientDrawable;
+import android.hardware.display.DisplayManager;
+import android.graphics.Rect;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.Gravity;
@@ -36,9 +39,11 @@ import android.widget.FrameLayout;
 import android.widget.TextView;
 import java.io.ByteArrayInputStream;
 import java.net.InetAddress;
+import java.util.Arrays;
 import java.net.URLEncoder;
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.List;
 
 /**
  * Full-screen WebView: the bundled find screen (assets/find.html), then the robot's own web app from the bridge
@@ -46,7 +51,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class MainActivity extends Activity {
     static final String TAG = "BalanceBot";
-    static final String FINDER = "file:///android_asset/find.html";
+    static final String FINDER = HostPolicy.FINDER;
     private static final int BG = 0xFF121212;   // the web app's --bg
 
     WebView web;
@@ -54,12 +59,17 @@ public class MainActivity extends Activity {
     Finder finder;
     Tilt tilt;
     Gamepads pads;
-    volatile boolean trusted;           // the shown page may use SBR3Native
+    private volatile String pageUrl = FINDER;   // main-frame URL being shown; trusted() derives from it
     private volatile String robotAddr;  // host:port of the robot page being shown, or null
     private volatile String robotKind;         // Lan.ROBOT / Lan.SIM / null (unknown) for robotAddr
     private boolean labelShown;         // the "Robot · addr" label was flashed for this robot page
     private TextView label;
-    private final ConcurrentHashMap<String, Boolean> hostOk = new ConcurrentHashMap<>();
+    // names are trusted only if they resolved to private addresses only, and stay pinned to those (issue #34)
+    private final HostPolicy policy = new HostPolicy(h -> Arrays.asList(InetAddress.getAllByName(h)), 10_000);
+    private final RateLimit rendererCrashes = new RateLimit(3, 60_000);   // renderer rebuilds per minute (issue #33)
+    private Nets.Watch netWatch;
+    private int lastRot = -1;
+    private DisplayManager.DisplayListener displayListener;
 
     private SharedPreferences prefs() { return getSharedPreferences("sbr3", MODE_PRIVATE); }
 
@@ -68,6 +78,7 @@ public class MainActivity extends Activity {
         finder = new Finder(this);
         WebView.setWebContentsDebuggingEnabled(isDebug());
         tilt = new Tilt(this);
+        tilt.setRotationSource(this::displayRotation);   // read on every sample (issue #31)
         pads = new Gamepads(this);
         setOrientation(orientation());
         getWindow().getDecorView().setBackgroundColor(BG);
@@ -151,7 +162,8 @@ public class MainActivity extends Activity {
         robotAddr = null;
         robotKind = null;
         hideRobotLabel();
-        trusted = true;
+        pageUrl = FINDER;
+        setGestureRects("[]");
         String h = hash == null ? "" : hash.startsWith("?") ? "#" + hash.substring(1) : hash;
         web.loadUrl(FINDER + h);
     }
@@ -164,6 +176,7 @@ public class MainActivity extends Activity {
         robotAddr = addr;
         robotKind = k;
         labelShown = false;
+        pageUrl = "http://" + addr + "/";
         web.loadUrl("http://" + addr + "/");
     }
 
@@ -216,37 +229,21 @@ public class MainActivity extends Activity {
         label.setVisibility(View.GONE);
     }
 
-    static boolean isTrusted(String url) {
-        if (url == null) return false;
-        if (url.startsWith(FINDER)) return true;
-        try {
-            Uri u = Uri.parse(url);
-            return "http".equals(u.getScheme()) && Lan.isPrivateHost(u.getHost());
-        } catch (Exception e) {
-            return false;
-        }
-    }
+    /** May the shown page use SBR3Native? The find screen, a private IPv4 literal, or a name pinned to private addresses. */
+    boolean trusted() { return policy.trustedPage(pageUrl); }
 
-    /** Plain http only to private-LAN hosts (Android's network security config can't express IP ranges). Background thread. */
-    private boolean hostAllowed(String host) {
-        if (host == null) return false;
-        int[] ip = Lan.ipv4(host);
-        if (ip != null) return Lan.isPrivateIpv4(ip);
-        Boolean c = hostOk.get(host);
-        if (c != null) return c;
-        boolean ok = false;
-        try {
-            InetAddress[] all = InetAddress.getAllByName(host);
-            ok = all.length > 0;
-            for (InetAddress a : all) ok &= a.isSiteLocalAddress() || a.isLoopbackAddress() || a.isLinkLocalAddress();
-        } catch (Exception ignored) {
-        }
-        hostOk.put(host, ok);
-        return ok;
-    }
+    // ------------------------------------------------------------------ gesture exclusion (issue #31)
 
+    /** From the page: the drive pad's rects "[[l,t,r,b],..]" in CSS px, so a swipe that starts there isn't the Back gesture. */
+    void setGestureRects(String json) {
+        if (Build.VERSION.SDK_INT < 29 || web == null) return;
+        List<int[]> in = GestureRects.parse(json, getResources().getDisplayMetrics().density, web.getWidth(), web.getHeight());
+        List<Rect> out = new ArrayList<>();
+        for (int[] r : in) out.add(new Rect(r[0], r[1], r[2], r[3]));
+        web.setSystemGestureExclusionRects(out);
+    }
     void evalJs(String js) {
-        if (web != null && trusted) web.evaluateJavascript(js, null);
+        if (web != null && trusted()) web.evaluateJavascript(js, null);
     }
 
     // ------------------------------------------------------------------ window
@@ -280,11 +277,54 @@ public class MainActivity extends Activity {
         tilt.setRotation(displayRotation());
     }
 
+    /** The display can turn 180 degrees (landscape <-> reverse landscape) with no configuration change: listen for it. */
+    private void watchDisplay(boolean on) {
+        DisplayManager dm = (DisplayManager) getSystemService(DISPLAY_SERVICE);
+        if (dm == null) return;
+        if (displayListener != null) { dm.unregisterDisplayListener(displayListener); displayListener = null; }
+        if (!on) return;
+        lastRot = displayRotation();
+        displayListener = new DisplayManager.DisplayListener() {
+            @Override public void onDisplayAdded(int id) { }
+            @Override public void onDisplayRemoved(int id) { }
+            @Override public void onDisplayChanged(int id) {
+                int r = displayRotation();
+                if (r == lastRot) return;
+                lastRot = r;
+                tilt.setRotation(r);
+                Events.emit("rotation", "{\"rot\":" + r + "}");   // the page lets go of the dead-man
+            }
+        };
+        dm.registerDisplayListener(displayListener, null);
+    }
+
     // ------------------------------------------------------------------ lifecycle
+
+    @Override protected void onStart() {
+        super.onStart();
+        // Wi-Fi coming / going / changing while the app is up: unbind from a dead network, tell the page (issue #33)
+        if (netWatch == null) netWatch = new Nets.Watch(this, this::onNetChanged);
+        String last = lastAddress();
+        netWatch.start(last == null ? null : Lan.hostOf(last));
+    }
+
+    @Override protected void onStop() {
+        if (netWatch != null) netWatch.stop();   // (the binding stays: the native stop in onPause may still be in flight)
+        super.onStop();
+    }
+
+    private void onNetChanged(boolean up, String ip, String subnet) {
+        policy.clear();   // names may mean something else on another network
+        try {
+            Events.emit("net", new org.json.JSONObject().put("up", up).put("ip", ip).put("subnet", subnet));
+        } catch (Exception ignored) {
+        }
+    }
 
     @Override protected void onResume() {
         super.onResume();
         tilt.setRotation(displayRotation());
+        watchDisplay(true);
         tilt.resume();
         pads.register();
         if (web != null) web.onResume();
@@ -298,6 +338,7 @@ public class MainActivity extends Activity {
         // That is page JS, which a frozen / killed WebView never runs: stop from native code too (issue #32)
         stopRobot();
         Events.emit("pause", "{}");
+        watchDisplay(false);
         tilt.pause();
         pads.zero();
         pads.unregister();
@@ -356,29 +397,50 @@ public class MainActivity extends Activity {
     private final class Client extends WebViewClient {
         @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
             String url = r.getUrl().toString();
-            if (isTrusted(url)) return false;
-            try {
-                startActivity(new Intent(Intent.ACTION_VIEW, r.getUrl()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-            } catch (Exception e) {
-                Log.w(TAG, "open " + url + ": " + e);
+            if (HostPolicy.isFinder(url)) return false;
+            String h = HostPolicy.httpHost(url);
+            if (h != null && Lan.isPrivateHost(h)) return false;   // LAN: loaded here (shouldInterceptRequest resolves + pins names)
+            // everything else leaves the app, and only as a browser link the user tapped: never other schemes (intent:, file:, ...)
+            String sch = HostPolicy.schemeOf(url);
+            if (("http".equals(sch) || "https".equals(sch)) && r.hasGesture() && !r.isRedirect()) {
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, r.getUrl()).addCategory(Intent.CATEGORY_BROWSABLE)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                } catch (Exception e) {
+                    Log.w(TAG, "open " + url + ": " + e);
+                }
+            } else {
+                Log.w(TAG, "blocked navigation to " + sch + ":// (gesture=" + r.hasGesture() + ")");
             }
             return true;
         }
 
+        /**
+         * The guard for plain http (cleartext is on app-wide): only private-LAN hosts (names must resolve private and
+         * stay pinned), and only the page's own origin for anything but the main frame, so a cross-origin iframe
+         * (which would get SBR3Native too) or a third-party resource never loads.
+         */
         @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
             Uri u = r.getUrl();
-            if ("http".equals(u.getScheme()) && !hostAllowed(u.getHost())) {
-                Log.w(TAG, "blocked cleartext request to " + u.getHost());
+            String sch = u.getScheme() == null ? "" : u.getScheme().toLowerCase(java.util.Locale.ROOT);
+            if (!"http".equals(sch) && !"https".equals(sch)) return null;   // the bundled asset, data:, blob:
+            String url = u.toString();
+            String hp = HostPolicy.hostPort(url);   // null for https
+            boolean ok = hp != null;
+            if (ok && !r.isForMainFrame()) ok = hp.equals(HostPolicy.hostPort(pageUrl));
+            if (ok) ok = policy.allow(HostPolicy.httpHost(url));
+            if (!ok) {
+                Log.w(TAG, "blocked request to " + u.getHost() + (r.isForMainFrame() ? "" : " (not the page's origin)"));
                 return new WebResourceResponse("text/plain", "utf-8", 403, "Blocked", new HashMap<String, String>(),
                     new ByteArrayInputStream(new byte[0]));
             }
+            if (r.isForMainFrame()) pageUrl = url;
             return null;
         }
 
         @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap icon) {
-            trusted = isTrusted(url);
+            pageUrl = url == null ? "" : url;
         }
-
         @Override public void onPageFinished(WebView v, String url) {
             if (robotAddr != null && !labelShown && url != null && url.startsWith("http://" + robotAddr + "/")) {
                 labelShown = true;
@@ -412,7 +474,13 @@ public class MainActivity extends Activity {
                 root.removeView(web);
                 web.destroy();
                 createWebView();
-                if (addr != null) openRobot(addr); else loadFinder("");
+                if (rendererCrashes.allow(SystemClock.elapsedRealtime())) {
+                    if (addr != null) openRobot(addr); else loadFinder("");
+                } else if (addr != null) {   // a page that crashes on load: no endless rebuild loop (issue #33)
+                    fail(addr, "The robot page keeps crashing the browser engine");
+                } else {
+                    Log.e(TAG, "renderer keeps crashing; not reloading");
+                }
             }
             return true;
         }
