@@ -72,7 +72,7 @@ Gains are br3ttb units: ki per second, kd seconds.
 | drv.turn_deadband | 2 °/s | |
 | mot.left_scale / right_scale | 0.95 / 1.0 | per-side |
 | mot.max | 4095 | output limit |
-| mot.curve_exp / knee_in / knee_out | 3.92 / 1250 / 2750 | dead-zone curve (v3) |
+| mot.curve_exp / knee_in / knee_out | 3.92 / 1250 / 2750 | dead-zone curve (v3), `mot.model 0` |
 | ctl.rate_hz | 400 | IMU + balance rate (applies with motors off) |
 | ctl.loops | 3 | 1 heading, 2 velocity, 3 both, 0 balance only |
 | ctl.settle_ms | 500 | |
@@ -93,6 +93,13 @@ Gains are br3ttb units: ki per second, kd seconds.
 | rng.servo_dir | 1 | −1 if the scan comes out mirrored |
 | rng.servo_min_deg / max_deg | 5 / 175 | servo command limits (keep off the end stops) |
 | rng.servo_deg_per_cmd | 1.0 | real head degrees per commanded degree (measured travel ÷ command span) |
+| mot.test | 0 | wheels-up motor test: 1 thresholds, 2 speed curve, 3 reversal, 4 all (see below) |
+| mot.test_max | 4095 | highest duty the test uses |
+| mot.model | 0 | 0 v3 curve, 1 volts model (per-wheel dead zone) |
+| mot.vcomp | 0 | 1 = duty × v_ref / pack V (1.5 s filter, max 1.3×; off if the reading is bad) |
+| mot.v_ref | 12 V | model 1: u = 1 → this many volts; vcomp reference |
+| mot.dz_l_fwd / l_rev / r_fwd / r_rev | 2.0 V | model 1 dead zone per wheel + direction |
+| mot.dz_band | 0.01 | model 1: below this \|u\| ramp 0 → dead zone (no kick on noise) |
 
 ¹ applied between readings, only while the motors are off. Everything else applies at once.
 
@@ -163,3 +170,46 @@ the sensor's ~25° cone flattens the curve, so measure the travel by eye (step 1
 1. `bal.d_src 0` (default): v3 maths, now on a fresh 400 Hz sample every step.
 2. Then `bal.d_src 1` (gyro rate): same average D, less noise. If it feels damped differently, scale `bal.kd`.
 3. Watch `bal_p / bal_i / bal_d` in TelemetryFrame with `tlm.hz 400`.
+
+## Motor test (wheels up) and motor correction
+
+```
+ u (controller, -1..1)
+   mot.model 0:  duty = v3 curve(u)                       steep near 0, no real dead zone
+   mot.model 1:  V = dz + (v_ref - dz)·|u|   duty = V / v_ref
+                 dz per wheel + direction, in volts        ramp 0 → dz inside |u| < dz_band
+   mot.vcomp 1:  duty × v_ref / V_pack                     same u = same motor volts at any charge
+```
+
+**Run it**
+
+1. Robot on a stand, **both wheels off the ground**, upright (|pitch|, |roll| < 20°), not moving.
+2. Mode **IDLE** (remote Mode menu), then **ARM** on the remote (the test needs the remote live). Balancing is off in IDLE.
+3. Set `mot.test` (Tune page → Motors, or on the Pi `python3 tools/tune.py set mot.test=4`).
+4. After 1 s still, it runs (test 4 ≈ 60–100 s). `mot.test` goes back to 0 when done.
+5. On the Pi: `python3 tools/motor_fit.py` (newest session log); on the PC: `python tools/motor_fit.py --ssh robot`.
+
+| mot.test | What | How |
+|---|---|---|
+| 1 | dead zone | each wheel: +10 duty / 50 ms until it moves (> 20 mm/s) = **start**, then −10 / 50 ms until it stops (< 8 mm/s) = **stop**; fwd, then rev |
+| 2 | speed curve | both wheels: 16 duty steps to `mot.test_max`, 1.2 s each, mean speed over the last 0.5 s, step time constant; fwd, then rev |
+| 3 | reversal | spin at (highest start + 300) duty (2000 if test 1 hasn't run), flip direction 6×; time to the turning point, time until 2° back, coast angle |
+| 4 | all | 1, 2, 3 |
+
+**Stops at once (motors 0, `mt,abort,<reason>`):** disarm, E-stop, mode ≠ IDLE, remote lost, IMU or encoder fault/stale,
+|pitch| or |roll| > 20°, pitch rate > 150 °/s, `mot.test` changed, time limit. Not started within 60 s → dropped.
+
+**Output** (Logs page / session log, `MSG_LOG`), volts = duty / 4095 × pack V at that moment:
+
+```
+mt,begin,<test>,max=<duty>,vb=<V>,pitch=<deg>
+mt,a,<left|right>,<fwd|rev>,<start|stop>,<duty>,<volts>,<vbatt>,<speed mm/s>     (-1 = never moved)
+mt,b,<wheel>,<dir>,<duty>,<volts>,<vbatt>,<speed mm/s>,<t63 ms>
+mt,c,<wheel>,<new dir>,<rep>,<duty>,<volts>,<vbatt>,<to turning point ms>,<until 2° back ms>,<coast deg>
+mt,sum,<a|b|c>,...      mt,end,<test>,ok,<s>,vb=<min>..<max>      mt,abort,<reason>,...
+```
+
+**Apply the fit:** motor_fit.py prints dead zones (fit V0 of speed vs volts, kept between stop and start), left/right
+scale, how the v3 curve and the volts model map u → speed, and a `tune.py set mot.model=1 mot.vcomp=1 ...` line.
+A/B live with `mot.model` 0 / 1; the volts model has a different gain near 0, so retune `bal.*` (the tool suggests a
+starting factor). **Save to robot** keeps it. On a bench supply without the balance lead, vcomp does nothing (bad reading → 1×).

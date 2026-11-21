@@ -72,7 +72,7 @@ bool params_load() {
   for (uint16_t i = 0; i < h.count; i++) EEPROM.get(kAddr + (int)sizeof(h) + 4 * i, v[i]);
   if (link_crc16((const uint8_t*)v, h.count * sizeof(float)) != h.values_crc) return false;
   for (uint16_t i = 0; i < h.count; i++) {
-    if (i == P_CFG_SAVE || i == P_CFG_DEFAULTS) continue;
+    if (i == P_CFG_SAVE || i == P_CFG_DEFAULTS || i == P_MOT_TEST) continue;  // actions, never restored
     params_set(i, v[i]);  // clamps to the current limits
   }
   return true;
@@ -83,6 +83,7 @@ bool params_save() {
   memcpy(v, g_param, sizeof(v));
   v[P_CFG_SAVE] = 0;
   v[P_CFG_DEFAULTS] = 0;
+  v[P_MOT_TEST] = 0;
   EepromHeader h{kMagic, layoutCrc(), P_COUNT, link_crc16((const uint8_t*)v, sizeof(v))};
   EEPROM.put(kAddr, h);
   for (uint16_t i = 0; i < P_COUNT; i++) EEPROM.put(kAddr + (int)sizeof(h) + 4 * i, v[i]);

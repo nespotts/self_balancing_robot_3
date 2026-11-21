@@ -14,6 +14,7 @@
 #include "controller.h"
 #include "imu.h"
 #include "mode_manager.h"
+#include "motor_test.h"
 #include "motors.h"
 #include "odometry.h"
 #include "params.h"
@@ -33,6 +34,7 @@ static RemoteRadio radio;
 static PiLink link;
 static Battery batt;
 static RebootButton button;
+static MotorTest mtest;  // wheels-up motor test (mot.test), owns the motors while driving()
 
 // waypoints (navigation itself is issue #8)
 static float wp_x[WAYPOINT_MAX], wp_y[WAYPOINT_MAX];
@@ -331,7 +333,7 @@ static void controlStep() {
   in.enable = modes.motorsAllowed();
   const CtlOut& o = ctl.step(in);
   if (o.active) motors_set(o.left, o.right);
-  else motors_stop();
+  else if (!mtest.driving()) motors_stop();
   motors_active = o.active;
   step_count++;
 
@@ -364,6 +366,48 @@ static void sendOutput(uint32_t now_us) {
   while (sweep.peekFrame(rf) && link.send(MSG_RANGE, &rf, sizeof(rf))) sweep.popFrame();
 }
 
+// Motor test (issue #16): own safety interlocks inside MotorTest; here only the wiring.
+static void motorTestPoll(uint32_t now_us, uint32_t now_ms) {
+  static bool drove = false, echo = false;
+  static float last_l = 0, last_r = 0;
+  const ImuSample& s = imu.sample();
+  MtIn in;
+  in.now_us = now_us;
+  in.request = (uint8_t)lroundf(P(P_MOT_TEST));
+  in.armed = modes.armed();
+  in.estop = modes.estop();
+  in.idle = modes.mode() == MODE_IDLE;
+  in.radio_live = modes.radioLive(now_ms);
+  in.imu_ok = imu.healthy(now_us);
+  in.enc_ok = odom.ok();
+  in.pitch = s.pitch_deg;
+  in.roll = s.roll_deg;
+  in.pitch_rate = s.pitch_rate_dps;
+  in.enc_l = odom.leftCounts();
+  in.enc_r = odom.rightCounts();
+  in.enc_us = odom.lastUpdateUs();
+  in.speed_l = odom.left_mms;
+  in.speed_r = odom.right_mms;
+  in.vbatt = batt.packV();
+  in.max_duty = P(P_MOT_TEST_MAX);
+  mtest.step(in);
+  if (mtest.driving()) {
+    if (!drove || mtest.left() != last_l || mtest.right() != last_r) motors_set_raw(mtest.left(), mtest.right());
+    last_l = mtest.left();
+    last_r = mtest.right();
+    drove = true;
+  } else if (drove) {
+    drove = false;
+    if (!motors_active) motors_stop();
+  }
+  if (mtest.takeDone()) {
+    g_param[P_MOT_TEST] = 0;
+    echo = true;
+  }
+  if (echo && sendParam(P_MOT_TEST)) echo = false;
+  for (const char* l; (l = mtest.peekLine()) != nullptr && link.log("%s", l);) mtest.popLine();
+}
+
 static void background() {
   const uint32_t now_us = micros();
   const uint32_t now_ms = millis();
@@ -387,6 +431,7 @@ static void background() {
   }
   uint8_t ev;
   while (modes.takeEvent(ev)) handleEvent(ev);
+  motorTestPoll(now_us, now_ms);
 
   if (imu.dataReady()) return;
   link.poll(onLinkFrame, 256);
@@ -396,6 +441,7 @@ static void background() {
   sendOutput(now_us);
 
   batt.update(now_ms);
+  motors_set_vbatt(batt.packV(), now_ms);
   button.update();
 
   // no IMU steps (IMU fault): keep odometry and telemetry going at a low rate
@@ -430,7 +476,7 @@ static void background() {
 
   // things that may block for a few ms: only with the motors off
   if (imu.dataReady()) return;
-  const bool motors_off = !motors_active;
+  const bool motors_off = !motors_active && !mtest.driving();
   imu.service(now_ms, motors_off);
   radio.service(now_ms, motors_off);
   if (const char* s = sweep.serviceSlow(now_ms, motors_off)) link.log("%s", s);

@@ -55,7 +55,18 @@
   X(RNG_SERVO_DIR,   "rng.servo_dir",      1.0f,      -1.0f,   1.0f)     \
   X(RNG_SERVO_MIN,   "rng.servo_min_deg",  5.0f,      0.0f,    90.0f)    \
   X(RNG_SERVO_MAX,   "rng.servo_max_deg",  175.0f,    90.0f,   180.0f)   \
-  X(RNG_SERVO_SCALE, "rng.servo_deg_per_cmd", 1.0f,   0.5f,    1.5f)
+  X(RNG_SERVO_SCALE, "rng.servo_deg_per_cmd", 1.0f,   0.5f,    1.5f)  \
+  /* motor test + correction (issue #16, see motors.h / motor_test.h) */ \
+  X(MOT_TEST,        "mot.test",           0.0f,      0.0f,    4.0f)     \
+  X(MOT_TEST_MAX,    "mot.test_max",       4095.0f,   500.0f,  4095.0f)  \
+  X(MOT_MODEL,       "mot.model",          0.0f,      0.0f,    1.0f)     \
+  X(MOT_VCOMP,       "mot.vcomp",          0.0f,      0.0f,    1.0f)     \
+  X(MOT_V_REF,       "mot.v_ref",          12.0f,     6.0f,    17.0f)    \
+  X(MOT_DZ_L_FWD,    "mot.dz_l_fwd",       2.0f,      0.0f,    8.0f)     \
+  X(MOT_DZ_L_REV,    "mot.dz_l_rev",       2.0f,      0.0f,    8.0f)     \
+  X(MOT_DZ_R_FWD,    "mot.dz_r_fwd",       2.0f,      0.0f,    8.0f)     \
+  X(MOT_DZ_R_REV,    "mot.dz_r_rev",       2.0f,      0.0f,    8.0f)     \
+  X(MOT_DZ_BAND,     "mot.dz_band",        0.01f,     0.0f,    0.2f)
 
 enum ParamId : uint16_t {
 #define PARAM_ENUM(id, name, def, mn, mx) P_##id,
