@@ -69,7 +69,7 @@ export function drawPanes(canvas, t, panes, opts = {}) {
     ctx.restore(); ctx.setLineDash([]);
     if (big) {
       ctx.fillStyle = "#8d8c84"; ctx.textAlign = "right"; ctx.textBaseline = "middle";
-      ctx.fillText(fmtAxis(hi), padL - 5, y + 6); ctx.fillText(fmtAxis(lo), padL - 5, y + h - 6);
+      ctx.fillText(fmtAxis(hi, hi - lo), padL - 5, y + 6); ctx.fillText(fmtAxis(lo, hi - lo), padL - 5, y + h - 6);
       if (p.label) { ctx.textAlign = "left"; ctx.textBaseline = "top"; ctx.fillText(p.label, padL + 6, y + 3); }
     }
     y += h + gap;
@@ -82,10 +82,16 @@ export function drawPanes(canvas, t, panes, opts = {}) {
   }
   if (big) {
     ctx.fillStyle = "#8d8c84"; ctx.textBaseline = "top"; ctx.textAlign = "center";
-    for (let s = Math.ceil(t0); s <= t1; s++) ctx.fillText(s === 0 ? "fall" : (s > 0 ? "+" : "") + s + "s", X(s), H - padB + 4);
+    for (let s = Math.ceil(t0); s <= t1; s++) {
+      ctx.textAlign = s >= t1 - 0.3 ? "right" : "center";
+      ctx.fillText(s === 0 ? "fall" : (s > 0 ? "+" : "") + s + "s", X(s), H - padB + 4);
+    }
   }
 }
-function fmtAxis(v) { return Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(1); }
+function fmtAxis(v, span) {
+  const d = span < 2 ? 2 : Math.abs(v) >= 10 || span >= 20 ? 0 : 1;
+  return v.toFixed(d);
+}
 
 function legend(items) {
   return el("div", { class: "flegend" }, ...items.map(([label, color, dash]) =>
@@ -120,7 +126,11 @@ function row(f) {
     now ? open.add(f.id) : open.delete(f.id);
     if (now) fill(f, body);
   };
-  if (f.spark?.t?.length) requestAnimationFrame(() => drawPanes(canvas, f.spark.t, sparkPanes(f.spark)));
+  if (f.spark?.t?.length) {
+    const draw = () => drawPanes(canvas, f.spark.t, sparkPanes(f.spark));
+    requestAnimationFrame(draw);
+    if (window.ResizeObserver) new ResizeObserver(draw).observe(canvas);   // (phone rotated, window resized)
+  }
   if (isOpen) fill(f, body);
   return r;
 }
@@ -149,6 +159,7 @@ async function fill(f, body) {
       } }, "Delete"));
     body.append(why, plots, ev, pv, actions);
     redraw(f, body);
+    if (window.ResizeObserver) new ResizeObserver(() => redraw(f, body)).observe(cv);
   } catch (e) {
     body.textContent = "Could not load the record";
     delete body.dataset.done;
