@@ -197,9 +197,9 @@ the sensor's ~25° cone flattens the curve, so measure the travel by eye (step 1
 
 1. Robot on a stand, **both wheels off the ground**, upright (|pitch|, |roll| < 20°), not moving.
 2. Mode **IDLE** (remote Mode menu), then **ARM** on the remote (the test needs the remote live). Balancing is off in IDLE.
-3. Set `mot.test` (Tune page → Motors, or on the Pi `python3 tools/tune.py set mot.test=4`).
+3. Set `mot.test` (ground station: Tune → Motor test → Start test, or on the Pi `python3 tools/tune.py set mot.test=4`).
 4. After 1 s still, it runs (test 4 ≈ 60–100 s). `mot.test` goes back to 0 when done.
-5. On the Pi: `python3 tools/motor_fit.py` (newest session log); on the PC: `python tools/motor_fit.py --ssh robot`.
+5. The Motor test view shows the fit and an **Apply proposal** button; or on the Pi: `python3 tools/motor_fit.py` (newest session log); on the PC: `python tools/motor_fit.py --ssh robot`.
 
 | mot.test | What | How |
 |---|---|---|

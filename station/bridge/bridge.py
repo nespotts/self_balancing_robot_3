@@ -11,6 +11,7 @@ from . import link_protocol as lp
 from .httpws import HttpServer, Response
 from .session_log import SessionLog, to_csv
 from .transport import LinkError, open_link
+from .tuning_api import TuningTools
 
 BRIDGE_VERSION = "sbr3-bridge 3"   # 3: ranges carry sensor_id / angle / raw mm, status rng_hz
 # NavStatusFrame.state is robot-defined; these are the names the simulator uses (and a
@@ -69,7 +70,7 @@ def _round_dict(d):
 
 class Bridge:
     def __init__(self, port, web_dir, log_dir, http_host="0.0.0.0", http_port=8080, baud=115200,
-                 release_file=None, log_max_mb=DEFAULT_LOG_MAX_MB, quiet=False):
+                 release_file=None, log_max_mb=DEFAULT_LOG_MAX_MB, quiet=False, preset_dir="~/sbr3-presets"):
         self.port = port
         self.baud = baud
         self.web_dir = web_dir
@@ -115,6 +116,7 @@ class Bridge:
         self.track = collections.deque(maxlen=5000)         # robot path [x, y] (every 20 mm)
         self.waypoints = []                                 # what the station last sent (x, y)
         self.range_listeners = []                           # callables(range dict) e.g. mapping (#12)
+        self.tools = TuningTools(self, preset_dir)          # Tune page: presets, scored runs, motor test (#16)
 
         self.cmd = (0.0, 0.0)
         self.cmd_time = -10.0
@@ -193,6 +195,7 @@ class Bridge:
                     self.rt_offset = None
                     self._set_link_state("connected")
                     self.log.start()
+                    self.tools.on_session()
                     self.say("connected to %s, session %s" % (self.port, self.log.name))
                     self.send(lp.encode_get_params())
                     self.last_get_params = _now()
@@ -254,10 +257,12 @@ class Bridge:
             text = lp.decode_log(p)
             self.log.record("log", text)
             self._add_log("robot", text)
+            self.tools.on_log(text)
         elif t == lp.MSG_PARAM_INFO:
             d = lp.decode_param_info(p)
             for k in ("value", "min", "max"):
                 d[k] = _sig(d[k])
+            self.tools.param_changed(d["name"], self.params.get(d["id"], {}).get("value"), d["value"])
             self.params[d["id"]] = d
             self.params_dirty = True
             self.log.record("param", d["id"], d["name"], d["value"], d["min"], d["max"])
@@ -459,6 +464,7 @@ class Bridge:
                     if _num(m.get("value")) >= 0.5 else None
             v = _num(m.get("value"), p["value"], p["min"], p["max"])
             self.send(lp.encode_set_param(pid, v))
+            self.tools.param_changed(p["name"], p["value"], v)
             p["value"] = v  # optimistic; a ParamInfo echo from the robot overrides it
             self.params_dirty = True
         elif t == "cfg":
@@ -504,6 +510,8 @@ class Bridge:
                 self.waypoints = []
                 self.broadcast(json.dumps({"t": "reset"}))
             self.say("%s: event %s" % (who, lp.EVENT_NAMES[ev]))
+        elif t in ("preset", "score", "motor"):
+            return self.tools.handle(m, who)
         elif t == "ping":
             return {"t": "pong", "id": m.get("id")}
         else:
@@ -545,6 +553,8 @@ class Bridge:
         pts = self.ranges_since(0, RANGE_ON_CONNECT)
         if pts:
             ws.send(json.dumps({"t": "ranges", "pts": pts}, separators=(",", ":")))
+        for text in self.tools.hello_msgs():
+            ws.send(json.dumps(text, separators=(",", ":")))
         for item in list(self.logs)[-60:]:
             ws.send(json.dumps(dict(t="log", **{k: v for k, v in item.items() if k != "t"}, ts=item["t"])))
         self.clients.add(ws)

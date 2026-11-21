@@ -44,8 +44,33 @@ Screenshots: `python -m station.tools.screenshots --url http://localhost:8080/ -
 | **Map** | tap to add waypoints, **Go** (asks before it arms the robot) |
 | **Drive** | joystick / WASD in STATION mode |
 | **Sensors** | both range sensors live: mm, valid, angle, readings/s; last sweep around the robot; range vs time. ⋯ → park / trim / sweep width / direction, **hand test** (cover one sensor: its card lights up). Colours: front amber, rear magenta (map too) |
-| **Tune** | live P / I / D at the loop rate (**Full rate**), sliders apply at once, **Save to robot** writes EEPROM (when the motors are off); ⋯ → Restore defaults |
+| **Tune** | live P / I / D at the loop rate (**Full rate**), sliders apply at once, **Save to robot** writes EEPROM (when the motors are off); ⋯ → Restore defaults. Two views: **Balance** and **Motor test** (below) |
 | **Logs** | messages, session downloads (CSV / JSONL), link details |
+
+### Tune → Balance: presets and scored runs (issue #16)
+
+<p>
+<img src="docs/screenshots/phone-tune-score.png" width="30%">
+<img src="docs/screenshots/phone-motor.png" width="30%">
+<img src="docs/screenshots/phone-motor-results.png" width="30%">
+</p>
+
+| | |
+|---|---|
+| **Preset ▾ / Apply** | built-in "v3 known good" and "2026-11-21 (kd 7.15, ki 1500)", plus your own (⋯ → Save current values as… / Compare… / Delete). Kept on the Pi in `~/sbr3-presets/*.json`. Apply = only the values that differ; asks first while the robot is armed. Never touches `mot.test`, `mot.drive_mode`, `cfg.*` |
+| **Score** | **Last 20 s** (⋯: 10 / 20 / 30 / 60 s) or **Start … Stop** around a run (push it a few times). The bridge scores the full-rate session log like `tools/tune.py score`: pitch error rms, oscillation Hz, motor rms / saturation / sign flips, D noise, pushes > 3° with settle time and overshoot. Needs **Full rate** (400 Hz) |
+| **Runs side by side** | one column per run with the params active then (changed ones in yellow, `*` = changed during the run); best value per row highlighted. History lives in the bridge (and in the session log as `["score", t, {...}]`) |
+
+### Tune → Motor test (wheels up)
+
+Robot on a stand, wheels off the ground, remote in IDLE + ARMED. Pick All / Dead zone / Speed curve / Reversal,
+**Start test** (asks first); the robot's own interlocks decide when it runs, and its wait reason shows live
+("Arm the remote, mode IDLE", "Stand it upright", …). Results = `tools/motor_fit.py` (same module,
+`station/bridge/motor_fit.py`): dead zone per wheel and direction, speed vs volts chart, left/right mismatch,
+and a proposal → **Apply proposal** sets the ticked `mot.*` values (`mot.model` / `mot.vcomp` only if you tick them).
+⋯ → results from an earlier session. Sim: `python -m station.sim --remote` (TT motors: ~6 V start / 5.6 V stop, left 18% weaker).
+
+Screenshots of these: `python -m station.tools.screenshots --url http://localhost:8090/ --prep-tune tune` (sim with `--remote`).
 
 ## Install on the Orange Pi
 
@@ -85,8 +110,10 @@ rm /tmp/sbr3-bridge.release                   # bridge reconnects
 | `{"t":"cfg","action":"save"}` / `"defaults"` | EEPROM save / firmware defaults |
 | `{"t":"goto","points":[[x,y],...],"go":true}` / `{"t":"event","event":3}` | |
 | `{"t":"sub","tune":true}` | receive every telemetry frame as `{"t":"tune","cols":[...],"rows":[...]}` |
+| `{"t":"preset"\|"score"\|"motor","action":...}` | Tune tools: see the docstring of `bridge/tuning_api.py` |
 
-Receive: `hello`, `status`, `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`.
+Receive: `hello`, `status`, `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`, and for the Tune tools
+`presets`, `score_state`, `score_runs`, `motor_state`, `motor_fit`.
 `ranges.pts` rows (every reading, batched at 25 Hz): `[i, hit_x, hit_y, sensor_x, sensor_y, valid, tilt, pi_ms, sensor_id, sensor_angle_deg, range_mm]`
 (sensor 0 = front / XSHUT 34, 1 = rear / XSHUT 28; angle in the robot frame, + = CCW; raw mm as sent). `status.rng_hz` = readings/s per sensor.
 No WebSocket (old Kindle): `GET /api/state`, `GET|POST /api/cmd`.

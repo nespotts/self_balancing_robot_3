@@ -86,6 +86,60 @@ SHOTS = [  # name, device, view, js to run after the view is shown, extra wait s
      "setTimeout(()=>document.getElementById('arm-btn').click(),1800)", 2.5),
 ]
 
+# Tune page tools (issue #16): python -m station.sim --remote --http-port 8090, then
+#   python -m station.tools.screenshots --url http://localhost:8090/ --prep-tune tune
+SUB = "document.querySelector('#tune-sub [data-v=%s]').click();document.getElementById('view-tune').scrollTop=0;"
+SHOTS_TUNE = [
+    ("phone-tune-score", PHONE, "tune", SUB % "balance", 2),
+    ("phone-tune-compare", PHONE, "tune", SUB % "balance" + "document.getElementById('preset-compare').click()", 1.5),
+    ("phone-motor", PHONE, "tune", SUB % "motor", 2),
+    ("phone-motor-results", PHONE, "tune", SUB % "motor" + "setTimeout(()=>{const v=document.getElementById('view-tune');"
+     "v.scrollTop=document.querySelector('.mt-prop').offsetTop-80},600)", 2),
+    ("desktop-tune-score", DESKTOP, "tune", SUB % "balance" + "document.getElementById('cmp-close').click()", 2),
+    ("desktop-motor", DESKTOP, "tune", SUB % "motor", 2),
+]
+
+
+async def prep_tune(url):
+    """Sim with --remote: three balancing runs with different presets scored, a saved preset, then a full
+    wheels-up motor test (about 80 s) and a second one left running for the 'running' state."""
+    u = urllib.parse.urlsplit(url)
+    ws = await WsClient.connect(u.hostname, u.port or 80)
+    send = lambda **m: ws.send(json.dumps(m))
+    params = {}
+
+    async def drain(sec):
+        end = time.monotonic() + sec
+        while time.monotonic() < end:
+            try:
+                m = json.loads(await asyncio.wait_for(ws.recv(), max(0.01, end - time.monotonic())))
+                if m.get("t") == "params":
+                    params.update({p["name"]: p for p in m["list"]})
+            except asyncio.TimeoutError:
+                pass
+    await drain(1.5)
+    send(t="set_param", id=params["tlm.hz"]["id"], value=400)
+    send(t="set_mode", mode=1)
+    await drain(6)
+    for name in ("v3 known good", "2026-11-21 (kd 7.15, ki 1500)"):
+        send(t="preset", action="apply", name=name, confirm=True)
+        await drain(6)
+        send(t="score", action="last", seconds=5)
+        await drain(1)
+    send(t="set_param", id=params["bal.kd"]["id"], value=9.0)
+    await drain(6)
+    send(t="score", action="last", seconds=5)
+    await drain(1)
+    send(t="preset", action="save", name="kd 9 try")
+    send(t="set_param", id=params["bal.kd"]["id"], value=7.15)
+    send(t="set_mode", mode=0)
+    await drain(1)
+    send(t="motor", action="start", test=4, confirm=True)
+    await drain(85)
+    send(t="motor", action="start", test=2, confirm=True)
+    await drain(14)
+    ws.close()
+
 
 class Cdp:
     def __init__(self, ws):
@@ -124,8 +178,7 @@ async def prep(url):
     ws.close()
 
 
-async def shoot(url, browser, names):
-    port = 9333
+async def shoot(url, browser, names, port=9333):
     prof = tempfile.mkdtemp(prefix="sbr3-shot-")
     proc = subprocess.Popen([browser, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
                              "--remote-debugging-port=%d" % port, "--user-data-dir=" + prof, "about:blank"],
@@ -143,7 +196,7 @@ async def shoot(url, browser, names):
         await cdp.call("Page.enable")
         os.makedirs(OUT, exist_ok=True)
         current = None
-        for name, (w, h, dpr, mobile), view, js, wait, *action in SHOTS:
+        for name, (w, h, dpr, mobile), view, js, wait, *action in SHOTS + SHOTS_TUNE:
             if names and name not in names:
                 continue
             if current != (w, h, dpr, mobile):
@@ -178,13 +231,19 @@ def main():
     ap.add_argument("--url", default="http://localhost:8090/")
     ap.add_argument("--prep", action="store_true", help="drive the simulated robot first")
     ap.add_argument("--browser", default=next((b for b in BROWSERS if os.path.exists(b)), None))
-    ap.add_argument("names", nargs="*", help="only these shots")
+    ap.add_argument("--cdp-port", type=int, default=9333, help="headless browser debugging port")
+    ap.add_argument("--prep-tune", action="store_true", help="score runs + motor test first (sim with --remote)")
+    ap.add_argument("names", nargs="*", help="only these shots (\"tune\" = the Tune tools shots)")
     a = ap.parse_args()
+    if a.names == ["tune"]:
+        a.names = [s[0] for s in SHOTS_TUNE]
 
     async def run():
         if a.prep:
             await prep(a.url)
-        await shoot(a.url, a.browser, a.names)
+        if a.prep_tune:
+            await prep_tune(a.url)
+        await shoot(a.url, a.browser, a.names, a.cdp_port)
     asyncio.run(run())
 
 
