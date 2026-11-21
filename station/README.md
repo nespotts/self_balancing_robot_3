@@ -32,6 +32,8 @@ Options: `--remote` (RC remote on: its ARMED switch rules), `--remote-disarmed`,
 `--head-error 8` (range head mounted 8° off: practise the trim). The range sweep follows the firmware
 (`rng.*` params: sweep / park / trim / limits / timing).
 
+`--tour` drives a loop around the room (mapping demo), `--drift 3` makes odometry drift (3°/min, 2 % long).
+
 Tests: `python -m unittest discover -s station -t .` (protocol vs the C header, plus a full sim + bridge + browser-API run).
 Screenshots: `python -m station.tools.screenshots --url http://localhost:8080/ --prep`
 
@@ -45,11 +47,38 @@ Screenshots: `python -m station.tools.screenshots --url http://localhost:8080/ -
 |---|---|
 | **STOP** (or Space / Esc) | motors off, robot disarms |
 | **Arm & Balance** | two taps. With no RC remote, the station arms the robot; with the remote, its switch does |
-| **Map** | tap to add waypoints, **Go** (asks before it arms the robot) |
+| **Map** | tap to add waypoints, **Go** (asks before it arms the robot): with a map, the route goes around walls. **Explore**: the robot maps the room by itself |
 | **Drive** | joystick / WASD in STATION mode |
 | **Sensors** | both range sensors live: mm, valid, angle, readings/s; last sweep around the robot; range vs time. ⋯ → park / trim / sweep width / direction, **hand test** (cover one sensor: its card lights up). Colours: front amber, rear magenta (map too) |
 | **Tune** | live P / I / D at the loop rate (**Full rate**), sliders apply at once, **Save to robot** writes EEPROM (when the motors are off); ⋯ → Restore defaults |
 | **Logs** | messages, session downloads (CSV / JSONL), link details |
+
+## Map (occupancy grid, route, explore)
+
+<p>
+<img src="docs/screenshots/desktop-route.png" width="64%">
+<img src="docs/screenshots/phone-explore.png" width="25%">
+</p>
+
+| | |
+|---|---|
+| grey / white / black | unknown / free / wall (25 mm cells, built on the Pi from every range reading) |
+| ⋯ → **Map** | on / off + opacity · **Save / Load map** (`~/sbr3-maps`) · **Clear map** |
+| ⋯ → Map & route settings | distance kept off walls, robot radius, tilt limit, “no target” handling, drift correction (experimental) |
+| **Go** with a map | the bridge plans a route (purple) around obstacles, re-plans when the robot is blocked |
+| **Explore** | drives to the nearest unmapped edge until none is left; STOP ends it |
+
+```mermaid
+flowchart LR
+  R[RangeFrame] --> F{tilted? no target?} -- ok --> G[grid: free wedge + hit arc] --> T[changed 1 m tiles<br>PNG, 2 Hz] --> W[browsers]
+  G --> P[planner: A* / frontiers<br>worker thread] -- MSG_GOTO --> Robot
+```
+
+Pi cost: 0.2 ms per reading (< 1 % of a core at 50/s); a route or frontier search 0.1-0.3 s in a worker thread.
+Offline: `python -m station.tools.mapbuild ~/sbr3-logs/<session>.jsonl -o map.png`.
+Drift correction (scan-to-map matching) is off by default: in the sim it does not beat plain odometry yet.
+Browser API: `{"t":"map","action":"reset|save|load|list|delete|set"}`, `{"t":"plan","action":"goto|explore|stop|set"}`;
+receive `map` (tiles), `plan` (route, status). `GET /api/map`, `/api/map/current.png`.
 
 ## Install on the Orange Pi
 
@@ -90,7 +119,7 @@ rm /tmp/sbr3-bridge.release                   # bridge reconnects
 | `{"t":"goto","points":[[x,y],...],"go":true}` / `{"t":"event","event":3}` | |
 | `{"t":"sub","tune":true}` | receive every telemetry frame as `{"t":"tune","cols":[...],"rows":[...]}` |
 
-Receive: `hello`, `status`, `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`.
+Receive: `hello`, `status`, `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`, `map`, `plan`.
 `ranges.pts` rows (every reading, batched at 25 Hz): `[i, hit_x, hit_y, sensor_x, sensor_y, valid, tilt, pi_ms, sensor_id, sensor_angle_deg, range_mm]`
 (sensor 0 = front / XSHUT 34, 1 = rear / XSHUT 28; angle in the robot frame, + = CCW; raw mm as sent). `status.rng_hz` = readings/s per sensor.
 No WebSocket (old Kindle): `GET /api/state`, `GET|POST /api/cmd`.

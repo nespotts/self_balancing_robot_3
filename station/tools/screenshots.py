@@ -4,6 +4,8 @@
   python -m station.tools.screenshots --url http://localhost:8090/ --prep
 
 --prep drives the simulated robot along a route first so the map has a track and range points.
+--prep-map explores the sim room (occupancy map), then plans a route behind the partition wall;
+  shoot the map-* shots after it:  ... --prep-map phone-occmap desktop-occmap phone-map-menu desktop-route
 """
 import argparse
 import asyncio
@@ -81,6 +83,12 @@ SHOTS = [  # name, device, view, js to run after the view is shown, extra wait s
     ("desktop-plots", DESKTOP, "plots", "", 1),
     ("desktop-tune", DESKTOP, "tune", FULL_RATE, 6),
     ("desktop-logs", DESKTOP, "logs", "", 1.5),
+    # occupancy map / route / explore (issue #12): run with --prep-map
+    ("desktop-occmap", DESKTOP, "map", "", 1.5),
+    ("desktop-route", DESKTOP, "map", "sbr3.send({t:'plan',action:'goto',points:[[2900,1650]]})", 4),
+    ("phone-occmap", PHONE, "map", "", 1.5),
+    ("phone-map-menu", PHONE, "map", "document.getElementById('map-more').click()", 1),
+    ("phone-explore", PHONE, "map", "document.getElementById('map-menu').hidden=true;sbr3.send({t:'map',action:'reset'});sbr3.send({t:'plan',action:'explore'})", 14),
     # last: disarm, then the first tap of the two-tap "Arm & Balance"
     ("phone-arm", PHONE, "drive", "sbr3.send({t:'set_mode',mode:0});"
      "setTimeout(()=>document.getElementById('arm-btn').click(),1800)", 2.5),
@@ -124,8 +132,32 @@ async def prep(url):
     ws.close()
 
 
-async def shoot(url, browser, names):
-    port = 9333
+async def prep_map(url, max_s=150):
+    """Explore the sim room through the bridge (like pressing Explore), then drive to the far side."""
+    u = urllib.parse.urlsplit(url)
+    ws = await WsClient.connect(u.hostname, u.port or 80)
+    send = lambda **m: ws.send(json.dumps(m))
+    end = time.monotonic() + max_s
+    await asyncio.sleep(2)
+    send(t="map", action="reset")
+    send(t="plan", action="explore")
+    mode = None
+    while time.monotonic() < end:
+        try:
+            m = json.loads(await asyncio.wait_for(ws.recv(), 1))
+        except asyncio.TimeoutError:
+            continue
+        if m.get("t") == "plan":
+            print("plan:", m.get("mode"), m.get("status"))
+            if mode == "explore" and m.get("mode") == "idle":
+                break
+            mode = m.get("mode")
+    send(t="plan", action="goto", points=[[0, 0]])        # back near the start for the shots
+    await asyncio.sleep(12)
+    ws.close()
+
+
+async def shoot(url, browser, names, port=9333):
     prof = tempfile.mkdtemp(prefix="sbr3-shot-")
     proc = subprocess.Popen([browser, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
                              "--remote-debugging-port=%d" % port, "--user-data-dir=" + prof, "about:blank"],
@@ -177,14 +209,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8090/")
     ap.add_argument("--prep", action="store_true", help="drive the simulated robot first")
+    ap.add_argument("--prep-map", action="store_true", help="explore the sim room first (map shots)")
     ap.add_argument("--browser", default=next((b for b in BROWSERS if os.path.exists(b)), None))
+    ap.add_argument("--cdp-port", type=int, default=9333, help="browser debugging port")
     ap.add_argument("names", nargs="*", help="only these shots")
     a = ap.parse_args()
 
     async def run():
         if a.prep:
             await prep(a.url)
-        await shoot(a.url, a.browser, a.names)
+        if a.prep_map:
+            await prep_map(a.url)
+        await shoot(a.url, a.browser, a.names, a.cdp_port)
     asyncio.run(run())
 
 
