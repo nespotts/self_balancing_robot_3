@@ -432,6 +432,35 @@ details.pgroup:not([open]) { padding-top: 8px; padding-bottom: 8px; }
 .bp-chain { font-variant-numeric: tabular-nums; }
 .bp-warn { color: var(--warn); }
 .bp-bad { color: #ffb4a8; }
+/* Calibrate odometry (issue #14) */
+.cal-card { margin-bottom: 12px; }
+.cal-body { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.cal-body p { margin: 6px 0 0; font-size: 13px; }
+.cal-step { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; text-align: left; min-height: 44px;
+  background: var(--surface-2); }
+.cal-step.on { border-color: var(--blue); }
+.cal-step em { font-style: normal; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.cal-step em.ok { color: var(--good); }
+.cal-step em.todo { color: var(--warn); }
+.cal-step em.running { color: var(--blue); }
+.cal-panel { padding: 4px 4px 8px; border-left: 2px solid var(--blue); padding-left: 12px; margin-left: 4px; }
+.cal-svg text { stroke: none; }
+.cal-svg { width: 100%; max-width: 220px; height: auto; display: block; margin: 4px 0; }
+.cal-field { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; }
+.cal-field span { flex: 1; color: var(--text-2); }
+.cal-field input { width: 96px; font: inherit; font-size: 16px; font-variant-numeric: tabular-nums; background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px; text-align: right; }
+.cal-field em { font-style: normal; color: var(--muted); width: 22px; }
+.cal-hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0 4px; }
+.cal-h { margin: 12px 0 0; font-size: 12.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.cal-prop { background: var(--surface-2); border-radius: 10px; padding: 8px 12px 12px; }
+.cal-row { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 0 8px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.cal-row small { grid-column: 1 / -1; }
+.cal-row .bp-big { margin: 0; }
+.cal-row .bp-big b { font-size: 20px; }
+.cal-row.same b { color: var(--muted); }
+.cal-det summary { font-size: 12.5px; color: var(--muted); cursor: pointer; margin-top: 8px; }
+button.stopbtn { background: var(--stop); border-color: #ff7070; color: #fff; font-weight: 600; min-width: 140px; min-height: 48px; }
 .hist-cap { font-size: 12px; margin: 12px 0 4px; }
 .best-key { padding: 1px 6px; border-radius: 6px; background: rgba(57, 135, 229, .28); color: var(--text); }
 .hist-wrap { overflow-x: auto; }

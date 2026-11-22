@@ -42,7 +42,7 @@ TICK_LATE_S = 0.2                 # warn in the log when the event loop was bloc
 TLM_HZ_GRACE_S = 10.0             # Tune closed this long ago -> put tlm.hz back (#46)
 # Commands that act on the robot: refused with an error while there is no link (#48)
 NEEDS_LINK = {"set_mode", "set_param", "cfg", "get_params", "goto", "event", "estop_release"}  # release: the robot latches too
-NEEDS_LINK_ACTION = {"preset": ("apply",), "motor": ("start", "apply"), "plan": ("goto", "explore", "home")}
+NEEDS_LINK_ACTION = {"preset": ("apply",), "motor": ("start", "apply"), "plan": ("goto", "explore", "home"), "calib": ("start",)}
 GO_HOME_RE = re.compile(r"^GO_HOME: to (-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)")   # the firmware's log line (#53)
 NO_LINK_TEXT = "robot not connected"
 POLLER_TIMEOUT_S = 3.0
@@ -742,7 +742,7 @@ class Bridge:
                 self.waypoints = []
                 self.broadcast(json.dumps({"t": "reset"}))
             self.say("%s: event %s" % (who, lp.EVENT_NAMES[ev]))
-        elif t in ("preset", "score", "motor", "balpoint"):
+        elif t in ("preset", "score", "motor", "balpoint", "calib"):
             return self.tools.handle(m, who)
         elif t == "map":       # occupancy grid: reset / save / load / list / delete / set (#12)
             return self.mapper.command(m, who)

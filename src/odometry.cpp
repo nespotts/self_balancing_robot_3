@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include <math.h>
 
-static constexpr float kMmPerCount = (float)M_PI * WHEEL_DIAMETER_MM / 4096.0f;
+
 
 void WheelEncoder::begin() {
   as_.begin(dir_pin_);
@@ -36,7 +36,7 @@ bool WheelEncoder::read(uint32_t t_us) {
   if (ring_n_ < ENCODER_WINDOW) ring_n_++;
   uint8_t oldest = (ring_head_ + ENCODER_WINDOW - ring_n_) % ENCODER_WINDOW;
   uint32_t dt = t_us - ring_t_[oldest];
-  speed_mms_ = dt > 0 ? (float)(counts_ - ring_c_[oldest]) * kMmPerCount * 1e6f / (float)dt : 0.0f;
+  speed_mms_ = dt > 0 ? (float)(counts_ - ring_c_[oldest]) * mm_per_count_ * 1e6f / (float)dt : 0.0f;
   return true;
 }
 
@@ -46,6 +46,9 @@ void Odometry::begin() {
 }
 
 void Odometry::update(uint32_t t_us, float heading_deg) {
+  const float mm_l = odo_mm_per_count(false), mm_r = odo_mm_per_count(true);   // params: live, issue #14
+  left_.setScale(mm_l);
+  right_.setScale(mm_r);
   left_.read(t_us);
   right_.read(t_us);
   last_us_ = t_us;
@@ -57,8 +60,8 @@ void Odometry::update(uint32_t t_us, float heading_deg) {
     last_heading_ = heading_deg;
     have_ = true;
   }
-  float dl = (float)(l - last_l_) * kMmPerCount;
-  float dr = (float)(r - last_r_) * kMmPerCount;
+  float dl = (float)(l - last_l_) * mm_l;
+  float dr = (float)(r - last_r_) * mm_r;
   last_l_ = l;
   last_r_ = r;
 
@@ -71,7 +74,7 @@ void Odometry::update(uint32_t t_us, float heading_deg) {
   left_mms = left_.speedMms();
   right_mms = right_.speedMms();
   speed_mms = 0.5f * (left_mms + right_mms);
-  turn_rate_dps = (right_mms - left_mms) / TRACK_MM * RAD_TO_DEG;
+  turn_rate_dps = (right_mms - left_mms) / P(P_ODO_TRACK) * RAD_TO_DEG;
 }
 
 void Odometry::resetPose() {

@@ -49,7 +49,7 @@ class Motor {
   bool isOff() const { return off_; }
   float command() const { return cmd_; }
   const uint8_t* pins() const { return pin_; }
-  void feedback(int32_t counts, uint32_t t_us);  // encoder read (speed loop)
+  void feedback(int32_t counts, uint32_t t_us, float mm_per_count);  // encoder read (speed loop)
   float loopTarget() const { return sl_target_; }
   uint8_t kickState() const { return kick_.state(); }  // StictionKick IDLE / KICK / FADE
 

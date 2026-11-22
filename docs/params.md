@@ -81,6 +81,9 @@ Gains are br3ttb units: ki per second, kd seconds.
 | nav.blind_speed | 150 mm/s | GOTO speed cap with no range readings for 3 s (`rng.enable 0`); 0 = GOTO pauses too. EXPLORE always pauses |
 | mot.left_dir | 1 | Left motor wiring: -1 if its wires are swapped (fixed in software) |
 | mot.right_dir | 1 | Right motor wiring: -1 if its wires are swapped |
+| odo.wheel_d_mm | 66 | mean wheel diameter: mm per encoder count = π·d/4096 (odometry + wheel speeds). Set by Tune → Calibrate odometry (#14); CAD says 66–68.9 |
+| odo.track_mm | 126.8 | wheel separation (tyre centre to centre). Only scales the wheel-derived turn rate (`turn_rate_dps`): the pose heading comes from the gyro |
+| odo.lr_ratio | 1 | right ÷ left wheel diameter (mean stays `odo.wheel_d_mm`) |
 | nav.side_min_mm | 120 | wall closer than this to the body side (from the last ~1.5 s of range points): steer away + slow down; 0 = off (#62) |
 | nav.side_kp | 0.5 °/s per mm | how hard: turn = kp × mm inside `side_min_mm` |
 | nav.stuck_ms | 2500 | driving / turning but no progress (`stuck_mm`, or 15°) this long → BLOCKED, log `nav: stuck`, back off; 0 = off |

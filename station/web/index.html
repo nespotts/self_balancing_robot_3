@@ -216,6 +216,17 @@
       </div>
       <div id="bp-body" class="bp-body"></div>
     </div>
+    <!-- Calibrate odometry (issue #14): station/web/js/calib.js -->
+    <div class="card cal-card tb-only" id="cal-card">
+      <div class="sc-bar"><h3>Calibrate odometry</h3>
+        <span id="cal-status" class="muted"></span>
+        <button id="cal-more" class="ghost small" title="More">&#8943;</button>
+        <div class="menu" id="cal-menu" hidden>
+          <button id="cal-reset" class="warn">Forget this session's runs</button>
+        </div>
+      </div>
+      <div id="cal-body" class="cal-body"></div>
+    </div>
     <!-- wheels-up motor test (issue #16): station/web/js/motortest.js -->
     <div class="tm-only" id="motor-view"></div>
     <div class="card tune-chart tb-only">

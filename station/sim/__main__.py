@@ -47,12 +47,17 @@ def main(argv=None):
     ap.add_argument("--stiction", action="store_true",
                     help="balance on TT motors with static friction through the firmware motor layer (issue #69: "
                          "set mot.model 1 to see the stick-slip rock, mot.bk_gain 0 / 1 to compare)")
+    ap.add_argument("--miscal", action="store_true",
+                    help="odometry calibration demo (issue #14): the real wheels are 69.3 mm, track 131 mm, right wheel "
+                         "1.5 %% bigger, the gyro drifts 0.05 deg/s; the odo.* params keep their defaults")
     a = ap.parse_args(argv)
     host, _, port = a.listen.rpartition(":")
     remote = a.remote or a.remote_disarmed
     robot = DriftRobot(remote=remote, remote_armed=not a.remote_disarmed, seed=a.seed, head_error_deg=a.head_error,
                        drift_deg_min=a.drift, drift_scale=0.02 if a.drift else 0.0)
     robot.bench = a.bench
+    if a.miscal:
+        robot.set_hardware(wheel_d=69.3, track=131.0, lr=1.015, gyro_bias_dps=0.05)
     if a.stiction:
         robot.use_floor_wheels()
     if a.drain is not None:

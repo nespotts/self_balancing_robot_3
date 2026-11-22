@@ -63,7 +63,7 @@ struct MtIn {
 
 class MotorTest {
  public:
-  static constexpr float kMmPerCount = 3.14159265f * 66.0f / 4096.0f;  // config.h WHEEL_DIAMETER_MM
+  static constexpr float kMmPerCount = 3.14159265f * 66.0f / 4096.0f;  // odo.wheel_d_mm default
 
   void step(const MtIn& raw);
   bool driving() const { return state_ == S_RUN; }  // the test owns the motors

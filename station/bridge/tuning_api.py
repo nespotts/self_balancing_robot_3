@@ -15,7 +15,8 @@ Browser commands (WebSocket or POST /api/cmd), replies go to the sender, state c
   {"t":"motor","action":"fit"[, "session":"sbr3-....jsonl"]}     -> {"t":"motor_fit", ...} (this session's lines by default)
   {"t":"motor","action":"apply","params":{"mot.dz_l_fwd":5.7,...}}   only mot.* proposal params (never test/drive_mode)
   {"t":"balpoint","action":"start"|"apply"|"revert"|"stop"|"status"}  Find balance point (#52): see balance_point.py
-Pushed: score_state, score_runs, motor_state, presets, balpoint_state.
+  {"t":"calib","action":"start"|"measured"|"apply"|"revert"|"reset"|"stop"|"status"}  Calibrate odometry (#14): see odo_calib.py
+Pushed: score_state, score_runs, motor_state, presets, balpoint_state, calib_state.
 """
 import asyncio
 import collections
@@ -26,6 +27,7 @@ import time
 from . import link_protocol as lp
 from . import motor_fit, presets, scoring
 from .balance_point import BalancePoint
+from .odo_calib import OdoCalib
 
 RUNS_MAX = 60
 MT_LINES_MAX = 3000
@@ -48,6 +50,7 @@ class TuningTools:
         self.mt = motor_fit.LiveState()
         self.param_hist = collections.deque(maxlen=PARAM_HIST_MAX)   # (session, t, name, old, new)
         self.balpoint = BalancePoint(bridge)                           # Find balance point (#52)
+        self.calib = OdoCalib(bridge)                                  # Calibrate odometry (#14)
 
     # ------------------------------------------------------------------ hooks from the bridge
     def on_session(self):
@@ -73,15 +76,18 @@ class TuningTools:
 
     def on_tlm(self, d, now):
         self.balpoint.on_tlm(d, now)
+        self.calib.on_tlm(d, now)
 
     def tick(self, now):
         self.balpoint.tick(now)
+        self.calib.tick(now)
 
     def on_lost(self):
         self.balpoint.on_lost()
+        self.calib.on_lost()
 
     def hello_msgs(self):
-        return [self._state_msg(), self._runs_msg(), self._motor_msg(), self._presets_msg(), self.balpoint.msg()]
+        return [self._state_msg(), self._runs_msg(), self._motor_msg(), self._presets_msg(), self.balpoint.msg(), self.calib.msg()]
 
     # ------------------------------------------------------------------ helpers
     def _t(self):
@@ -129,6 +135,8 @@ class TuningTools:
                 return self._motor(m, action, who)
             if t == "balpoint":
                 return self.balpoint.command(m, who)
+            if t == "calib":
+                return self.calib.command(m, who)
         except ValueError as e:
             return {"t": "error", "text": str(e)}
         return {"t": "error", "text": "unknown command %r" % t}
