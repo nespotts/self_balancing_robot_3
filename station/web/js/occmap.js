@@ -158,6 +158,27 @@ for (const [id, t, key] of NUM) {
   };
 }
 $("set-correct").onchange = (e) => cmd({ t: "map", action: "set", settings: { correct: e.target.checked } });
+$("set-stopscan").onchange = (e) => cmd({ t: "map", action: "set", settings: { stop_scan: e.target.checked } });
+$("set-scanpause").onchange = (e) => cmd({ t: "plan", action: "set", settings: { scan_pause: e.target.checked } });
+
+// stop-and-scan pose corrections (#71): a toast when one is applied, the history behind the menu
+const fmtCorr = (e) => `${(e.mm / 10).toFixed(e.mm < 100 ? 1 : 0)} cm / ${Math.abs(e.dth).toFixed(1)}°`;
+let scanSeen = null;
+on("scan", (m) => {
+  const h = m.history || [], top = h[0];
+  if (scanSeen !== null && top && top.time + "/" + top.who !== scanSeen && top.ok) toast("Pose corrected " + fmtCorr(top), 3000);
+  scanSeen = top ? top.time + "/" + top.who : "";
+  const list = $("scan-list");
+  list.replaceChildren();
+  for (const e of h) {
+    const row = document.createElement("small"), t = new Date(e.time * 1000);
+    row.textContent = `${t.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}  ` +
+      (e.ok ? "corrected " + fmtCorr(e) : "kept: " + e.why) + (e.who !== "auto" ? " (asked)" : "");
+    list.append(row);
+  }
+  $("scan-hist").hidden = !h.length;
+});
+$("map-scan").onclick = () => { cmd({ t: "map", action: "scan" }); toast("Hold still: scanning…", 2500); $("map-menu").hidden = true; };
 
 function syncSettings() {
   for (const [id, t, key] of NUM) {
@@ -165,6 +186,8 @@ function syncSettings() {
     if (src && key in src && document.activeElement !== el) el.value = src[key];
   }
   if (occ.settings && "correct" in occ.settings) $("set-correct").checked = occ.settings.correct;
+  if (occ.settings && "stop_scan" in occ.settings) $("set-stopscan").checked = occ.settings.stop_scan;
+  if (plan.settings && "scan_pause" in plan.settings) $("set-scanpause").checked = plan.settings.scan_pause;
   const st = occ.stats || {};
   $("map-stats").textContent = st.readings != null
     ? `${occ.name ? occ.name + " · " : ""}${st.used} of ${st.readings} readings used · ${st.tilt} tilted · bridge CPU ${st.cpu_pct}%`
