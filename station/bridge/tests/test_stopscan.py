@@ -48,6 +48,12 @@ class Walls:
         return out
 
 
+def room_segs():
+    """The sim room, moved half a cell so its walls run through cell centres (on a cell edge a perfect raster
+    would put a wall half a cell off on one side of the room)."""
+    return [(x1 + 12.5, y1 + 12.5, x2 + 12.5, y2 + 12.5) for x1, y1, x2, y2 in Room().segs]
+
+
 def raster(segs, size_m=20.0):
     """A perfect map: free everywhere, sure walls on the segments."""
     g = Grid(size_m)
@@ -79,7 +85,7 @@ class TestMatcher(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_known_offset_recovered(self):
-        w = Walls(Room().segs, seed=3)
+        w = Walls(room_segs(), seed=3)
         g = raster(w.room.segs)
         cases = [((500, 300, 30), (60, -40, 2.0)), ((2000, 0, 10), (-50, 30, -1.5)),
                  ((0, 1000, -60), (40, 60, 3.0)), ((3300, 500, 120), (-70, -20, -2.5))]
@@ -92,7 +98,7 @@ class TestMatcher(unittest.TestCase):
             self.assertLess(abs(r["dth"] + err[2]), 1.0, (pose, r))
 
     def test_correct_pose_is_left_alone(self):
-        w = Walls(Room().segs, seed=4)
+        w = Walls(room_segs(), seed=4)
         g = raster(w.room.segs)
         scan, ref = scan_of(self.m, w.sweep(1500, -500, 90))
         r = scanmatch.match_scan(g, scan, ref[:2], ref[2])
@@ -101,7 +107,7 @@ class TestMatcher(unittest.TestCase):
 
     def test_long_featureless_corridor_is_rejected(self):
         # 1.2 m wide, 14 m long: nothing tells where along it the robot is (the sensors reach 2 m)
-        segs = [(-7000, -600, 7000, -600), (-7000, 600, 7000, 600)]
+        segs = [(-7000, -612.5, 7000, -612.5), (-7000, 612.5, 7000, 612.5)]
         w = Walls(segs, seed=5)
         g = raster(segs)
         scan, ref = scan_of(self.m, w.sweep(0, 0, 0, err=(80, 0, 0)))
@@ -111,7 +117,7 @@ class TestMatcher(unittest.TestCase):
         self.assertLess(abs(r["dth"]), 1.0, r)
 
     def test_unknown_area_is_rejected(self):
-        w = Walls(Room().segs)
+        w = Walls(room_segs())
         scan, ref = scan_of(self.m, w.sweep(500, 300, 0))
         r = scanmatch.match_scan(Grid(20.0), scan, ref[:2], ref[2])         # empty map
         self.assertFalse(r["ok"])
@@ -123,7 +129,7 @@ class TestMatcher(unittest.TestCase):
         self.assertIn("too few", r["why"])
 
     def test_correction_is_bounded(self):
-        w = Walls(Room().segs, seed=6)
+        w = Walls(room_segs(), seed=6)
         g = raster(w.room.segs)
         scan, ref = scan_of(self.m, w.sweep(1000, 500, 45, err=(400, 0, 0)))    # far outside the window
         r = scanmatch.match_scan(g, scan, ref[:2], ref[2])
@@ -137,7 +143,7 @@ class TestStopScanFlow(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.m = Mapper(self.tmp)
         self.m.settings["stop_scan"] = True
-        self.w = Walls(Room().segs, seed=7)
+        self.w = Walls(room_segs(), seed=7)
         self.m.grid = raster(self.w.room.segs)                         # a known map (the matcher has its own tests)
         self.m.n["used"] = 100
 

@@ -49,6 +49,7 @@ DEFAULTS = {
     "frontier_min_mm": 200.0,   # ignore frontier bits smaller than this
     "scan_pause": True,         # explore: stand still at each frontier goal for a stop-and-scan (#71; only
                                 # while the map's stop_scan correction is on)
+    "zones_block_manual": True,  # bridge: joystick cmd_vel that would drive into a zone / across a virtual wall -> 0 (#70)
 }
 LIMITS = {"robot_radius_mm": (20, 400), "margin_mm": (0, 500), "soft_mm": (0, 1000), "squeeze_mm": (0, 200),
           "frontier_min_mm": (50, 2000)}
@@ -83,8 +84,10 @@ def clean_settings(s, base):
 
 
 class CostMap:
-    def __init__(self, grid, settings=None, res_mm=50.0, margin_m=1.0, sure_walls=False, specks=None):
-        """sure_walls: only sure walls count (SURE_LUT); specks: fill unknown specks (default: = sure_walls)."""
+    def __init__(self, grid, settings=None, res_mm=50.0, margin_m=1.0, sure_walls=False, specks=None, zones=None):
+        """sure_walls: only sure walls count (SURE_LUT); specks: fill unknown specks (default: = sure_walls).
+        zones: a zones.ZoneView (#70): virtual walls / zone edges become walls before inflation, no-go insides and
+        the outside of the fence are blocked after it, slow zones cost more."""
         S = dict(DEFAULTS, **(settings or {}))
         self.lut = SURE_LUT if sure_walls else CLASS_LUT
         self.g = grid
@@ -94,6 +97,14 @@ class CostMap:
         T = grid.T
         if bb is None:
             bb = (grid.ntx // 2, grid.nty // 2, grid.ntx // 2, grid.nty // 2)
+        zb = zones.bbox() if zones else None
+        if zb:                                 # the costmap covers the zones too (a maze drawn on unmapped floor)
+            tm = grid.res * T
+            zt = [int((zb[0] - grid.x0) // tm), int((zb[1] - grid.y0) // tm), int((zb[2] - grid.x0) // tm),
+                  int((zb[3] - grid.y0) // tm)]
+            zt = [max(0, min(grid.ntx - 1, zt[0])), max(0, min(grid.nty - 1, zt[1])),
+                  max(0, min(grid.ntx - 1, zt[2])), max(0, min(grid.nty - 1, zt[3]))]
+            bb = (min(bb[0], zt[0]), min(bb[1], zt[1]), max(bb[2], zt[2]), max(bb[3], zt[3]))
         m = int(math.ceil(margin_m * 1000.0 / (grid.res * T)))
         tx0, ty0 = max(0, bb[0] - m), max(0, bb[1] - m)
         tx1, ty1 = min(grid.ntx - 1, bb[2] + m), min(grid.nty - 1, bb[3] + m)
@@ -108,7 +119,11 @@ class CostMap:
         self.centre = False          # squeeze maps (set by the Planner): shortcuts keep to the gap centre line (#68)
         self.hard_mm = S["robot_radius_mm"] + S["margin_mm"]
         self.inner_r = (S["robot_radius_mm"] + min(30.0, S["margin_mm"])) / self.res
+        if zones:
+            zones.mark_lines(self)
         self._inflate(S["robot_radius_mm"] + S["margin_mm"], S["soft_mm"])
+        if zones:
+            zones.mark_areas(self, BLOCKED, MARGIN)
         self.unknown_ok = bool(S["unknown_ok"])
 
     # ---------------------------------------------------------- build
@@ -538,6 +553,9 @@ class Planner:
         ss = getattr(getattr(bridge, "mapper", None), "stopscan", None)
         if ss is not None:
             ss.listeners.append(self.on_correction)
+        self.solve = None             # goto: the maze being solved (its exit gap counts as a wall, #70)
+        self.solve_t0 = 0.0
+        self.zone_hits = 0            # watchdog stops in this job (#70)
 
     # ---------------------------------------------------------- frames
     def robot_map_pose(self):
@@ -556,6 +574,7 @@ class Planner:
             kind = "squeeze" if self.squeeze else ("boost" if self.boost > 0 else "normal")
         s = dict(self.settings)
         g = self.b.mapper.grid
+        zones = self.zone_view()
         if kind == "boost":
             s["margin_mm"] += self.boost
         elif kind == "squeeze":
@@ -563,10 +582,35 @@ class Planner:
             # map is not range-weighted (see SURE_LUT)
             s["margin_mm"] = min(s["margin_mm"], s["squeeze_mm"])
             rw = self.b.mapper.settings.get("range_weight", False)
-            cm = CostMap(g, s, res_mm=g.res, sure_walls=not rw, specks=True)
+            cm = CostMap(g, s, res_mm=g.res, sure_walls=not rw, specks=True, zones=zones)
             cm.centre = True
             return cm
-        return CostMap(g, s)
+        return CostMap(g, s, zones=zones)
+
+    def zone_view(self):
+        """The map's zones (#70) as the planner sees them (Solve: that maze's exit closed), or None."""
+        z = getattr(self.b.mapper, "zones", None)
+        if z is None or not z.items:
+            return None
+        return z.view(close_exit=self.solve) if self.solve else z.view()
+
+    def zone_stop(self, why):
+        """The bridge's watchdog stopped the robot (HOLD): it is in a no-go zone / at a virtual wall / the fence.
+        Replan in a moment (the route keeps the margin again); give up after 3 in one job."""
+        if self.mode == "idle":
+            return
+        self.zone_hits += 1
+        if self.zone_hits > 3:
+            self.stop("stopped: %s (3 times - gave up)" % why)
+            return
+        self.replan_at = self.clock() + 1.5
+        self.last_check = self.clock()
+        self._set_status("stopped: %s - replanning" % why)
+
+    def zones_changed(self):
+        """Layers edited: check the route against them at the next tick."""
+        self.last_check = 0.0
+        self.last_plan = min(self.last_plan, self.clock() - 1.5)
 
     def _costmaps(self):
         """Costmaps to try in turn: boosted (after a stuck), normal, then squeezed (narrow gaps)."""
@@ -618,6 +662,8 @@ class Planner:
     def msg(self):
         return json.dumps({"t": "plan", "mode": self.mode, "status": self.status,
                            "dest": self.dest if self.mode == "goto" else None,
+                           "solve": {"maze": self.solve, "elapsed": round(self.clock() - self.solve_t0, 1)}
+                           if self.solve and self.mode == "goto" else None,
                            "path": [[round(x), round(y)] for x, y in self.to_odom(self.path)],
                            "goals": [[round(x), round(y)] for x, y in self.to_odom(self.goals)],
                            "settings": self.settings, "boost": self.boost, "squeeze": self.squeeze},
@@ -652,12 +698,25 @@ class Planner:
             return None
         if not self.b.tlm:
             return {"t": "error", "text": "no robot pose yet"}
+        if act == "solve":
+            # Solve a maze (#70): drive to its exit cell; its exit gap counts as a wall, so the route goes through
+            # the maze from the entrance (not round it); the time is shown and the best one kept with the maze
+            z = getattr(self.b.mapper, "zones", None)
+            it = z.find(str(m.get("maze"))) if z else None
+            if not it or it["kind"] != "maze":
+                return {"t": "error", "text": "no maze %s" % m.get("maze")}
+            self._begin_goto([tuple(it["exit"])], "maze exit", bool(m.get("arm")), solve=it["id"])
+            return None
         if act == "home" or (act == "goto" and m.get("place")):
             # a saved place (#53): {"action": "goto", "place": "Couch"} or {"action": "home"}
             name = HOME if act == "home" else str(m.get("place"))
             xy = self.b.mapper.place_xy(name)
             if xy is None:
                 return {"t": "error", "text": "no place called %s" % name}
+            zv = self.zone_view()
+            bad = zv.point_blocked(*xy) if zv else None
+            if bad:
+                return {"t": "error", "text": "%s: %s" % (name, bad)}
             self._begin_goto([xy], HOME if name.lower() == HOME.lower() else self.b.mapper.places.find(name)["name"],
                              bool(m.get("arm")))
             return None
@@ -673,6 +732,10 @@ class Planner:
                 goals.append((c * x - s * y + dx, s * x + c * y + dy))
             if not goals:
                 return {"t": "error", "text": "no goal"}
+            zv = self.zone_view()
+            bad = next((r for r in (zv.point_blocked(*g) for g in goals) if r), None) if zv else None
+            if bad:
+                return {"t": "error", "text": "not sent: " + bad}
             self._begin_goto(goals, None, bool(m.get("arm")))
             return None
         if act == "explore":
@@ -682,6 +745,7 @@ class Planner:
             self.started_at = self.last_scan_t = self.clock()
             self.holding, self.sent_goal, self.scan_wait = False, None, None
             self.blocked_plans = 0
+            self.solve, self.zone_hits = None, 0
             self._set_status("exploring")
             if self.b.tlm["mode"] != lp.MODE_EXPLORE:     # arm now (no remote): the sweep runs while armed
                 self.b.handle_command({"t": "set_mode", "mode": lp.MODE_EXPLORE, "arm": bool(m.get("arm"))},
@@ -691,11 +755,13 @@ class Planner:
             return None
         return {"t": "error", "text": "unknown plan action %r" % act}
 
-    def _begin_goto(self, goals, dest, arm):
-        """Plan + drive to map-frame goals. dest: the saved place's name (shown on the map), or None."""
+    def _begin_goto(self, goals, dest, arm, solve=None):
+        """Plan + drive to map-frame goals. dest: the saved place's name (shown on the map), or None.
+        solve: a maze id (Solve, #70)."""
         self.mode, self.goals, self.blacklist = "goto", goals[:20], []
         self.replan_at, self.squeeze = None, False
         self.dest = dest
+        self.solve, self.solve_t0, self.zone_hits = solve, self.clock(), 0
         self.arm = arm
         self.started_at = self.clock()
         self.blocked_plans = 0
@@ -730,6 +796,7 @@ class Planner:
         self.replan_at = None
         self.squeeze = False
         self.holding, self.scan_wait = False, None
+        self.solve = None
         self.mode, self.path, self.goals, self.goal = "idle", [], [], None
         if was != "idle" and why:
             self._set_status(why)
@@ -835,6 +902,9 @@ class Planner:
             self._set_status(res[1])
         else:   # fail
             self.mode, self.path, self.goal = "idle", [], None
+            if self.solve:
+                self.solve = None
+                res = (res[0], "maze: " + res[1])
             self._set_status(res[1])
 
     def on_correction(self, entry):
@@ -998,9 +1068,17 @@ class Planner:
             return
         if state == "arrived" and nav.get("nav_index", 0) >= nav.get("waypoint_count", 0):
             if self.mode == "goto":
-                dest = self.dest
-                self.mode, self.path = "idle", []
+                dest, solve = self.dest, self.solve
+                self.mode, self.path, self.solve = "idle", [], None
                 self._success()
+                if solve:
+                    secs = self.clock() - self.solve_t0
+                    z = self.b.mapper.zones
+                    z.maze_best(solve, secs)
+                    if hasattr(self.b.mapper, "zones_changed"):
+                        self.b.mapper.zones_changed()
+                    self._set_status("maze solved in %.1f s" % secs)
+                    return
                 self._set_status("arrived" if not dest else "arrived at " + dest)
                 return
             if self._scan_hold(now):

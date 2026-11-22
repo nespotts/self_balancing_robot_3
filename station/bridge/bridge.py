@@ -42,7 +42,12 @@ TICK_LATE_S = 0.2                 # warn in the log when the event loop was bloc
 TLM_HZ_GRACE_S = 10.0             # Tune closed this long ago -> put tlm.hz back (#46)
 # Commands that act on the robot: refused with an error while there is no link (#48)
 NEEDS_LINK = {"set_mode", "set_param", "cfg", "get_params", "goto", "event", "estop_release"}  # release: the robot latches too
-NEEDS_LINK_ACTION = {"preset": ("apply",), "motor": ("start", "apply"), "plan": ("goto", "explore", "home")}
+NEEDS_LINK_ACTION = {"preset": ("apply",), "motor": ("start", "apply"), "plan": ("goto", "explore", "home", "solve")}
+# Zones watchdog (#70): the firmware only knows real range obstacles, so the bridge enforces the virtual ones
+ZONE_TOL_MM = 20.0       # footprint = planner robot radius - this (pose noise; the planner keeps radius + margin)
+ZONE_HORIZON_S = 0.3     # joystick: block speed that would enter a zone within this
+ZONE_AGAIN_MM = 25.0     # after a stop, stop again only if the footprint gets this much deeper in
+ZONE_AUTO_MODES = (lp.MODE_GOTO, lp.MODE_EXPLORE)
 GO_HOME_RE = re.compile(r"^GO_HOME: to (-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)")   # the firmware's log line (#53)
 NO_LINK_TEXT = "robot not connected"
 POLLER_TIMEOUT_S = 3.0
@@ -171,6 +176,11 @@ class Bridge:
         self.estop_time = -10.0
         self.estop_repeats = []
         self.robot_estop = False        # robot reports its link E-stop latch (remote_flags, v4 firmware)
+        self.zone_prev = None           # zones watchdog (#70): last map-frame pose
+        self.zone_hold = {}             # zone key -> least depth since the watchdog stopped for it
+        self.zone_cap = None            # (param id, value before, cap) while a slow zone lowers nav.max_speed
+        self.zone_note = None           # last joystick block / cap reason (said once)
+        self.zone_alert = ""            # shown in status: why the watchdog last stopped the robot
 
         self.clients = set()
         self.pollers = {}               # ip -> last poll time (Kindle polling page, #11)
@@ -466,7 +476,8 @@ class Bridge:
                     self.send(lp.encode_cmd_vel(0.0, 0.0))  # one explicit stop, then silence
                     self.push_status()
                 else:
-                    self.send(lp.encode_cmd_vel(*self.cmd))
+                    self.send(lp.encode_cmd_vel(*self._cmd_out()))
+            self._zone_tick(now)
             while self.estop_repeats and now >= self.estop_repeats[0]:
                 self.estop_repeats.pop(0)
                 self.send(lp.encode_event(lp.EVT_LINK_ESTOP))
@@ -605,6 +616,7 @@ class Bridge:
             "tlm_boost": self.hz_base is not None,         # tlm.hz raised by the Tune page, restored when it closes
             "tlm_base": self.hz_base,                      # ... and what it goes back to
             "log_error": self.log.error,                   # why the session log is off ("" = fine)
+            "zone_alert": self.zone_alert,                 # zones watchdog (#70): last stop / joystick block
         }
 
     def health_ctx(self):
@@ -654,7 +666,7 @@ class Bridge:
             if not self.cmd_active:
                 self.cmd_active = True
                 self.push_status()
-            self.send(lp.encode_cmd_vel(*self.cmd))
+            self.send(lp.encode_cmd_vel(*self._cmd_out()))
             return None
         if t == "estop":
             self.do_estop(who)
@@ -686,7 +698,11 @@ class Bridge:
                 return self.handle_command({"t": "cfg", "action": p["name"][4:]}, who) \
                     if _num(m.get("value")) >= 0.5 else None
             v = _num(m.get("value"), p["value"], p["min"], p["max"])
-            self.send(lp.encode_set_param(pid, v))
+            if self.zone_cap and self.zone_cap[0] == pid:     # a slow zone holds nav.max_speed down: keep the cap
+                self.zone_cap = (pid, v, self.zone_cap[2])
+                self.send(lp.encode_set_param(pid, min(v, self.zone_cap[2])))
+            else:
+                self.send(lp.encode_set_param(pid, v))
             self.tools.param_changed(p["name"], p["value"], v)
             if p["name"] == "tlm.hz":
                 self._hz_note_set(p, v, who)
@@ -699,6 +715,8 @@ class Bridge:
             pid = next((i for i, p in self.params.items() if p["name"] == name), None) if name else None
             if pid is None:
                 return {"t": "error", "text": "robot has no %s param" % (name or m.get("action"))}
+            if name == "cfg.save":
+                self._zone_set_cap(None)        # never save a slow zone's temporary speed cap to EEPROM
             self.send(lp.encode_set_param(pid, 1.0))
             if name == "cfg.save":
                 self.hz_base = self.hz_restore_at = None      # saved on purpose: that rate is now the default
@@ -748,8 +766,13 @@ class Bridge:
             return self.mapper.command(m, who)
         elif t == "places":    # saved places on the map: add / rename / delete / list (#53)
             return self.mapper.places_command(m, who)
-        elif t == "plan":      # route planning / explore: goto / home / explore / stop / set
-            if self.estop and m.get("action") in ("goto", "explore", "home"):
+        elif t == "zones":     # virtual walls / no-go / fence / slow zones / mazes (#70)
+            r = self.mapper.zones_command(m, who, (self.tlm["x_mm"], self.tlm["y_mm"]) if self.tlm else None)
+            if r is None and m.get("action") != "list":
+                self.planner.zones_changed()
+            return r
+        elif t == "plan":      # route planning / explore: goto / home / explore / solve / stop / set
+            if self.estop and m.get("action") in ("goto", "explore", "home", "solve"):
                 return {"t": "error", "code": "estop", "text": "E-stop is on: release it first"}
             return self.planner.command(m, who)
         elif t == "ping":
@@ -757,6 +780,84 @@ class Bridge:
         else:
             return {"t": "error", "text": "unknown command %r" % t}
         return None
+
+    # ------------------------------------------------------------------ zones watchdog (#70)
+    def _zone_fp(self):
+        return max(20.0, self.planner.settings["robot_radius_mm"] - ZONE_TOL_MM)
+
+    def _cmd_out(self):
+        """The joystick's cmd_vel as forwarded: slow zones cap the speed; with zones_block_manual (default on) speed
+        that would drive into a no-go zone / out of the fence / across a virtual wall within ~0.3 s becomes 0
+        (turning, and driving back out, stay possible)."""
+        s, w = self.cmd
+        t = self.tlm
+        zv = self.mapper.zones.view()
+        if not (s and t and zv):
+            return s, w
+        x, y, h = self.mapper.map_pose(t["x_mm"], t["y_mm"], t["heading_deg"])
+        s2, w2, why = zv.manual_filter(x, y, h, s, w, self._zone_fp(), v_now=t.get("speed_mms", 0.0),
+                                       horizon=ZONE_HORIZON_S, block=bool(self.planner.settings.get("zones_block_manual", True)))
+        if why != self.zone_note:
+            self.zone_note = why
+            if why:
+                self.say("zones: " + why)
+                if why.startswith("blocked"):
+                    self.zone_alert = why
+                    self.push_status()
+        return s2, w2
+
+    def _zone_tick(self, now):
+        """25 Hz, link up. GOTO / EXPLORE: footprint in a no-go zone, out of the fence or at / across a virtual wall
+        -> cmd_vel 0 + HOLD (it keeps balancing; never IDLE, never arms) and the planner replans. Slow zones lower
+        nav.max_speed while the robot drives itself in (or near) one, put back after."""
+        t = self.tlm
+        zv = self.mapper.zones.view()
+        if not t or not zv or now - self.tlm_time > 0.5:
+            self.zone_prev = None
+            self.zone_hold = {}
+            self._zone_set_cap(None)
+            return
+        x, y, _h = self.mapper.map_pose(t["x_mm"], t["y_mm"], t["heading_deg"])
+        prev, self.zone_prev = self.zone_prev, (x, y)
+        v = zv.depths(x, y, self._zone_fp(), prev)
+        self.zone_hold = {k: min(d, v[k][0]) for k, d in self.zone_hold.items() if k in v}
+        auto = t["mode"] in ZONE_AUTO_MODES and (t["status"] & lp.TLM_ARMED) and not self.estop
+        if auto:
+            worse = [txt for k, (d, txt, _kind) in v.items() if k not in self.zone_hold or d > self.zone_hold[k] + ZONE_AGAIN_MM]
+            if worse:
+                for k, (d, _txt, _kind) in v.items():
+                    self.zone_hold[k] = d
+                self._zone_stop(worse[0])
+                auto = False
+        self._zone_set_cap(zv.slow_cap(x, y, grow=150.0) if auto else None)
+
+    def _zone_stop(self, why):
+        self.zone_alert = "stopped: " + why
+        self.say("zones: robot %s - stopping (HOLD)" % why)
+        self.log.record("zone", {"why": why})
+        self.send(lp.encode_cmd_vel(0.0, 0.0))
+        self.send_mode(lp.MODE_HOLD)                       # no arm flag: an armed robot only changes mode
+        self.planner.zone_stop(why)
+        self.push_status()
+
+    def _zone_set_cap(self, cap):
+        pid = next((i for i, p in self.params.items() if p["name"] == "nav.max_speed"), None)
+        if cap is not None and pid is not None:
+            if self.zone_cap is None:
+                before = self.params[pid]["value"]
+                if before <= cap:
+                    return
+                self.zone_cap = (pid, before, cap)
+                self.send(lp.encode_set_param(pid, cap))
+                self.say("zones: slow zone - nav.max_speed %d mm/s for now (was %d)" % (cap, before))
+            elif self.zone_cap[2] != cap:
+                self.zone_cap = (pid, self.zone_cap[1], cap)
+                self.send(lp.encode_set_param(pid, min(cap, self.zone_cap[1])))
+        elif self.zone_cap is not None and self.link:
+            pid, before, _cap = self.zone_cap
+            self.zone_cap = None
+            self.send(lp.encode_set_param(pid, before))
+            self.say("zones: out of the slow zone - nav.max_speed back to %d mm/s" % before)
 
     def send_mode(self, mode, arm=False):
         """SET_MODE. arm (an explicit user arm step, e.g. the two-tap Arm & Balance): EVT_LINK_ARM first, so
@@ -831,6 +932,7 @@ class Bridge:
         ws.send(self.mapper.full_msg())
         ws.send(self.mapper.places_msg())
         ws.send(self.mapper.scan_msg())                     # stop-and-scan corrections (#71)
+        ws.send(self.mapper.zones_msg())
         ws.send(self.planner.msg())
         for item in list(self.logs)[-60:]:
             ws.send(json.dumps(dict(t="log", **{k: v for k, v in item.items() if k != "t"}, ts=item["t"])))

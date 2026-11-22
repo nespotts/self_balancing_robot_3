@@ -160,6 +160,34 @@ button.ask { background: var(--orange); border-color: #ff8a5c; }
 .wp-count { flex: 1; font-weight: 600; padding-left: 6px; }
 .wp-bar #wp-go { min-width: 88px; }
 @media (min-width: 900px) { .wp-bar { left: 50%; right: auto; transform: translateX(-50%); min-width: 460px; } }
+/* zones: draw bar, sheet, maze timer (#70) */
+body.drawing .wp-bar, body.drawing .place-sheet:not(.zone-sheet) { display: none; }
+.draw-bar { position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 26; display: flex; flex-direction: column; gap: 8px;
+  background: rgba(26, 26, 25, .96); border: 1px solid var(--line); border-radius: 14px; padding: 8px; }
+.draw-tools { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+.draw-tools button { height: 50px; padding: 4px 2px; font-size: 13px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+.draw-tools button.on { border-color: var(--blue); color: #9cc6ff; background: #1f2b3a; }
+.sw { display: block; width: 22px; height: 10px; border-radius: 2px; font-style: normal; font-size: 11px; line-height: 10px; }
+.sw-wall { background: #a3241c; box-shadow: 0 0 0 1.5px #ff8f7a; height: 5px; margin: 2px 0; }
+.sw-nogo { background: repeating-linear-gradient(45deg, #e0413f 0 2px, transparent 2px 5px); border: 1.5px solid #e0413f; }
+.sw-fence { border-top: 3px dashed #4fd1a1; height: 0; margin: 4px 0; border-radius: 0; }
+.sw-slow { background: rgba(232, 163, 23, .3); border: 1.5px solid #e8a317; }
+.sw-maze { border: 2px solid #ff8f7a; border-top-color: transparent; background: linear-gradient(90deg, transparent 45%, #ff8f7a 45% 60%, transparent 60%); }
+.sw-del { color: var(--bad); height: 12px; text-align: center; }
+.draw-row { display: flex; gap: 8px; align-items: center; }
+.draw-row button { height: 46px; }
+.draw-row #draw-shape { width: 46px; padding: 0; font-size: 20px; }
+.draw-hint { flex: 1; color: var(--text-2); font-size: 13px; padding-left: 4px; line-height: 1.3; }
+.zone-sheet { bottom: 136px; z-index: 27; }
+.zone-sheet .ps-row button { flex: 1; height: 46px; }
+.zone-sheet .ps-row button.primary { flex: 1.4; }
+.zs-form { display: flex; gap: 10px; flex-wrap: wrap; }
+.zs-form label, .zs-speed { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--text-2); }
+.zs-form input, .zs-speed input { width: 64px; font: inherit; background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+.zs-speed { flex: 1.4; }
+.maze-timer { position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%); z-index: 20; background: rgba(232, 163, 23, .92);
+  color: #151514; font-weight: 700; border-radius: 10px; padding: 8px 14px; font-variant-numeric: tabular-nums; pointer-events: none; }
+@media (min-width: 900px) { .draw-bar { left: 50%; right: auto; transform: translateX(-50%); width: 600px; } .zone-sheet { bottom: 132px; } }
 
 /* ---------- drive ---------- */
 #view-drive { padding: 12px; }
