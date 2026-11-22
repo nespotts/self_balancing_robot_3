@@ -50,7 +50,7 @@ driving by itself within ~6 s and keeps balancing: [safety](../docs/safety.md).
 | Tab | |
 |---|---|
 | **Control** | Arm / Disarm, mode buttons, joystick / WASD, Tilt on the phone |
-| **Map** | tap waypoints, **Go**, **Explore** |
+| **Map** | tap waypoints, **Go**, **Explore**; ⋯ → **Draw**: virtual walls, no-go zones, fence, slow zones, mazes |
 | **Sensors** | both range sensors, last sweep |
 | **Tune** | live PID, **Find balance point**, **Calibrate odometry**, presets, motor test |
 | **Plots** | any signal vs time |
@@ -78,6 +78,15 @@ Places (saved spots on the map, **Go here**, Home):
 <img src="docs/screenshots/phone-places-menu.png" width="30%">
 </p>
 <p>Places on the map, tap a place, the menu. <a href="../docs/station-features.md">Details</a></p>
+
+Walls, zones and mazes (`python -m station.sim --maze` builds them for real in the sim):
+
+<p>
+<img src="docs/screenshots/phone-zones-draw.png" width="30%">
+<img src="docs/screenshots/phone-maze.png" width="30%">
+<img src="docs/screenshots/phone-maze-solve.png" width="30%">
+</p>
+<p>Draw: a slow zone selected, a maze, Solve with the timer. <a href="../docs/station-features.md#walls-zones-and-mazes">Details</a></p>
 
 Falls (black-box recorder):
 

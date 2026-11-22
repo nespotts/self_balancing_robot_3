@@ -50,6 +50,10 @@ def main(argv=None):
     ap.add_argument("--miscal", action="store_true",
                     help="odometry calibration demo (issue #14): the real wheels are 69.3 mm, track 131 mm, right wheel "
                          "1.5 %% bigger, the gyro drifts 0.05 deg/s; the odo.* params keep their defaults")
+    ap.add_argument("--maze", nargs="?", const="3x3", default=None, metavar="WxH",
+                    help="maze test room (#70): only the outer walls; the map's virtual walls and mazes are built as "
+                         "real walls in the sim (live, as you draw them); starts with a random W x H m maze (default 3x3) "
+                         "ahead of the robot. Map > Draw > Maze > Solve drives through it")
     a = ap.parse_args(argv)
     host, _, port = a.listen.rpartition(":")
     remote = a.remote or a.remote_disarmed
@@ -58,6 +62,9 @@ def main(argv=None):
     robot.bench = a.bench
     if a.miscal:
         robot.set_hardware(wheel_d=69.3, track=131.0, lr=1.015, gyro_bias_dps=0.05)
+    if a.maze:
+        from station.sim.sim import Room
+        robot.room = Room(empty=True)
     if a.stiction:
         robot.use_floor_wheels()
     if a.drain is not None:
@@ -75,6 +82,15 @@ def main(argv=None):
                        preset_dir=os.environ.get("SBR3_PRESET_DIR", "~/sbr3-presets"),
                        falls_dir=os.environ.get("SBR3_FALLS_DIR", "~/sbr3-falls"))
             jobs.append(b.run())
+            if a.maze:
+                from station.bridge.zones import wall_segments
+                b.mapper.zone_listeners.append(lambda z: robot.room.set_extra(wall_segments(z.items)))
+                try:
+                    w, h = (float(v) * 1000 for v in a.maze.lower().split("x"))
+                except ValueError:
+                    w = h = 3000.0
+                b.mapper.zones_command({"action": "maze", "x": 1700, "y": 250, "w": min(w, 4200), "h": min(h, 3300)},
+                                       "sim", robot_xy=(0.0, 0.0))
             if a.tour:
                 jobs.append(tour(b))
             if a.shove:

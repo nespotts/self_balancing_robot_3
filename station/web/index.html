@@ -47,6 +47,7 @@
     </div>
     <div class="menu" id="map-menu" hidden>
       <button id="map-home" class="primary">Go home</button>
+      <button id="map-draw">Draw walls, zones, maze…</button>
       <label><input type="checkbox" id="lay-ranges" checked> Range points <span class="sens-key"><i class="s0"></i>front <i class="s1"></i>rear</span></label>
       <label><input type="checkbox" id="lay-track" checked> Track</label>
       <label><input type="checkbox" id="lay-grid" checked> Grid</label>
@@ -64,6 +65,7 @@
         <label class="num">Prefer more room <input type="number" id="set-soft" min="0" max="1000" step="10"> mm</label>
         <label class="num">Narrow gaps: keep <input type="number" id="set-squeeze" min="0" max="200" step="5"> mm</label>
         <label class="num">Robot radius <input type="number" id="set-radius" min="20" max="400" step="5"> mm</label>
+        <label><input type="checkbox" id="set-zblock" checked> Joystick can't drive into zones</label>
         <label class="num">Skip readings tilted over <input type="number" id="set-pitch" min="0.5" max="45" step="0.5"> °</label>
         <label class="num">“No target” = free to <input type="number" id="set-notarget" min="0" max="4000" step="100"> mm</label>
         <label><input type="checkbox" id="set-correct"> Correct drift (experimental)</label>
@@ -80,6 +82,25 @@
       <div class="ps-extra" id="ps-extra" hidden><button id="ps-rename">Rename…</button><button id="ps-del" class="warn">Delete…</button></div>
     </div>
     <div class="map-info" id="map-info"></div>
+    <div class="maze-timer" id="maze-timer" hidden></div>
+    <div class="place-sheet zone-sheet" id="zone-sheet" hidden></div>
+    <div class="draw-bar" id="draw-bar" hidden>
+      <div class="draw-tools">
+        <button data-tool="wall"><i class="sw sw-wall"></i>Wall</button>
+        <button data-tool="nogo"><i class="sw sw-nogo"></i>No-go</button>
+        <button data-tool="fence"><i class="sw sw-fence"></i>Fence</button>
+        <button data-tool="slow"><i class="sw sw-slow"></i>Slow</button>
+        <button data-tool="maze"><i class="sw sw-maze"></i>Maze</button>
+        <button data-tool="delete"><i class="sw sw-del">✕</i>Delete</button>
+      </div>
+      <div class="draw-row">
+        <span class="draw-hint" id="draw-hint"></span>
+        <button id="draw-shape">▭</button>
+        <button id="draw-undo">Undo</button>
+        <button id="draw-finish" class="primary">✓</button>
+        <button id="draw-done">Done</button>
+      </div>
+    </div>
     <div class="wp-bar" id="wp-bar">
       <span class="wp-hint" id="wp-hint">Tap to add waypoints · hold to save a place</span>
       <span class="wp-count" id="wp-count"></span>

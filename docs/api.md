@@ -41,10 +41,12 @@ rm /tmp/sbr3-bridge.release                   # bridge reconnects
 | `{"t":"goto","points":[[x,y],...],"go":true}` / `{"t":"event","event":3}` | `go` + `"arm":true` arms (no remote); same for `{"t":"plan","action":"goto\|explore","arm":true}` |
 | `{"t":"places","action":"add","name":"Couch","x":1200,"y":300}` | saved place on the map (see **Saved places** below). `rename` (`name`, `new`), `delete` (`name`), `list`. `x`/`y` are odometry mm, like `goto` |
 | `{"t":"plan","action":"home"}` / `{"t":"plan","action":"goto","place":"Couch"}` | plan a route to Home / a saved place (`arm` as for goto) |
+| `{"t":"zones","action":"add","kind":"nogo","pts":[[x,y],...]}` | virtual walls / no-go / fence / slow zones / mazes (see **Zones** below) |
+| `{"t":"plan","action":"solve","maze":"m4"}` | drive through that maze to its exit cell, timed (`arm` as for goto) |
 | `{"t":"sub","tune":true}` | receive every telemetry frame as `{"t":"tune","cols":[...],"rows":[...]}` |
 | `{"t":"preset"\|"score"\|"motor"\|"balpoint"\|"calib","action":...}` | Tune tools: see the docstring of `bridge/tuning_api.py` |
 
-Receive: `hello`, `status`, `health` (1 Hz: preflight, tiles, battery minutes; also `GET /api/health`), `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`, `map`, `plan`, `places`,
+Receive: `hello`, `status`, `health` (1 Hz: preflight, tiles, battery minutes; also `GET /api/health`), `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`, `map`, `plan`, `places`, `zones`,
 and for the Tune tools `presets`, `score_state`, `score_runs`, `motor_state`, `motor_fit`, `balpoint_state`, `calib_state`.
 `ranges.pts` rows (every reading, batched at 25 Hz): `[i, hit_x, hit_y, sensor_x, sensor_y, valid, tilt, pi_ms, sensor_id, sensor_angle_deg, range_mm]`
 (sensor 0 = front / XSHUT 34, 1 = rear / XSHUT 28; angle in the robot frame, + = CCW; raw mm as sent). `status.rng_hz` = readings/s per sensor.
@@ -76,6 +78,25 @@ Names on the map (Home, Couch, ...), stored with the map in `~/sbr3-maps/<map>.p
 | no map yet | the straight line stays, bridge log says so |
 | disarmed or latched (the robot ignored the request) | nothing |
 | planning fails | the straight line stays, bridge log: "go-home route failed" |
+
+### Zones
+
+Virtual walls, no-go zones, the keep-in fence, slow zones and mazes, stored with the map in `~/sbr3-maps/<map>.zones.json`
+(map frame, mm; an unsaved map autosaves to `autosave.zones.json`). Points are sent in odometry mm, like `goto`.
+
+| `zones` action | |
+|---|---|
+| `add` | `kind` `wall` (polyline, 2+ points) / `nogo` / `fence` / `slow` (polygons, 3+ points, at least 0.01 m²), `pts`; `slow`: `speed` mm/s (30-500, default 120). A new fence replaces the old one. Max 100 items, 64 points each |
+| `update` | `id`, `pts` and / or `speed` (mazes: no) |
+| `delete` / `clear` / `undo` | `id` / optional `kind` (none = all) / the last change (30 kept) |
+| `maze` | `x`, `y` centre, `w`, `h` mm (default 3000), `cell` mm (400-1500, default 700), `seed` (optional). Random perfect maze, 2-12 cells a side, entrance on the side facing the robot, exit opposite |
+| `list` | send the layers again |
+| reply | `{"t":"zones","map":"name","undo":3,"items":[{"id":"n2","kind":"nogo","pts":[[x,y],...]},{"id":"s3","kind":"slow","pts":[...],"speed":100},{"id":"m4","kind":"maze","x0":..,"y0":..,"cols":4,"rows":4,"cell":700,"seed":..,"walls":[[x1,y1,x2,y2],...],"entry":[x,y],"entry_in":[x,y],"exit":[x,y],"exit_out":[x,y],"exit_gap":[x1,y1,x2,y2],"best_s":51.1}]}` to every browser after a change and on connect; errors: `{"t":"error","text":"zones: ..."}` |
+
+`plan` `solve` (`maze` id): a goto to the maze's exit cell with its exit gap counted as a wall, so the route goes in at the entrance.
+`plan` messages carry `"solve":{"maze":"m4","elapsed":12.3}` meanwhile; at the end `status` = "maze solved in 51.1 s" and the best time is
+kept in the maze (`best_s`). A `goto` / place inside a no-go zone or outside the fence is refused ("not sent: ..."). `status.zone_alert` =
+the watchdog's last stop / joystick block. Planner setting `zones_block_manual` (default true): see [safety](safety.md#virtual-walls-and-zones).
 
 ### Who may command the robot
 
