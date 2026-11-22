@@ -111,6 +111,42 @@ A push, driving, disarm, E-stop, lost link or someone else touching the offset a
 usual EEPROM save (motors off). Browser API: `{"t":"balpoint","action":"start"|"apply"|"revert"|"stop"|"status"}`
 (`start` also takes `"auto":true` to apply each step itself, `settle_s`, `window_s`, `rounds`); state arrives as `balpoint_state`.
 Sim: set `bal.offset_deg` wrong (real balance point 3.15) and run it. Screenshots: `--prep-balpoint balpoint`.
+### Tune → Balance: Calibrate odometry (issue #14)
+
+<p>
+<img src="img/odo-square.svg" width="70%">
+</p>
+<p>
+<img src="../station/docs/screenshots/phone-calib-measure.png" width="30%">
+<img src="../station/docs/screenshots/phone-calib-proposal.png" width="30%">
+</p>
+
+The map and the places are only as good as the odometry: **distance** = wheel travel (`odo.wheel_d_mm`,
+`odo.lr_ratio`), **direction** = the gyro. Four short steps, each needs the robot armed (two taps), standing, and
+your tap on **Start**. Robot speed is held at 120 mm/s (limit 150), the obstacle stop stays on.
+
+| Step | You do | You get |
+|---|---|---|
+| **Straight run** (2 m) | tape mark under the wheel centres, robot drives ahead, type the tape distance | `odo.wheel_d_mm` |
+| **Square, clockwise** (1 m) | mark, robot drives the square back to the mark, type how far it ended (ahead / left, cm) | closing error, `odo.track_mm`, `odo.lr_ratio` |
+| **Square, counter-clockwise** | same, other way (needed to split the errors, UMBmark) | |
+| **Gyro drift** (60 s) | nothing, hands off | °/min the gyro walks (under 1 is fine) |
+
+```mermaid
+flowchart LR
+  A[Straight run<br>tape] --> B[Square cw + ccw<br>end offset] --> C[Proposed values] --> D[Apply] --> E[Square again:<br>closes?] --> F[Save to robot]
+```
+
+How the numbers come out: the tape distance gives the wheel diameter (`new = old × tape / robot`). The track width and
+left/right ratio come from the wheels against the gyro over all runs (least squares: wheel travel difference =
+track × gyro turn + ratio error × distance), no tape needed. The square's end offsets are shown as the closing error
+and as the textbook Borenstein UMBmark numbers (`E_b`, `E_d`) for comparison. **Apply** sets the params (**Undo**
+restores them), **Save to robot** is the usual EEPROM save (motors off). Run the square again afterwards: it should end
+within a few cm of the mark. STOP, Disarm, E-stop, a push or a fall end a run at once and put the speed limit back; the bridge
+never arms. Browser API: `{"t":"calib","action":"start"|"measured"|"apply"|"revert"|"reset"|"stop"|"status"}`, state arrives as
+`calib_state` (`station/bridge/odo_calib.py`). Sim: `SimRobot.set_hardware(wheel_d, track, lr, gyro_bias_dps)` makes the real robot
+differ from the `odo.*` params; `test_odo_calib.py` recovers it.
+
 ### Tune → Motor test (wheels up)
 
 Robot on a stand, wheels off the ground, remote in IDLE + ARMED. Pick All / Dead zone / Speed curve / Reversal,

@@ -47,6 +47,9 @@ def main(argv=None):
     ap.add_argument("--stiction", action="store_true",
                     help="balance on TT motors with static friction through the firmware motor layer (issue #69: "
                          "set mot.model 1 to see the stick-slip rock, mot.bk_gain 0 / 1 to compare)")
+    ap.add_argument("--miscal", action="store_true",
+                    help="odometry calibration demo (issue #14): the real wheels are 69.3 mm, track 131 mm, right wheel "
+                         "1.5 %% bigger, the gyro drifts 0.05 deg/s; the odo.* params keep their defaults")
     ap.add_argument("--maze", nargs="?", const="3x3", default=None, metavar="WxH",
                     help="maze test room (#70): only the outer walls; the map's virtual walls and mazes are built as "
                          "real walls in the sim (live, as you draw them); starts with a random W x H m maze (default 3x3) "
@@ -57,6 +60,8 @@ def main(argv=None):
     robot = DriftRobot(remote=remote, remote_armed=not a.remote_disarmed, seed=a.seed, head_error_deg=a.head_error,
                        drift_deg_min=a.drift, drift_scale=0.02 if a.drift else 0.0)
     robot.bench = a.bench
+    if a.miscal:
+        robot.set_hardware(wheel_d=69.3, track=131.0, lr=1.015, gyro_bias_dps=0.05)
     if a.maze:
         from station.sim.sim import Room
         robot.room = Room(empty=True)

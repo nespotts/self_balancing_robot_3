@@ -107,6 +107,8 @@ PARAMS = [
     ("mot.bk_r_fwd", 2.73, 0.0, 8.0), ("mot.bk_r_rev", 2.49, 0.0, 8.0),
     ("mot.bk_gain", 1.0, 0.0, 1.5), ("mot.bk_ms", 80.0, 0.0, 300.0),
     ("mot.bk_band", 0.03, 0.0, 0.3), ("mot.bk_mms", 15.0, 1.0, 200.0),
+    # issue #14: odometry calibration (Station: Tune, Calibrate odometry)
+    ("odo.wheel_d_mm", 66.0, 40.0, 100.0), ("odo.track_mm", 126.8, 80.0, 200.0), ("odo.lr_ratio", 1.0, 0.9, 1.1),
 ]
 CELLS = 3
 WAYPOINT_MAX = 32         # src/config.h
@@ -959,6 +961,12 @@ class SimRobot:
         # odometry frame (reset with EVT_RESET_POSE)
         self.ox = self.oy = 0.0
         self.oth = 0.0
+        # sim-only (issue #14): the real wheels / track / gyro, when they differ from the odo.* params.
+        # None = the odometry is exact (the pose is the true pose). See set_hardware().
+        self.hw = None
+        self.odx = self.ody = 0.0     # odometry pose integrated from the (mis-scaled) wheel travel
+        self.gyro_bias = 0.0          # deg/s the gyro heading drifts
+        self.gdrift = 0.0             # deg of drift so far
         self.last_hb = -10.0
         self.pi_link = False
         self.cmd = (0.0, 0.0)
@@ -1000,8 +1008,30 @@ class SimRobot:
     def t_us(self):
         return int(self.t * 1e6) & 0xFFFFFFFF
 
+    def set_hardware(self, wheel_d=66.0, track=TRACK_MM, lr=1.0, gyro_bias_dps=0.0):
+        """Sim-only: the REAL mean wheel diameter, track width and right/left diameter ratio, and the gyro drift.
+        The robot's odometry then uses its odo.* params against them, so a wrong param gives a wrong pose
+        (what the Calibrate odometry tool measures and fixes)."""
+        self.hw = {"d": float(wheel_d), "track": float(track), "lr": float(lr)}
+        self.gyro_bias = float(gyro_bias_dps)
+        self.odx = self.ody = 0.0
+
+    def track_mm(self):
+        return self.hw["track"] if self.hw else TRACK_MM
+
+    def wheel_scale(self):
+        """(left, right): odometry mm per true mm = param diameter / real diameter, per wheel."""
+        if not self.hw:
+            return 1.0, 1.0
+        d, r = self.P("odo.wheel_d_mm"), self.P("odo.lr_ratio")
+        pl = 2.0 * d / (1.0 + r)
+        tl = 2.0 * self.hw["d"] / (1.0 + self.hw["lr"])
+        return pl / tl, r * pl / (self.hw["lr"] * tl)
+
     def odom(self):
         """Odometry pose (what the robot reports): world pose relative to the last pose reset."""
+        if self.hw:
+            return self.odx, self.ody, self.TH - self.oth + self.gdrift
         dx, dy = self.X - self.ox, self.Y - self.oy
         c, s = math.cos(math.radians(-self.oth)), math.sin(math.radians(-self.oth))
         return dx * c - dy * s, dx * s + dy * c, self.TH - self.oth
@@ -1116,6 +1146,7 @@ class SimRobot:
         elif ev == lp.EVT_RESET_POSE:
             h_old = th
             self.ox, self.oy, self.oth = self.X, self.Y, self.TH
+            self.odx = self.ody = self.gdrift = 0.0
             self.ctl.heading_sp -= h_old   # keep the heading target where it physically was
             self.nav.on_pose_reset()
             self.log("pose reset (waypoints cleared)")
@@ -1169,7 +1200,7 @@ class SimRobot:
         x, y, th = self.odom()
         return {"now_ms": int(now * 1000.0), "mode": self.mode, "upright": bool(self.ctl.out.get("upright")),
                 "live": self.supervised(), "x": x, "y": y, "heading": th, "speed": self.speed_f,
-                "yaw_rate": math.degrees((self.vr - self.vl) / TRACK_MM),
+                "yaw_rate": self._wheel_turn_rate(),
                 "max_speed": self.P("drv.max_speed"), "max_turn": self.P("drv.max_turn")}
 
     def _targets(self, now):
@@ -1254,9 +1285,9 @@ class SimRobot:
         # sensors (what the firmware sees)
         pitch = math.degrees(self.theta) + IMU_MOUNT_DEG + rng.gauss(0, 0.015)
         pitch_rate = math.degrees(self.theta_rate) + rng.gauss(0, 0.4)
-        yaw_rate = math.degrees((self.vr - self.vl) / TRACK_MM)
+        yaw_rate = math.degrees((self.vr - self.vl) / self.track_mm())
         ctl_in = {"dt": dt, "now": now, "pitch": pitch, "pitch_rate": pitch_rate, "roll": rng.gauss(0, 0.2),
-                  "heading": self.TH - self.oth, "yaw_rate": yaw_rate + rng.gauss(0, 0.3),
+                  "heading": self.TH - self.oth + self.gdrift, "yaw_rate": yaw_rate + rng.gauss(0, 0.3),
                   "speed": self.speed_f, "speed_ok": True, "target_speed": v_t, "target_turn": w_t,
                   "enable": self.mode != lp.MODE_IDLE}
         o = self.ctl.step(ctl_in)
@@ -1294,7 +1325,8 @@ class SimRobot:
         v = (self.vl + self.vr) / 2
         acc = (v - self.v_prev) / dt / 1000.0    # m/s^2
         self.v_prev = v
-        self.speed_f += (v - self.speed_f) * min(1.0, dt / 0.04)
+        sl, sr = self.wheel_scale()
+        self.speed_f += ((self.vl * sl + self.vr * sr) / 2 - self.speed_f) * min(1.0, dt / 0.04)
 
         # inverted pendulum + a hand that stands the robot up when it is armed but lying down
         lying = abs(self.theta) >= math.radians(LIE_DEG) - 1e-6
@@ -1314,12 +1346,18 @@ class SimRobot:
 
         stand_pose = (self.X, self.Y, self.TH) if self.on_stand else None
         # move (stop at walls)
-        w = math.degrees((self.vr - self.vl) / TRACK_MM)
+        w = math.degrees((self.vr - self.vl) / self.track_mm())
         self.TH += w * dt
+        self.gdrift += self.gyro_bias * dt
         nx = self.X + v * math.cos(math.radians(self.TH)) * dt
         ny = self.Y + v * math.sin(math.radians(self.TH)) * dt
         if abs(v) < 1e-3 or self.room.clearance(nx, ny) > ROBOT_RADIUS:
             self.X, self.Y = nx, ny
+            if self.hw:     # odometry: mis-scaled wheel travel along the (gyro) heading
+                hh = math.radians(self.TH - self.oth + self.gdrift)
+                dd = (self.vl * sl + self.vr * sr) / 2 * dt
+                self.odx += dd * math.cos(hh)
+                self.ody += dd * math.sin(hh)
         else:
             self.vl = self.vr = self.v_prev = 0.0
             for fw in self.floor or ():
@@ -1420,6 +1458,13 @@ class SimRobot:
         if self.on_stand:
             self.motor_l, self.motor_r = self.mtest.duty
 
+    def _wheel_turn_rate(self):
+        """Turn rate from the wheels (firmware: (right - left) / odo.track_mm), deg/s."""
+        if not self.hw:
+            return math.degrees((self.vr - self.vl) / TRACK_MM)
+        sl, sr = self.wheel_scale()
+        return math.degrees((self.vr * sr - self.vl * sl) / self.P("odo.track_mm"))
+
     def _telemetry(self, o, pitch, pitch_rate, yaw_rate, w, batt_v):
         rng = self.rng
         x, y, th = self.odom()
@@ -1446,9 +1491,10 @@ class SimRobot:
             "radio_ok": 1 if self.radio_live() else 0,
             "pitch_deg": pitch, "pitch_rate_dps": pitch_rate, "roll_deg": rng.gauss(0, 0.2),
             "heading_deg": th, "yaw_rate_dps": yaw_rate,
-            "x_mm": x, "y_mm": y, "speed_mms": self.speed_f, "turn_rate_dps": w,
+            "x_mm": x, "y_mm": y, "speed_mms": self.speed_f, "turn_rate_dps": self._wheel_turn_rate() if self.hw else w,
             "cmd_speed_mms": o["speed_sp"], "cmd_turn_dps": o["turn_sp"],
-            "wheel_left_mms": self.vl + rng.gauss(0, 3), "wheel_right_mms": self.vr + rng.gauss(0, 3),
+            "wheel_left_mms": self.vl * self.wheel_scale()[0] + rng.gauss(0, 3),
+            "wheel_right_mms": self.vr * self.wheel_scale()[1] + rng.gauss(0, 3),
             "balance_target_deg": o["balance_target"],
             "motor_left": self.motor_l / MOTOR_FULL, "motor_right": self.motor_r / MOTOR_FULL,
             "battery_v": 0.0 if self.bench else batt_v + rng.gauss(0, 0.01), "loop_hz": self.loop_hz,

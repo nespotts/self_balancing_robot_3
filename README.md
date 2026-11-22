@@ -12,7 +12,7 @@ flowchart LR
   S["simulator<br>python -m station.sim"] -. "same protocol" .-> P
 ```
 
-`HELLO link v4 radio v2 params 109`
+`HELLO link v4 radio v2 params 112`
 
 ## Quick start (30 s)
 
@@ -28,7 +28,7 @@ flowchart LR
 <img src="station/docs/screenshots/phone-drive.png" width="25%">
 </p>
 
-Also in the app: **Find balance point** (Tune), **Falls** (Logs: every tip-over recorded).
+Also in the app: **Find balance point** and **Calibrate odometry** (Tune), **Falls** (Logs: every tip-over recorded).
 
 ## Where to find what
 

@@ -52,7 +52,7 @@ driving by itself within ~6 s and keeps balancing: [safety](../docs/safety.md).
 | **Control** | Arm / Disarm, mode buttons, joystick / WASD, Tilt on the phone |
 | **Map** | tap waypoints, **Go**, **Explore**; ⋯ → **Draw**: virtual walls, no-go zones, fence, slow zones, mazes |
 | **Sensors** | both range sensors, last sweep |
-| **Tune** | live PID, **Find balance point**, presets, motor test |
+| **Tune** | live PID, **Find balance point**, **Calibrate odometry**, presets, motor test |
 | **Plots** | any signal vs time |
 | **Health** | green / amber / red **preflight** before you arm, battery **minutes left**, one tile per part |
 | **Logs** | messages, **Falls**, downloads |

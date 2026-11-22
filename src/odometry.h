@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "config.h"
+#include "params.h"
 
 class WheelEncoder {
  public:
@@ -15,6 +16,7 @@ class WheelEncoder {
   // One I2C read (~0.15 ms at 400 kHz). Returns false on an I2C error.
   bool read(uint32_t t_us);
   int32_t counts() const { return counts_; }
+  void setScale(float mm_per_count) { mm_per_count_ = mm_per_count; }  // odo.wheel_d_mm / odo.lr_ratio
   float speedMms() const { return speed_mms_; }  // over the last ENCODER_WINDOW reads
   bool ok() const { return have_ && bad_reads_ < 10; }
   uint32_t errors() const { return errors_; }
@@ -27,6 +29,7 @@ class WheelEncoder {
   uint16_t last_raw_ = 0;
   int32_t counts_ = 0;
   float speed_mms_ = 0;
+  float mm_per_count_ = 3.14159265f * 66.0f / 4096.0f;
   uint32_t bad_reads_ = 0, errors_ = 0;
   // ring of (counts, time) for the windowed speed
   int32_t ring_c_[ENCODER_WINDOW] = {};

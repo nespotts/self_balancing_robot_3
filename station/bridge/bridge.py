@@ -42,7 +42,7 @@ TICK_LATE_S = 0.2                 # warn in the log when the event loop was bloc
 TLM_HZ_GRACE_S = 10.0             # Tune closed this long ago -> put tlm.hz back (#46)
 # Commands that act on the robot: refused with an error while there is no link (#48)
 NEEDS_LINK = {"set_mode", "set_param", "cfg", "get_params", "goto", "event", "estop_release"}  # release: the robot latches too
-NEEDS_LINK_ACTION = {"preset": ("apply",), "motor": ("start", "apply"), "plan": ("goto", "explore", "home", "solve")}
+NEEDS_LINK_ACTION = {"preset": ("apply",), "motor": ("start", "apply"), "plan": ("goto", "explore", "home", "solve"), "calib": ("start",)}
 # Zones watchdog (#70): the firmware only knows real range obstacles, so the bridge enforces the virtual ones
 ZONE_TOL_MM = 20.0       # footprint = planner robot radius - this (pose noise; the planner keeps radius + margin)
 ZONE_HORIZON_S = 0.3     # joystick: block speed that would enter a zone within this
@@ -760,7 +760,7 @@ class Bridge:
                 self.waypoints = []
                 self.broadcast(json.dumps({"t": "reset"}))
             self.say("%s: event %s" % (who, lp.EVENT_NAMES[ev]))
-        elif t in ("preset", "score", "motor", "balpoint"):
+        elif t in ("preset", "score", "motor", "balpoint", "calib"):
             return self.tools.handle(m, who)
         elif t == "map":       # occupancy grid: reset / save / load / list / delete / set (#12)
             return self.mapper.command(m, who)

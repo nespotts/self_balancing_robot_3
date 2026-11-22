@@ -180,6 +180,60 @@ async def prep_balpoint(url):
     ws.close()
 
 
+# Calibrate odometry (issue #14): python -m station.sim --miscal --http-port 8090, then
+#   python -m station.tools.screenshots --url http://localhost:8090/ --prep-calib calib      (about 2 minutes)
+CV = "document.querySelector(\"#tune-sub [data-v=balance]\").click();document.getElementById(\"cal-card\").scrollIntoView();"
+CS = "[...document.querySelectorAll(\"#cal-body .cal-step\")].find((b) => b.textContent.startsWith(\"%s\")).click();"
+SHOTS_CALIB = [
+    ("phone-calib-idle", PHONE, "tune", CV, 2),
+    ("phone-calib-measure", PHONE, "tune", CV + CS % "Straight" + "document.getElementById(\"cal-card\").scrollIntoView();", 2),
+    ("phone-calib-proposal", PHONE, "tune", CV + "document.querySelector(\".cal-h\").scrollIntoView();", 2),
+]
+
+
+async def prep_calib(url):
+    """Sim started with --miscal: a straight run + both squares (the 'tape' is the true value), no apply."""
+    u = urllib.parse.urlsplit(url)
+    ws = await WsClient.connect(u.hostname, u.port or 80)
+    send = lambda **m: ws.send(json.dumps(m))
+    last = {}
+
+    async def until(pred, sec):
+        end = time.monotonic() + sec
+        while time.monotonic() < end:
+            try:
+                m = json.loads(await asyncio.wait_for(ws.recv(), 1))
+            except asyncio.TimeoutError:
+                continue
+            if m.get("t") == "error":
+                print("bridge says:", m.get("text"))
+            if m.get("t") == "calib_state":
+                last.update(m)
+                if pred(m):
+                    return m
+        raise RuntimeError("calibration run did not finish")
+    async def run(test, length):
+        for _ in range(15):       # until it stands still (the tool refuses while it does not)
+            send(t="calib", action="start", test=test, length_mm=length)
+            try:
+                await until(lambda m: m["state"] == "running", 3)
+                break
+            except RuntimeError:
+                pass
+        return await until(lambda m: m["state"] == "measure", 240)
+    send(t="set_mode", mode=1, arm=True)
+    await asyncio.sleep(9)
+    m = await run("straight", 500)
+    rep = m["tests"]["straight"]["result"]["reported_mm"]
+    send(t="calib", action="measured", test="straight", forward_cm=rep / 10 * 69.3 / 66.0, side_cm=0)
+    for test, off in (("cw", (-1.4, 2.1)), ("ccw", (1.9, -1.2))):
+        await asyncio.sleep(4)
+        await run(test, 500)
+        send(t="calib", action="measured", test=test, x_cm=off[0], y_cm=off[1])
+    await asyncio.sleep(1)
+    ws.close()
+
+
 async def prep_tune(url):
     """Sim with --remote: three balancing runs with different presets scored, a saved preset, then a full
     wheels-up motor test (about 80 s) and a second one left running for the 'running' state."""
@@ -303,7 +357,7 @@ async def shoot(url, browser, names, port=9333):
         await cdp.call("Page.enable")
         os.makedirs(OUT, exist_ok=True)
         current = None
-        for name, (w, h, dpr, mobile), view, js, wait, *action in SHOTS + SHOTS_TUNE + SHOTS_BALPOINT + SHOTS_FALLS:
+        for name, (w, h, dpr, mobile), view, js, wait, *action in SHOTS + SHOTS_TUNE + SHOTS_BALPOINT + SHOTS_CALIB + SHOTS_FALLS:
             if names and name not in names:
                 continue
             if current != (w, h, dpr, mobile):
@@ -343,12 +397,15 @@ def main():
     ap.add_argument("--prep-falls", action="store_true", help="arm the sim (--shove 12) and wait for falls")
     ap.add_argument("--prep-tune", action="store_true", help="score runs + motor test first (sim with --remote)")
     ap.add_argument("--prep-balpoint", action="store_true", help="wrong bal.offset_deg + balancing (balance point shots)")
+    ap.add_argument("--prep-calib", action="store_true", help="run the odometry calibration steps (sim with --miscal)")
     ap.add_argument("names", nargs="*", help="only these shots (\"tune\" = the Tune tools shots, \"balpoint\")")
     a = ap.parse_args()
     if a.names == ["tune"]:
         a.names = [s[0] for s in SHOTS_TUNE]
     if a.names == ["falls"]:
         a.names = [s[0] for s in SHOTS_FALLS]
+    if a.names == ["calib"]:
+        a.names = [s[0] for s in SHOTS_CALIB]
     if a.names == ["balpoint"]:
         a.names = [s[0] for s in SHOTS_BALPOINT]
 
@@ -361,6 +418,8 @@ def main():
             await prep_falls(a.url)
         if a.prep_balpoint:
             await prep_balpoint(a.url)
+        if a.prep_calib:
+            await prep_calib(a.url)
         if a.prep_map:
             await prep_map(a.url)
         await shoot(a.url, a.browser, a.names, a.cdp_port)

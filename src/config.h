@@ -28,8 +28,8 @@ constexpr uint32_t IMU_STALE_US = 25000;      // no sample this long -> motors o
 constexpr uint32_t I2C_CLOCK_HZ = 400000;     // AS5600 + VL53L0X both support 400 kHz
 constexpr uint32_t ENCODER_PERIOD_US = 4000;  // read encoders after a balance step once 4 ms passed (200 Hz at 400 Hz)
 constexpr uint8_t ENCODER_WINDOW = 16;        // speed = position change over 16 reads (80 ms)
-constexpr float WHEEL_DIAMETER_MM = 66.0f;
-constexpr float TRACK_MM = 126.8f;            // wheel separation, tyre centre to centre (CAD; was 123)
+// wheel diameter / track width / left-right ratio are params now: odo.wheel_d_mm, odo.track_mm, odo.lr_ratio (issue #14)
+
 
 // Control
 constexpr float VEL_LOOP_DT = 0.01f;          // velocity loop 100 Hz

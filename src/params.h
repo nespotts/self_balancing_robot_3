@@ -126,7 +126,12 @@
   X(MOT_BK_GAIN,     "mot.bk_gain",        1.0f,      0.0f,    1.5f)     \
   X(MOT_BK_MS,       "mot.bk_ms",          80.0f,     0.0f,    300.0f)   \
   X(MOT_BK_BAND,     "mot.bk_band",        0.03f,     0.0f,    0.3f)     \
-  X(MOT_BK_MMS,      "mot.bk_mms",         15.0f,     1.0f,    200.0f)
+  X(MOT_BK_MMS,      "mot.bk_mms",         15.0f,     1.0f,    200.0f)   \
+  /* issue #14: odometry calibration (Station: Tune, Calibrate odometry). Wheel mm per encoder count = pi * d / 4096; */ \
+  /* odo.lr_ratio = right / left wheel diameter (mean stays odo.wheel_d_mm); odo.track_mm only scales the wheel-derived turn rate */ \
+  X(ODO_WHEEL_D,     "odo.wheel_d_mm",     66.0f,     40.0f,   100.0f)   \
+  X(ODO_TRACK,       "odo.track_mm",       126.8f,    80.0f,   200.0f)   \
+  X(ODO_LR_RATIO,    "odo.lr_ratio",       1.0f,      0.9f,    1.1f)
 
 enum ParamId : uint16_t {
 #define PARAM_ENUM(id, name, def, mn, mx) P_##id,
@@ -152,6 +157,14 @@ void params_reset_defaults();
 bool params_load();
 // Writes EEPROM. Blocks for a few ms (flash) - only call with the motors off.
 bool params_save();
+
+// Wheel travel per encoder count (4096 per revolution), mm: pi * diameter / 4096. The wheel diameter is
+// odo.wheel_d_mm (mean of the two wheels); odo.lr_ratio = right / left diameter (issue #14).
+inline float odo_mm_per_count(bool right) {
+  const float r = P(P_ODO_LR_RATIO);
+  const float left_d = 2.0f * P(P_ODO_WHEEL_D) / (1.0f + r);
+  return 3.14159265f * (right ? r * left_d : left_d) / 4096.0f;
+}
 
 extern bool g_param_save_requested;
 extern bool g_param_defaults_requested;

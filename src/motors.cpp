@@ -42,7 +42,7 @@ static uint8_t g_mode = 0;
 static float g_hz = 0;
 static bool g_cfg_changed = false;
 static bool g_test = false;  // the motor test holds the motors (motors_test_begin .. _end)
-static constexpr float kMmPerCount = (float)M_PI * WHEEL_DIAMETER_MM / 4096.0f;
+
 static constexpr uint32_t kFeedbackStaleUs = 30000;
 
 void Motor::begin() {
@@ -128,7 +128,7 @@ void Motor::drive(float pwm_signed) {
   pwm(EN, duty);
 }
 
-void Motor::feedback(int32_t counts, uint32_t t_us) { est_.sample(counts, t_us, kMmPerCount); }
+void Motor::feedback(int32_t counts, uint32_t t_us, float mm_per_count) { est_.sample(counts, t_us, mm_per_count); }
 
 bool Motor::feedbackFresh(uint32_t now_us) const {
   return est_.valid() && (int32_t)(now_us - est_.lastUs()) <= (int32_t)kFeedbackStaleUs;
@@ -309,8 +309,8 @@ void motors_set(float left, float right) {
 }
 
 void motors_speed_feedback(int32_t left_counts, int32_t right_counts, uint32_t t_us) {
-  g_left.feedback(left_counts, t_us);
-  g_right.feedback(right_counts, t_us);
+  g_left.feedback(left_counts, t_us, odo_mm_per_count(false));
+  g_right.feedback(right_counts, t_us, odo_mm_per_count(true));
 }
 
 void motors_stop() {
