@@ -47,6 +47,8 @@ DEFAULTS = {
     "squeeze_mm": 35.0,         # no route with the margin: try again keeping only radius + this (narrow gaps)
     "unknown_ok": True,         # "go here" may route through unmapped space (explore never does)
     "frontier_min_mm": 200.0,   # ignore frontier bits smaller than this
+    "scan_pause": True,         # explore: stand still at each frontier goal for a stop-and-scan (#71; only
+                                # while the map's stop_scan correction is on)
     "zones_block_manual": True,  # bridge: joystick cmd_vel that would drive into a zone / across a virtual wall -> 0 (#70)
 }
 LIMITS = {"robot_radius_mm": (20, 400), "margin_mm": (0, 500), "soft_mm": (0, 1000), "squeeze_mm": (0, 200),
@@ -58,6 +60,8 @@ SETTINGS_FILE = "planner.json"   # in the map folder (~/sbr3-maps)
 SQUEEZE_TRIES = 6         # explore: squeeze goals in a row that showed nothing new before it is done
 SQUEEZE_GROW = 160        # ... "something new" = this many more free 25 mm cells (0.1 m^2)
 SQUEEZE_CHECKS = 400      # explore, squeezing: frontier spots checked (100 mm blocks, nearest first)
+SCAN_WAIT_S = 6.0         # explore: wait at most this long at a frontier goal for the stop-and-scan (#71)
+SCAN_EVERY_S = 10.0       # explore: a new frontier goal after this long without a scan: stop and scan first
 
 
 def clean_settings(s, base):
@@ -542,6 +546,13 @@ class Planner:
         self.arm = False              # the next mode request carries the user's arm request (see command)
         self.pending = None
         self.dest = None              # goto: name of the saved place being driven to (#53)
+        self.scan_wait = None         # explore: (since, stopscan.seq) while waiting for a stop-and-scan (#71)
+        self.holding = False          # explore: stopped on the way for a scan (then it plans again)
+        self.sent_goal = None         # explore: the frontier goal of the route last sent
+        self.scan_seen, self.last_scan_t = -1, 0.0
+        ss = getattr(getattr(bridge, "mapper", None), "stopscan", None)
+        if ss is not None:
+            ss.listeners.append(self.on_correction)
         self.solve = None             # goto: the maze being solved (its exit gap counts as a wall, #70)
         self.solve_t0 = 0.0
         self.zone_hits = 0            # watchdog stops in this job (#70)
@@ -731,7 +742,8 @@ class Planner:
             self.mode, self.goals, self.blacklist, self.goal = "explore", [], [], None
             self.replan_at, self.squeeze = None, False
             self.squeeze_left, self.sq_free = SQUEEZE_TRIES, None
-            self.started_at = self.clock()
+            self.started_at = self.last_scan_t = self.clock()
+            self.holding, self.sent_goal, self.scan_wait = False, None, None
             self.blocked_plans = 0
             self.solve, self.zone_hits = None, 0
             self._set_status("exploring")
@@ -783,6 +795,7 @@ class Planner:
         self.arm = False
         self.replan_at = None
         self.squeeze = False
+        self.holding, self.scan_wait = False, None
         self.solve = None
         self.mode, self.path, self.goals, self.goal = "idle", [], [], None
         if was != "idle" and why:
@@ -858,7 +871,17 @@ class Planner:
                 self.sq_free = now_free
             elif self.mode == "explore":
                 self.squeeze_left, self.sq_free = SQUEEZE_TRIES, None
+            if self.mode == "explore" and self._scan_on() and self.sent_goal is not None and \
+                    self.goal != self.sent_goal and self.clock() - self.last_scan_t > SCAN_EVERY_S:
+                # a new frontier goal and no scan for a while: stop here and scan first, then plan again (#71)
+                t = self.b.tlm
+                self.b.handle_command({"t": "goto", "points": [[t["x_mm"], t["y_mm"]]], "replace": True}, "planner")
+                self.sent_at, self.sent_n = self.clock(), 1
+                self.path, self.holding, self.scan_wait, self.sent_goal = [], True, None, None
+                self._set_status("exploring: stopped to scan and check the pose", log=False)
+                return
             self.path = path
+            self.sent_goal = self.goal
             self._send(path[1:] or path[-1:], go)
             if squeeze:
                 status += " (squeezing through a narrow gap)"
@@ -884,7 +907,37 @@ class Planner:
                 res = (res[0], "maze: " + res[1])
             self._set_status(res[1])
 
+    def on_correction(self, entry):
+        """A stop-and-scan moved the map frame (#71): the robot's waypoints are in its odometry frame, so the
+        rest of the route goes again, converted with the new correction (the robot is standing still)."""
+        rest = self._remaining() if self.mode != "idle" else []
+        if rest:
+            pose = self.robot_map_pose()
+            if pose:
+                self.path = [pose[:2]] + rest
+                self._send(rest, False)
+        self._push()
+
+    def _scan_on(self):
+        ss = getattr(self.b.mapper, "stopscan", None)
+        return ss is not None and self.settings["scan_pause"] and bool(self.b.mapper.settings.get("stop_scan"))
+
+    def _scan_hold(self, now):
+        """Explore, stopped (at a frontier goal, or on the way): True while waiting for the stop-and-scan
+        (scan_pause, #71)."""
+        if not self._scan_on():
+            return False
+        ss = self.b.mapper.stopscan
+        if self.scan_wait is None:
+            if ss.done and not ss.matching:
+                return False          # this stop was matched already
+            self.scan_wait = (now, ss.seq)
+            self._set_status("exploring: scanning to check the pose", log=False)
+        t0, seq = self.scan_wait
+        return ss.seq == seq and now - t0 < SCAN_WAIT_S
+
     def _send(self, pts, go):
+        self.scan_wait = None
         odom = self.to_odom(pts)
         self.b.handle_command({"t": "goto", "points": [list(p) for p in odom], "replace": True}, "planner")
         self.sent_at = self.clock()
@@ -983,6 +1036,15 @@ class Planner:
             return
         if self.job and not self.job.done():
             return
+        ss = getattr(b.mapper, "stopscan", None)
+        if ss is not None and ss.seq != self.scan_seen:
+            self.scan_seen, self.last_scan_t = ss.seq, now
+        if self.mode == "explore" and self.holding:
+            if self._scan_hold(now):
+                return
+            self.holding = False
+            self._start_job(self._plan_explore, go=True)
+            return
         nav = b.nav or {}
         fresh = now - self.sent_at > 0.6 and nav.get("waypoint_count") == getattr(self, "sent_n", -1)
         state = self.nav_names[nav["state"]] if fresh and nav.get("state", 99) < len(self.nav_names) else ""
@@ -1018,6 +1080,8 @@ class Planner:
                     self._set_status("maze solved in %.1f s" % secs)
                     return
                 self._set_status("arrived" if not dest else "arrived at " + dest)
+                return
+            if self._scan_hold(now):
                 return
             if now - self.last_plan > 0.8:
                 if self.goal:

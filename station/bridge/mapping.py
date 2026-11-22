@@ -12,7 +12,8 @@ Sensor model (see station/README.md "Map"):
   free wedge out to that distance: VL53L0X "no target" also happens on dark / shiny / angled surfaces);
 - readings taken while |pitch - typical pitch| > pitch_limit_deg are dropped (the beam would hit
   the floor or go over obstacles); typical pitch = median of the last ~2 s, so the IMU mount offset does not matter.
-- optional pose correction (setting "correct"): see scanmatch.py.
+- pose correction: "stop_scan" (match a scan taken standing still, #71) or the experimental "correct"
+  (continuous): see scanmatch.py. map pose = corr o odometry pose; places, plans and the browser use it.
 """
 import collections
 import json
@@ -44,7 +45,8 @@ DEFAULTS = {
     "hit_arc_deg": 5.0,         # the target is marked on an arc this wide (where in the cone it is is unknown)
     "range_weight": True,       # near hits: narrow + strong; far hits: weak; near free space counts double
     "body_free_mm": 50.0,       # the floor within this of the robot's centre is free (0 = off; body half width 76)
-    "correct": False,           # scan-to-map pose correction (odometry drift)
+    "correct": False,           # continuous scan-to-map pose correction (experimental, odometry drift)
+    "stop_scan": False,         # stop-and-scan pose correction whenever the robot stands still (#71)
 }
 LIMITS = {"pitch_limit_deg": (0.5, 45), "no_target_mm": (0, 4000), "max_hit_mm": (100, 8000),
           "min_mm": (0, 500), "cone_deg": (0, 30), "hit_arc_deg": (0, 30), "body_free_mm": (0, 150)}
@@ -66,6 +68,8 @@ class Mapper:
         self.pitches = collections.deque(maxlen=51)
         self.corr = [0.0, 0.0, 0.0]      # map pose = corr o odometry pose: [dx mm, dy mm, dtheta deg]
         self.matcher = scanmatch.Matcher(self)
+        self.stopscan = scanmatch.StopScan(self)
+        self.scan_sent = 0               # stopscan.seq last broadcast
         self.n = {"readings": 0, "used": 0, "tilt": 0, "no_target": 0, "short": 0}
         self.cpu_s = 0.0                 # time spent in on_range / poll since the last stats
         self.cpu_t0 = time.monotonic()
@@ -159,12 +163,15 @@ class Mapper:
             return
         if S["correct"]:
             self.matcher.add(d)           # buffers a sweep, matches it, then calls integrate()
+        elif S["stop_scan"] or self.stopscan.busy():
+            self.stopscan.add(d)          # held back while standing still, matched, then integrate()
         else:
             self.integrate(d)
 
     def integrate(self, d):
         """Put one (filtered) reading into the grid with the current pose correction."""
         S = self.settings
+        g = self.grid
         x, y, hd = self.map_pose(d["x_mm"], d["y_mm"], d["heading_deg"])
         h = math.radians(hd)
         sx, sy = x + SENSOR_FWD_MM * math.cos(h), y + SENSOR_FWD_MM * math.sin(h)
@@ -177,12 +184,12 @@ class Mapper:
             if r <= S["max_hit_mm"]:
                 # free space stops 1 cell + 3 % short of the target (range noise), so a noisy reading
                 # does not erase the wall cell another reading just marked
-                self.grid.integrate_wedge(ox, oy, a, half, r - self.grid.res - 0.03 * r, r,
-                                         hit_half=math.radians(S["hit_arc_deg"]) / 2, rw=S["range_weight"])
+                g.integrate_wedge(ox, oy, a, half, r - g.res - 0.03 * r, r,
+                                  hit_half=math.radians(S["hit_arc_deg"]) / 2, rw=S["range_weight"])
             else:
-                self.grid.integrate_wedge(ox, oy, a, half, S["max_hit_mm"])
+                g.integrate_wedge(ox, oy, a, half, S["max_hit_mm"])
         else:
-            self.grid.integrate_wedge(ox, oy, a, half, S["no_target_mm"], weak=True)
+            g.integrate_wedge(ox, oy, a, half, S["no_target_mm"], weak=True)
             self.n["no_target"] += 1
         rb = S["body_free_mm"]
         # the body's own spot, once per cell moved (standing still adds nothing): a far cone hit drawn into
@@ -236,6 +243,9 @@ class Mapper:
         if self.places_pending:
             self.places_pending = False
             out.append(self.places_msg())
+        if self.stopscan.seq != self.scan_sent:
+            self.scan_sent = self.stopscan.seq
+            out.append(self.scan_msg())
         if self.zones_pending:
             self.zones_pending = False
             out.append(self.zones_msg())
@@ -292,10 +302,18 @@ class Mapper:
             return {"t": "map_list", "maps": self.list()}
         if act == "list":
             return {"t": "map_list", "maps": self.list()}
+        if act == "scan":                   # "Scan & correct" (#71): match the next scan taken standing still
+            if not self.n["used"]:
+                return {"t": "error", "text": "no map yet to match against"}
+            self.stopscan.ask(who)
+            self.say("%s: scan & correct - hold still ~3 s" % who)
+            return None
         if act == "set":
             self.apply_settings(m.get("settings") or {})
             if not self.settings["correct"]:
                 self.matcher.flush()
+            if not self.settings["stop_scan"]:
+                self.stopscan.flush()
             self.full_pending = True        # browsers get the new settings
             return None
         return {"t": "error", "text": "unknown map action %r" % act}
@@ -304,6 +322,8 @@ class Mapper:
         self.grid.reset()
         self.corr = [0.0, 0.0, 0.0]
         self.matcher.reset()
+        self.stopscan.reset()
+        self.scan_sent = -1
         self.name = None
         self.places = Places()          # places belong to a map; the saved map keeps its own
         self.zones = Zones()            # ... and so do the zones (#70)
@@ -314,6 +334,12 @@ class Mapper:
         self.changed_since_save = False
         for k in self.n:
             self.n[k] = 0
+
+    def scan_msg(self):
+        """Stop-and-scan corrections (#71): the last one and a short history, newest first."""
+        ss = self.stopscan
+        return json.dumps({"t": "scan", "corr": [round(c, 2) for c in self.corr], "applied": ss.applied,
+                           "last": ss.last, "history": list(ss.history)}, separators=(",", ":"))
 
     # ------------------------------------------------------------ places (#53)
     def default_home(self):
@@ -495,6 +521,8 @@ class Mapper:
         self.zones = Zones.read(self.zones_path(name))
         self._zones_notify()
         self.matcher.reset()
+        self.stopscan.reset()
+        self.scan_sent = -1
         self.name = name
         self.version += 1
         self.full_pending = True

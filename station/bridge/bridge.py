@@ -931,6 +931,7 @@ class Bridge:
             ws.send(json.dumps(text, separators=(",", ":")))
         ws.send(self.mapper.full_msg())
         ws.send(self.mapper.places_msg())
+        ws.send(self.mapper.scan_msg())                     # stop-and-scan corrections (#71)
         ws.send(self.mapper.zones_msg())
         ws.send(self.planner.msg())
         for item in list(self.logs)[-60:]:

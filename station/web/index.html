@@ -47,6 +47,8 @@
     </div>
     <div class="menu" id="map-menu" hidden>
       <button id="map-home" class="primary">Go home</button>
+      <button id="map-scan" title="Stand still ~3 s: match a full sweep to the map and fix the pose">Scan &amp; correct pose</button>
+      <details class="map-set" id="scan-hist" hidden><summary>Pose corrections</summary><div id="scan-list" class="scan-list"></div></details>
       <button id="map-draw">Draw walls, zones, maze…</button>
       <label><input type="checkbox" id="lay-ranges" checked> Range points <span class="sens-key"><i class="s0"></i>front <i class="s1"></i>rear</span></label>
       <label><input type="checkbox" id="lay-track" checked> Track</label>
@@ -68,7 +70,9 @@
         <label><input type="checkbox" id="set-zblock" checked> Joystick can't drive into zones</label>
         <label class="num">Skip readings tilted over <input type="number" id="set-pitch" min="0.5" max="45" step="0.5"> °</label>
         <label class="num">“No target” = free to <input type="number" id="set-notarget" min="0" max="4000" step="100"> mm</label>
-        <label><input type="checkbox" id="set-correct"> Correct drift (experimental)</label>
+        <label><input type="checkbox" id="set-stopscan"> Correct the pose when stopped</label>
+        <label><input type="checkbox" id="set-scanpause"> Explore: stop to scan now and then</label>
+        <label><input type="checkbox" id="set-correct"> Correct drift while driving (experimental)</label>
         <p class="muted" id="map-stats"></p>
       </details>
     </div>

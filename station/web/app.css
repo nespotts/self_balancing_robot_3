@@ -130,6 +130,8 @@ body[data-view="health"] #view-health { display: block; }
 .map-list { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 6px 12px; border-left: 2px solid var(--line); margin-left: 6px; }
 .map-list button { display: flex; justify-content: space-between; gap: 12px; }
 .map-list small { color: var(--muted); font-weight: 400; }
+.scan-list { display: flex; flex-direction: column; gap: 3px; padding: 4px 0 2px; max-height: 180px; overflow-y: auto; }
+.scan-list small { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .map-set summary { cursor: pointer; padding: 8px 6px; color: var(--text-2); }
 .map-set label.num { justify-content: space-between; font-size: 14px; }
 .map-set input[type=number] { width: 72px; font: inherit; background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; margin-left: auto; }
