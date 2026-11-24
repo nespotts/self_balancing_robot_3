@@ -43,5 +43,5 @@ Also in the app: **Find balance point** and **Calibrate odometry** (Tune), **Fal
 | Falls, tuning, map details | [docs/station-features.md](docs/station-features.md) |
 | Wire and set up the LD19 lidar | [docs/ld19.md](docs/ld19.md) |
 | Script the bridge (API) | [docs/api.md](docs/api.md) |
-| Run ROS 2 (slam_toolbox, Nav2) on the PC | [docs/ros2.md](docs/ros2.md) |
+| Run ROS 2 (slam_toolbox, Nav2) on the PC: record runs, saved-map localization, places + patrols, keep-out zones | [docs/ros2.md](docs/ros2.md) |
 | Firmware internals | [docs/firmware.md](docs/firmware.md) |
