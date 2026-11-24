@@ -349,7 +349,11 @@ class Lidar:
         mx, my, mh = map_pose(xm, ym, hm)
         hr = radians(mh)
         ox, oy = mx + cos(hr) * sx - sin(hr) * sy, my + sin(hr) * sx + cos(hr) * sy
-        self.mapper.integrate_scan(ox, oy, runs, (mx, my))
+        lm = getattr(self.mapper, "lmatch", None)
+        if lm is not None:          # scan-to-map matching (#78): may correct the pose; the turn then maps at the new one
+            ox, oy, mx, my, runs, pts_all = lm.on_scan(ox, oy, mx, my, mh, runs, pts_all)
+        if runs is not None:        # (None: the matcher keeps this turn out of the map, see lidarmatch._map_now)
+            self.mapper.integrate_scan(ox, oy, runs, (mx, my))
         n["used"] += 1
         self.last_used = self.clock()
         self._keep_points(pts_all)

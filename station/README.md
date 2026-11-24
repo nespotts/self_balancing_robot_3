@@ -106,5 +106,6 @@ Health (preflight checklist, battery minutes, tiles; it only looks, it never arm
 <p>All green, an encoder fault</p>
 
 LD19 spinning lidar (dense 360 degree map input, Health tile, Map layer): [wiring, Pi setup, settings](../docs/ld19.md); try it with `python -m station.sim --lidar`.
+With it the bridge matches the turns to the map and corrects the drifting pose ([scan matching](../docs/ld19.md#scan-matching-78)): `python -m station.sim --lidar --tour --drift 3`; numbers: `python -m station.sim.lidar_eval`.
 
 More: [Android app](android/README.md) | [features in detail](../docs/station-features.md) | [API, install, flashing contract](../docs/api.md)

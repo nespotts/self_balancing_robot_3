@@ -25,7 +25,7 @@ import time
 from .occgrid import MAX_CELLS, Grid
 from .places import HOME, Places
 from .zones import Zones
-from . import scanmatch
+from . import lidarmatch, scanmatch
 
 SENSOR_FWD_MM = 26.0
 SENSOR_RADIUS_MM = 12.9
@@ -48,9 +48,37 @@ DEFAULTS = {
     "correct": False,           # continuous scan-to-map pose correction (experimental, odometry drift)
     "stop_scan": False,         # stop-and-scan pose correction whenever the robot stands still (#71)
     "lidar_replaces_sweep": True,   # while LD19 scans are flowing (#76) the VL53L0X sweep does not draw into the map
+    # LD19 scan-to-map matching (#78, lidarmatch.py): live pose correction from the dense turns
+    "lidar_match": True,
+    "match_every_n": 2,         # match every n-th mapped turn (Pi CPU); the others map with the current correction
+    "match_points": 150,        # points per match after thinning to one per 50 mm
+    "match_window_mm": 100.0,   # search window around the predicted pose (odometry + correction)
+    "match_window_deg": 3.0,
+    "match_min_score": 0.4,     # mean likelihood (0..1) of the points that land in mapped cells
+    "match_min_inliers": 0.5,   # share of those within ~37 mm of a wall
+    "match_min_curv": 0.05,     # score curvature below which a direction is degenerate (corridor: along it)
+    "match_min_margin": 0.05,   # best pose must beat any pose clearly elsewhere by this share
+    "match_gain": 0.5,          # share of a match's correction applied (smooths the match noise)
+    "match_deadband_mm": 8.0,   # smaller changes are not applied (the matcher's own noise: they would walk the map off)
+    "match_deadband_deg": 0.1,
+    "match_step_mm": 40.0,      # at most this much per match (rate limit) ...
+    "match_step_deg": 1.0,
+    "match_jump_mm": 60.0,      # bigger corrections are jumps: applied only when 3 matches in a row agree
+    "match_jump_deg": 2.0,
+    "match_warmup": 10,         # turns mapped before matching starts (map only)
+    "match_max_turn_dps": 90.0, # turning faster: the turn is neither matched nor mapped (timing errors turn the scan)
+    "match_map_mm": 250.0,      # while matching, a turn goes into the map only after the robot moved this far ...
+    "match_map_deg": 20.0,      # ... or turned this much ...
+    "match_map_s": 5.0,         # ... or this long after the last one (the map is the reference: see lidarmatch.py)
 }
 LIMITS = {"pitch_limit_deg": (0.5, 45), "no_target_mm": (0, 4000), "max_hit_mm": (100, 8000),
-          "min_mm": (0, 500), "cone_deg": (0, 30), "hit_arc_deg": (0, 30), "body_free_mm": (0, 150)}
+          "min_mm": (0, 500), "cone_deg": (0, 30), "hit_arc_deg": (0, 30), "body_free_mm": (0, 150),
+          "match_every_n": (1, 20), "match_points": (40, 450), "match_window_mm": (25, 300), "match_window_deg": (0.5, 10),
+          "match_min_score": (0, 1), "match_min_inliers": (0, 1), "match_min_curv": (0, 1), "match_min_margin": (0, 1),
+          "match_gain": (0.05, 1), "match_deadband_mm": (0, 100), "match_deadband_deg": (0, 3),"match_step_mm": (1, 300), "match_step_deg": (0.05, 10), "match_jump_mm": (5, 1000),
+          "match_jump_deg": (0.2, 30), "match_warmup": (0, 1000), "match_map_mm": (0, 2000), "match_map_deg": (0, 180),
+          "match_map_s": (0, 60), "match_max_turn_dps": (5, 1000)}
+INTS = ("match_every_n", "match_points", "match_warmup")
 
 
 class Mapper:
@@ -70,6 +98,8 @@ class Mapper:
         self.corr = [0.0, 0.0, 0.0]      # map pose = corr o odometry pose: [dx mm, dy mm, dtheta deg]
         self.matcher = scanmatch.Matcher(self)
         self.stopscan = scanmatch.StopScan(self)
+        self.corr_listeners = []         # callables(): the LD19 matcher moved corr (planner: route in the odometry frame)
+        self.lmatch = lidarmatch.LidarMatch(self)   # LD19 scan-to-map matching (#78), fed by lidar.py
         self.scan_sent = 0               # stopscan.seq last broadcast
         self.lidar = None                # lidar.Lidar (#76), set by it
         self.n = {"readings": 0, "used": 0, "tilt": 0, "no_target": 0, "short": 0, "sweep_skipped": 0, "scans": 0}
@@ -113,7 +143,8 @@ class Mapper:
                 if not math.isfinite(v):
                     continue
                 lo, hi = LIMITS.get(k, (-1e9, 1e9))
-                self.settings[k] = max(lo, min(hi, v))
+                v = max(lo, min(hi, v))
+                self.settings[k] = int(round(v)) if k in INTS else v
         if save:
             try:
                 os.makedirs(self.dir, exist_ok=True)
@@ -284,7 +315,7 @@ class Mapper:
         return dict(self.n, cpu_pct=round(self.cpu_pct, 2), mem_mb=round(g.mem_mb(), 1),
                     size_m=[round(g.W * g.res / 1000.0, 1), round(g.H * g.res / 1000.0, 1)], warning=g.warning,
                     pitch_ref=None if self.pitch_ref is None else round(self.pitch_ref, 2),
-                    match=self.matcher.last)
+                    match=self.matcher.last, lmatch=self.lmatch.stats())
 
     # ------------------------------------------------------------ commands
     def command(self, m, who="?"):
@@ -342,6 +373,7 @@ class Mapper:
         self.corr = [0.0, 0.0, 0.0]
         self.matcher.reset()
         self.stopscan.reset()
+        self.lmatch.reset()
         self.scan_sent = -1
         self.name = None
         self.places = Places()          # places belong to a map; the saved map keeps its own
@@ -541,6 +573,8 @@ class Mapper:
         self._zones_notify()
         self.matcher.reset()
         self.stopscan.reset()
+        self.lmatch.reset()
+        self.lmatch.turns = 10 ** 6          # a loaded map is there to match against: no map-only warm-up
         self.scan_sent = -1
         self.name = name
         self.version += 1

@@ -62,6 +62,7 @@ SQUEEZE_GROW = 160        # ... "something new" = this many more free 25 mm cell
 SQUEEZE_CHECKS = 400      # explore, squeezing: frontier spots checked (100 mm blocks, nearest first)
 SCAN_WAIT_S = 6.0         # explore: wait at most this long at a frontier goal for the stop-and-scan (#71)
 SCAN_EVERY_S = 10.0       # explore: a new frontier goal after this long without a scan: stop and scan first
+DRIFT_RESEND_MM = 20.0    # LD19 scan matching (#78): resend the route once its next waypoints moved this much
 
 
 def clean_settings(s, base):
@@ -553,6 +554,10 @@ class Planner:
         ss = getattr(getattr(bridge, "mapper", None), "stopscan", None)
         if ss is not None:
             ss.listeners.append(self.on_correction)
+        cl = getattr(getattr(bridge, "mapper", None), "corr_listeners", None)
+        if cl is not None:
+            cl.append(self.on_drift)          # LD19 scan matching moved the map frame (#78)
+        self.sent_corr = None         # mapper.corr when the route was last sent (in the odometry frame)
         self.solve = None             # goto: the maze being solved (its exit gap counts as a wall, #70)
         self.solve_t0 = 0.0
         self.zone_hits = 0            # watchdog stops in this job (#70)
@@ -918,6 +923,27 @@ class Planner:
                 self._send(rest, False)
         self._push()
 
+    def on_drift(self):
+        """The LD19 scan matcher moved the map frame a little (#78, many times a second): the route the robot follows
+        is in its odometry frame, so once the next waypoints are off by DRIFT_RESEND_MM the rest goes again (<= 1 / s)."""
+        if self.mode == "idle" or not self.path or self.sent_corr is None or self.clock() - self.sent_at < 1.0:
+            return
+        rest = self._remaining()
+        if not rest:
+            return
+        dx, dy, dt = self.sent_corr
+        c, s = math.cos(math.radians(-dt)), math.sin(math.radians(-dt))
+        off = 0.0
+        for (x, y), (nx, ny) in zip(rest[:2], self.to_odom(rest[:2])):
+            off = max(off, math.hypot(c * (x - dx) - s * (y - dy) - nx, s * (x - dx) + c * (y - dy) - ny))
+        if off < DRIFT_RESEND_MM:
+            return
+        pose = self.robot_map_pose()
+        if pose:
+            self.path = [pose[:2]] + rest
+            self._send(rest, False)
+            self._push()
+
     def _scan_on(self):
         ss = getattr(self.b.mapper, "stopscan", None)
         return ss is not None and self.settings["scan_pause"] and bool(self.b.mapper.settings.get("stop_scan"))
@@ -938,6 +964,7 @@ class Planner:
 
     def _send(self, pts, go):
         self.scan_wait = None
+        self.sent_corr = list(self.b.mapper.corr)
         odom = self.to_odom(pts)
         self.b.handle_command({"t": "goto", "points": [list(p) for p in odom], "replace": True}, "planner")
         self.sent_at = self.clock()
