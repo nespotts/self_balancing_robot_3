@@ -126,6 +126,11 @@ SIDE_BACK_MM, SIDE_AHEAD_MM, SIDE_INNER_MM = 45.0, 300.0, 40.0   # side window: 
 BLOCKED_TURN_DEG = 30.0   # GOTO blocked by a wall alongside: turn away at most this much
 STUCK_DEG = 15.0
 LIDAR_STUCK_MS = 500      # Navigator::kLidarStuckMs (#79)
+LIDAR_DEAD_R = 180.0      # kLidarDeadR (#99): the bridge's min_range_mm (120) + mount / lean / travel margin
+DEAD_FRONT = LIDAR_DEAD_R - SENSOR_FWD_MM - SENSOR_RADIUS_MM   # kDeadFront: the same as a front distance
+GHOST_MERGE = 40.0        # kGhostMerge
+GHOSTS = 8                # Navigator::kGhosts
+SWEEP_FRESH_MS = 500      # Navigator::kSweepFreshMs
 
 
 def _box(cx, cy, w, h):
@@ -347,7 +352,11 @@ class Navigator:
         self.away_pose = (0.0, 0.0, 0)
         self.obst_flag = False
         self.blk_fwd = self.blk_rev = False
-        self.close = {"fwd": (0, 0.0), "rev": (0, 0.0)}   # last time / range inside the clear distance
+        self.clr = {"fwd": 0, "rev": 0}       # since when fresh data shows that direction clear (0 = not), #99
+        self.close = {"fwd": 0.0, "rev": 0.0}  # last distance inside the clear distance (obstacle_mm)
+        self.dead_back = False                # backed off once from an obstacle inside DEAD_FRONT (#99)
+        self.pose = (0.0, 0.0, 0.0)           # pose at the last update (ghosts across a pose reset)
+        self.ghosts = []                      # lidar points close enough to vanish into its min range (#99)
         self.now_ms = 0
         self.pts = []                 # (x, y, t_ms), newest last, at most PTS
         self.last_range_ms = 0
@@ -377,8 +386,10 @@ class Navigator:
             self.phase, self.driving = self.SEEK, False
         if n == 0:
             self.idx = 0
-        self.blocked = self.latched = self.backing = False
-        self.blk_fwd = self.blk_rev = False
+        self.blocked = self.latched = self.backing = False   # a new / changed list always resumes
+        if self.fresh(self.now_ms):           # ... but without fresh data a latch stays (#99)
+            self.blk_fwd = self.blk_rev = False
+        self.dead_back = False
         self.stop_since = 0
         self.stuck = self.away = self.away_done = False
         self.stuck_ms = 0
@@ -415,6 +426,23 @@ class Navigator:
         c, s = math.cos(h), math.sin(h)
         self.lidar_pts = [(ox + x * c - y * s, oy + x * s + y * c) for x, y in f["pts"] if x or y]
         self.lidar_ms = i["now_ms"] or 1
+        # ghosts (#99): this frame's points within LIDAR_DEAD_R of the axle, plus the older ghosts still that close
+        # that no new point stands for (they may be inside the lidar's min range now); the GHOSTS nearest are kept
+        cand = []
+        for x, y in self.lidar_pts:
+            r = math.hypot(x - i["x"], y - i["y"])
+            if r < LIDAR_DEAD_R:
+                cand.append((r, x, y))
+        new = list(cand)
+        for gx, gy in self.ghosts:
+            r = math.hypot(gx - i["x"], gy - i["y"])
+            if r >= LIDAR_DEAD_R:
+                continue
+            if any(math.hypot(x - gx, y - gy) < GHOST_MERGE for _, x, y in new):
+                continue
+            cand.append((r, gx, gy))
+        cand.sort(key=lambda c: c[0])
+        self.ghosts = [(x, y) for _, x, y in cand[:GHOSTS]]
         return True
 
     def lidar_fresh(self, now_ms):
@@ -425,7 +453,9 @@ class Navigator:
         self.now_ms = i["now_ms"]
         self.speed = self.turn = 0.0
         self.blocked = self.latched = self.backing = False
-        self.blk_fwd = self.blk_rev = False
+        if self.fresh(i["now_ms"]):            # without fresh data a latch stays (#99)
+            self.blk_fwd = self.blk_rev = False
+        self.dead_back = False
         self.driving = False
         self.stop_since = 0
         self.stuck = self.away = self.away_done = False
@@ -452,6 +482,10 @@ class Navigator:
             return False
         return not self.sensed_ms or now_ms - self.sensed_ms > BLIND_MS
 
+    def fresh(self, now_ms):
+        """Fresh obstacle data (#99): only this can release a BLOCKED latch (never blind, stale or "no data")."""
+        return self.lidar_fresh(now_ms) or bool(self.sensed_ms and now_ms - self.sensed_ms <= SWEEP_FRESH_MS)
+
     def _log_blind(self, mode):
         if mode == lp.MODE_EXPLORE or self.P("nav.blind_speed") <= 0:
             self.log("nav: no range readings - obstacle stop is off: %s paused"
@@ -466,6 +500,11 @@ class Navigator:
         self.pts = []
         self.lidar_pts = []
         self.lidar_ms = 0                 # its points were in the old frame: no lidar until the next frame
+        # ghosts (#99): the same spots around the robot, in the new frame (the pose is (0,0,0) now)
+        px, py, ph = self.pose
+        c, s = math.cos(math.radians(ph)), math.sin(math.radians(ph))
+        self.ghosts = [((gx - px) * c + (gy - py) * s, -(gx - px) * s + (gy - py) * c) for gx, gy in self.ghosts]
+        self.pose = (0.0, 0.0, 0.0)
         self.hold = (0.0, 0.0)
         self.list_changed(True)
 
@@ -478,11 +517,15 @@ class Navigator:
         half = (min(0.5 * P("nav.corridor_mm"), HALF_WIDTH_MM + 10.0) if P("nav.side_min_mm") > 0
                 else 0.5 * P("nav.corridor_mm"))
         age = P("nav.obst_age_ms")
-        lidar = self.lidar_fresh(i["now_ms"])  # fresh lidar wins: its points replace the sweep's (#77)
+        lidar = self.lidar_fresh(i["now_ms"])
+        # ghosts the robot has moved away from (the lidar would see them again if they were there) are dropped (#99)
+        self.ghosts = [(gx, gy) for gx, gy in self.ghosts if math.hypot(gx - i["x"], gy - i["y"]) < LIDAR_DEAD_R]
         front = rear = gl = gr = near = near_xr = 0.0
-        for px, py, t in ([(x, y, 0) for x, y in self.lidar_pts] if lidar else self.pts):
-            if not lidar and i["now_ms"] - t > age:
-                continue
+        # fresh lidar and the sweep's recent points together (#99: the union), and the ghosts
+        pts = list(self.lidar_pts) if lidar else []
+        pts += [(x, y) for x, y, t in self.pts if i["now_ms"] - t <= age]
+        pts += self.ghosts
+        for px, py in pts:
             dx, dy = px - i["x"], py - i["y"]
             xr, yr = dx * c + dy * s, -dx * s + dy * c
             if -SIDE_BACK_MM < xr < SIDE_AHEAD_MM and abs(yr) >= SIDE_INNER_MM:   # beside the body: side gap
@@ -509,6 +552,15 @@ class Navigator:
         self.front, self.rear = front, rear
         self.gap_l, self.gap_r = gl, gr
         self.near_mm, self.near_xr = near, near_xr
+        # release evidence for limit_speed (#99): since when fresh data shows nothing inside the clear distance
+        ok = self.fresh(i["now_ms"])
+        clear = P("rng.obstacle_mm") + P("nav.clear_mm") + P("nav.backoff_mm")
+        for key, d in (("fwd", front), ("rev", rear)):
+            if not ok or 0 < d < clear:
+                self.clr[key] = 0
+            elif not self.clr[key]:
+                self.clr[key] = i["now_ms"] or 1
+        self.pose = (i["x"], i["y"], i["heading"])
 
     def _side_turn(self):
         """Side walls (#62): (turn deg/s away from walls closer than nav.side_min_mm to the body side,
@@ -587,16 +639,17 @@ class Navigator:
             blk = False
             self.obst = d
         else:
-            # blocked until nothing closer than stop + clear (+ backoff) was seen for nav.obst_age_ms
+            # blocked until fresh data (_update_obstacles) has shown nothing closer than stop + clear (+ backoff)
+            # for nav.obst_age_ms: no data, stale data or blind is never "clear" (#99); the dead zone keeps ghosts
             clear = stop + P("nav.clear_mm") + P("nav.backoff_mm")
             if 0 < d < clear:
-                self.close[key] = (self.now_ms or 1, d)
-            close_ms, close_mm = self.close[key]
+                self.close[key] = d
+            clr_ms = self.clr[key]
             if 0 < d < stop:
                 blk = True
-            elif blk and (d <= 0 or d > clear) and self.now_ms - close_ms >= P("nav.obst_age_ms"):
+            elif blk and clr_ms and self.now_ms - clr_ms >= P("nav.obst_age_ms"):
                 blk = False
-            self.obst = d if d > 0 else (close_mm if blk else 0.0)
+            self.obst = d if d > 0 else (self.close[key] if blk else 0.0)
         if fwd:
             self.blk_fwd = blk
         else:
@@ -655,6 +708,7 @@ class Navigator:
     def _start_blocked(self, i):
         self.blocked = True
         self.blk_h = i["heading"]
+        self.dead_back = False
         if i["mode"] == lp.MODE_EXPLORE:
             self.latched = True
         self.log("nav: blocked, obstacle at %.0f mm (waypoint %u/%u)" % (self.obst, self.idx + 1, len(self.wp)))
@@ -798,6 +852,15 @@ class Navigator:
         if self.obst_flag:
             if not self.blocked:
                 self._start_blocked(i)
+            # closer than the lidar can see (its min range, #99): back off once so it shows again (or is seen gone)
+            if (not self.backing and not self.dead_back and 0 < self.front < DEAD_FRONT
+                    and P("nav.stuck_backoff_mm") > 0 and P("rng.obstacle_mm") > 0
+                    and (self.lidar_fresh(i["now_ms"]) or self.ghosts)):
+                self.dead_back = self.backing = True
+                self.back_mm = P("nav.stuck_backoff_mm")
+                self.back = (i["x"], i["y"], i["now_ms"])
+                self.blk_h = i["heading"]
+                self.log("nav: obstacle %.0f mm ahead, too close for the lidar: backing off" % self.front)
             obst = self.obst
             vl = 0.0
             if self.backing:
@@ -809,6 +872,8 @@ class Navigator:
                 # stuck: twice as fast (a balancing robot pressed against a wall barely follows the slowest speed)
                 vb = self.limit_speed(-max(P("nav.min_speed"), 30.0) * (2.0 if self.stuck else 1.0), vmax, True)
                 if self.obst_flag or back >= self.back_mm or i["now_ms"] - bms > 5000:
+                    if back >= self.back_mm:
+                        self.dead_back = False   # backed off all the way: again if it is still that close (#99)
                     self.backing = False
                     vb = 0.0
                 vl = vb

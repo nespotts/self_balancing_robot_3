@@ -24,6 +24,7 @@ import os
 import time
 
 from .ld19 import POINT_RATE, Ld19Reader
+from .lidarmatch import ODO_JUMP_MM
 
 PITCH_ABS_MAX = 30.0       # IMU pitch beyond this: lying down / carried, never map (same limit as mapping.py)
 TILT_REF_S = 3.0
@@ -31,6 +32,7 @@ GAP_DEG = 3.0              # neighbours further apart than this (dropped / maske
 MIN_POINTS = 30            # fewer usable points than this: skip the scan
 POSE_STALE_S = 0.5         # no telemetry for this long before the scan: pose unknown, skip
 FLOWING_S = 1.5
+HEAD_JUMP_DEG = 30.0       # telemetry heading step this much beyond yaw rate x dt: a pose reset, not a turn (#99)
 
 DEFAULTS = {
     "enabled": True,
@@ -168,7 +170,7 @@ class Lidar:
         self.hist = PoseHistory()
         self.reader = Ld19Reader(self.port, self.on_scan, say=self.say, clock=clock)
         self.n = {"scans": 0, "used": 0, "every_n": 0, "no_pose": 0, "few": 0, "points": 0,
-                  "range": 0, "intensity": 0, "mask": 0, "tilt": 0, "floor": 0, "no_return": 0}
+                  "range": 0, "intensity": 0, "mask": 0, "tilt": 0, "floor": 0, "no_return": 0, "pose_jumps": 0}
         self.cpu_s = 0.0
         self.cost_ms = 0.0            # last processed scan, ms
         self.cost_avg_ms = 0.0
@@ -219,6 +221,17 @@ class Lidar:
         await self.reader.run()
 
     def on_tlm(self, d, t):
+        h = self.hist.h
+        if h:
+            # an odometry jump (pose reset, #99; its "pose reset" log line may come after the telemetry): never
+            # interpolate a scan across it. Same test as lidarmatch (ODO_JUMP_MM), plus a heading step that the yaw
+            # rate does not explain.
+            t0, x0, y0, h0, _p0 = h[-1]
+            dh = (d["heading_deg"] - h0 + 180.0) % 360.0 - 180.0
+            if (math.hypot(d["x_mm"] - x0, d["y_mm"] - y0) > ODO_JUMP_MM
+                    or abs(dh - d.get("yaw_rate_dps", 0.0) * max(0.0, t - t0)) > HEAD_JUMP_DEG):
+                self.hist.clear()
+                self.n["pose_jumps"] += 1
         self.hist.add(t, d["x_mm"], d["y_mm"], d["heading_deg"], d["pitch_deg"])
         lm = getattr(self.mapper, "lmatch", None)
         if lm is not None:

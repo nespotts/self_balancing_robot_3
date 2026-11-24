@@ -10,22 +10,30 @@
 //            for nav.dwell_ms -> next waypoint (pushed out past 2 x arrive_mm -> seek again)
 //   last point: nav.end_heading_deg >= 0 -> TURNING to it (nav.heading_tol_deg), then ARRIVED
 //   BLOCKED  obstacle < rng.obstacle_mm in the direction of travel: stop (and back off nav.backoff_mm).
-//            GOTO resumes when it is > rng.obstacle_mm + nav.clear_mm; EXPLORE waits for a new list.
-//            A new / changed list always resumes.
+//            GOTO resumes after nav.obst_age_ms of FRESH data (a lidar frame < 0.5 s old, or sweep readings
+//            < 0.5 s old) with nothing closer than rng.obstacle_mm + nav.clear_mm (+ nav.backoff_mm) in the
+//            corridor (#99): no data, stale data or blind is never "clear". EXPLORE waits for a new list.
+//            A new / changed list always resumes (the per-direction latch stays set without fresh data).
+//            Obstacle closer than kDeadFront (141 mm, the lidar's min range): back off nav.stuck_backoff_mm
+//            once, so it shows again (or is seen to be gone).
 // HOLD: hold point = pose when HOLD starts; speed = nav.hold_kp x forward error (deadband nav.hold_db_mm,
 //   max nav.hold_max_speed); heading is held by the controller (turn 0).
 // Obstacles: valid range readings become world points (kept nav.obst_age_ms); points inside a corridor
 //   nav.corridor_mm wide ahead / behind give front / rear distances, as a sensor range. Readings that hit
 //   lower than nav.floor_mm (sensor tipped down by the lean) are ignored. Slow down linearly from
 //   nav.slow_mm to rng.obstacle_mm. STATION commands get the same limit (main.cpp); MANUAL only the flag.
-// LD19 lidar (#77, MSG_LIDAR_OBSTACLES from the bridge, ~10 Hz): the nearest return per 10 deg sector of the
-//   newest scan, robot frame, placed in the pose frame on arrival (dead-reckoned back by the frame's age_ms).
-//   While a frame came in the last LINK_LIDAR_FRESH_MS (500 ms) these 36 points REPLACE the sweep's points:
-//   fresh lidar wins; corridor, side walls, slow-down, BLOCKED, stuck all work on them the same way (same
-//   params, front / rear still "as a sensor range" = x - 38.9 / 13.1 - x). The bridge already dropped tilted
-//   scans and floor hits (nav.floor_mm is not used), and returns closer than its min_range_mm (120 mm from the
-//   lidar) never arrive, so the swing-circle check below rarely fires with the lidar. Lidar stale: the sweep's
-//   points again (if it runs), else blind (below). Frames older than LINK_LIDAR_MAX_AGE_MS are dropped.
+// LD19 lidar (#77, MSG_LIDAR_OBSTACLES from the bridge, ~10 Hz): one return per 10 deg sector of the newest
+//   scan (the nearest one inside the corridor, else the nearest, #99), robot frame, placed in the pose frame on
+//   arrival (dead-reckoned back by the frame's age_ms). While a frame came in the last LINK_LIDAR_FRESH_MS
+//   (500 ms) these 36 points count TOGETHER with the sweep's recent points (the union, #99); corridor, side
+//   walls, slow-down, BLOCKED, stuck all work on them the same way (same params, front / rear still "as a sensor
+//   range" = x - 38.9 / 13.1 - x). The bridge already dropped tilted scans and floor hits (nav.floor_mm is not
+//   used). Frames older than LINK_LIDAR_MAX_AGE_MS are dropped. Lidar stale: the sweep's points only (if it
+//   runs), else blind (below).
+//   Dead zone (#99): returns closer than the bridge's min_range_mm (120 mm default, 60 on the robot) never
+//   arrive. Lidar points within kLidarDeadR (180 mm) of the axle are kept as "ghosts" until the robot is
+//   kLidarDeadR away from them (then the lidar would see them again): an obstacle that gets that close does not
+//   vanish. Ghosts count like lidar points (corridor, side walls, swing circle), also while the lidar is stale.
 // Side walls (#62): recent points beside the body (gap body side -> wall < nav.side_min_mm, 0 = off) steer
 //   away (nav.side_kp deg/s per mm inside it) and slow down (linear to nav.min_speed at gap 0). Turning in
 //   place: a wall close at one side and the target behind -> turn the nose away from it; something inside the
@@ -75,6 +83,7 @@ class Navigator {
   bool lidarFresh(uint32_t now_ms) const { return lidar_ms_ && now_ms - lidar_ms_ <= LINK_LIDAR_FRESH_MS; }
   void onModeChange(const NavIn& in);
   void onPoseReset();                 // pose is now (0,0,0): list, obstacle points and hold point dropped
+                                      // (ghosts are moved into the new frame)
   void onLidarStuck(uint32_t now_ms) { lidar_stuck_ms_ = now_ms ? now_ms : 1; }  // EVT_LINK_STUCK (#79)
   void update(const NavIn& in);       // every control step (or at >= 50 Hz)
   // Obstacle limit for a speed command not made here (STATION; MANUAL with apply = false: flag only).
@@ -118,6 +127,7 @@ class Navigator {
   float sideTurn(float* inside) const;                           // nav.side_*: turn away from side walls
   void sideAvoid(float vmax, float tmax);                        // driving: steer away, slow down
   bool blind(uint32_t now_ms) const;  // no fresh lidar frame and no RangeFrame for kBlindMs
+  bool fresh(uint32_t now_ms) const;  // fresh obstacle data: a lidar frame or a RangeFrame within 500 ms (#99)
   void logBlind(uint8_t mode);
   void setTarget(const NavIn& in, float x, float y);
   void log(const char* fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -150,8 +160,10 @@ class Navigator {
   uint32_t away_ms_ = 0;
   bool obst_flag_ = false;
   bool blk_fwd_ = false, blk_rev_ = false;  // limitSpeed hysteresis per direction
-  uint32_t close_fwd_ms_ = 0, close_rev_ms_ = 0;  // last time something was inside the clear distance
-  float close_fwd_mm_ = 0, close_rev_mm_ = 0;
+  uint32_t clr_fwd_ms_ = 0, clr_rev_ms_ = 0;  // since when fresh data shows that direction clear (0 = not), #99
+  float close_fwd_mm_ = 0, close_rev_mm_ = 0;  // last distance inside the clear distance (obstacle_mm)
+  bool dead_back_ = false;            // backed off once from an obstacle inside kDeadFront (#99)
+  float pose_x_ = 0, pose_y_ = 0, pose_h_ = 0;  // pose at the last update (ghosts across a pose reset)
   uint32_t now_ms_ = 0;
   bool warned_no_range_ = false;
   // obstacle points (world = pose frame)
@@ -167,6 +179,11 @@ class Navigator {
   uint8_t lidar_n_ = 0;
   uint32_t lidar_ms_ = 0;             // arrival of that frame (0 = none)
   bool lidar_was_ = false;            // lidarFresh() at the last update (for the log line)
+  static constexpr uint32_t kSweepFreshMs = 500;
+  // ghosts (#99): lidar points close enough to vanish into its min range (world = pose frame)
+  static constexpr uint8_t kGhosts = 8;
+  float gx_[kGhosts] = {}, gy_[kGhosts] = {};
+  uint8_t ghost_n_ = 0;
   // status
   uint8_t sent_state_ = 0xFF, sent_idx_ = 0xFF, sent_n_ = 0xFF;
   uint32_t sent_ms_ = 0;

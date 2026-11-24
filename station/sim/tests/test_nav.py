@@ -33,8 +33,9 @@ class NavRun:
         self.r.on_frame(f[2], payload(f))
 
     def lidar_frame(self):
-        """What lidar_obstacles.py sends: nearest return (120..8000 mm, 1 deg rays from the axle) per sector, robot
-        frame of the pose now (the sim's odometry is exact, so the true pose is the odometry pose)."""
+        """What lidar_obstacles.py sends: returns 120..8000 mm (1 deg rays from the axle), per sector the nearest one
+        inside the corridor (|y| <= 86, by the firmware's front / rear distance) else the nearest (#99), robot frame of
+        the pose now (the sim's odometry is exact, so the true pose is the odometry pose)."""
         r = self.r
         best = [None] * lp.LINK_LIDAR_SECTORS
         for k in range(360):
@@ -42,8 +43,10 @@ class NavRun:
             if d is None or d < 120.0:
                 continue
             i = int(math.floor(k / lp.LIDAR_SECTOR_DEG + 0.5)) % lp.LINK_LIDAR_SECTORS
-            if best[i] is None or d < best[i][0]:
-                best[i] = (d, d * math.cos(math.radians(k)), d * math.sin(math.radians(k)))
+            x, y = d * math.cos(math.radians(k)), d * math.sin(math.radians(k))
+            key = (0, x - 38.9 if x >= 26.0 else 13.1 - x) if abs(y) <= 86.0 else (1, d)
+            if best[i] is None or key < best[i][0]:
+                best[i] = (key, x, y)
         f = lp.encode_lidar_obstacles(self.lidar_seq, 0, [b and b[1:] for b in best])
         self.lidar_seq += 1
         self.frame(f)
@@ -342,6 +345,63 @@ class TestLidarNav(unittest.TestCase):
         n.lidar = True
         n.run(3.0)
         self.assertGreater(n.r.X - x0, 200.0)                             # going again
+
+    def test_lidar_lost_while_blocked_stays_blocked(self):
+        """#99 (b): the lidar stops while BLOCKED. The old latch let go after nav.obst_age_ms and GOTO drove at
+        nav.blind_speed into the box; now only fresh data releases it, also after a new list (the planner's replan)."""
+        n = self.lidar_run(34, [(600.0, 900.0), (2500.0, 900.0)], lp.MODE_GOTO)
+        self.assertTrue(n.run(60.0, lambda s: s.r.nav.state == lp.NAV_BLOCKED), n.logs[-5:])
+        n.run(1.0)
+        r = n.r
+        x0 = r.X
+        n.lidar = False
+        n.run(5.0)
+        self.assertFalse(r.nav.lidar_fresh(int(r.t * 1000)))
+        self.assertEqual(r.nav.state, lp.NAV_BLOCKED)
+        self.assertLess(r.X - x0, 40.0)                                   # (balancing sway): not driving on blind
+        n.frame(lp.encode_goto([(2500.0, 900.0)]))                         # the planner sends the route again
+        n.run(3.0)
+        self.assertEqual(r.nav.state, lp.NAV_BLOCKED)
+        self.assertLess(r.X - x0, 40.0)
+        self.assertGreater(r.room.clearance(r.X, r.Y), simmod.ROBOT_RADIUS + 100.0)
+        box = simmod._box(1500, 900, 600, 400)                            # lidar back, box gone: goes on
+        r.room.segs = [s for s in r.room.segs if s not in box]
+        n.lidar = True
+        self.assertTrue(n.run(10.0, lambda s: s.r.nav.state == lp.NAV_DRIVING and s.r.X > x0 + 100.0))
+
+    def test_post_in_dead_zone_stays_blocked(self):
+        """#99 (a): a narrow post comes into the lidar's dead zone (< 120 mm, no return) while the robot is BLOCKED by
+        it: still blocked (a ghost), and with nav.stuck_backoff_mm it backs off until the post shows again."""
+        for backoff in (0.0, 100.0):
+            n = self.lidar_run(35, [(2500.0, 0.0)], lp.MODE_GOTO)
+            r = n.r
+            r.set_param(r.pidx["nav.stuck_backoff_mm"], backoff)
+            post = simmod._box(900.0, 0.0, 20.0, 20.0)
+            r.room.segs += post
+            self.assertTrue(n.run(30.0, lambda s: s.r.nav.state == lp.NAV_BLOCKED), n.logs[-5:])
+            n.run(1.0)
+            px = 900.0
+            while px - 10.0 - r.X > 100.0:                                # a leg stepping closer: 5 mm per 50 ms
+                px -= 5.0
+                r.room.segs = [s for s in r.room.segs if s not in post]
+                post = simmod._box(px, 0.0, 20.0, 20.0)
+                r.room.segs += post
+                n.run(0.05)
+            x1 = r.X
+            closest = 1e9
+            for _ in range(100):                                          # 5 s
+                n.run(0.05)
+                closest = min(closest, px - 10.0 - r.X)
+            self.assertEqual(r.nav.state, lp.NAV_BLOCKED, (backoff, n.logs[-5:]))
+            self.assertGreater(closest, 80.0)                             # never drove into it
+            if not backoff:
+                self.assertLess(r.X - x1, 30.0)                           # (balancing sway)
+                self.assertGreater(r.nav.front, 0.0)                      # the ghost, not "nothing"
+            else:
+                self.assertTrue(any("too close for the lidar: backing off" in l for l in n.logs), n.logs[-5:])
+                self.assertGreater(px - 10.0 - r.X, 160.0)                # backed off: the post shows again
+                r.room.segs = [s for s in r.room.segs if s not in post]   # gone: goes on
+                self.assertTrue(n.run(15.0, lambda s: s.r.nav.state == lp.NAV_DRIVING and s.r.X > px))
 
     def test_station_cmd_vel_stops_with_lidar(self):
         n = NavRun(seed=33)

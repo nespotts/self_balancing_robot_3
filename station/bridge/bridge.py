@@ -191,7 +191,10 @@ class Bridge:
         # LD19 spinning lidar (#76): "/dev/ttyS5", "COM7" or "tcp://host:port" (simulator); None = no lidar
         self.lidar = Lidar(self.mapper, lidar_port, say=self.say, clock=_now) if lidar_port else None
         # ... and its obstacles for the robot's navigator: MSG_LIDAR_OBSTACLES per scan (#77)
-        self.lidar_obst = LidarObstacles(self.lidar, self.send, clock=_now) if self.lidar else None
+        # (the robot's corridor params; nothing sent until its profile, and with it lidar.json, is bound: #99)
+        self.lidar_obst = LidarObstacles(self.lidar, self.send, clock=_now, params=self.param_values,
+                                         ready=lambda: self.robot is not None and not self.robot_pending
+                                         ) if self.lidar else None
         # ... and the matcher's stuck check: wheels turning, lidar pose still -> the navigator backs off (#79, link v6)
         self.mapper.lmatch.stuck_listeners.append(lambda: self.send(lp.encode_event(lp.EVT_LINK_STUCK)))
         self.planner =Planner(self, NAV_STATE_NAMES)           # route planning + explore on the map

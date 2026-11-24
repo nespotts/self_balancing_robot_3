@@ -207,7 +207,8 @@ struct __attribute__((packed)) EventFrame {
   uint8_t event;          // RadioEvent
 };
 
-// MSG_LIDAR_OBSTACLES (v5, issue #77): the nearest LD19 return in each of LINK_LIDAR_SECTORS sectors of one scan.
+// MSG_LIDAR_OBSTACLES (v5, issue #77): one LD19 return in each of LINK_LIDAR_SECTORS sectors of one scan (the nearest
+// inside the navigator's driving corridor, else the nearest: #99; the layout is unchanged).
 // Robot frame: x forward, y left, mm from the axle centre. Sector i holds azimuths (i - 0.5) * 10 .. (i + 0.5) * 10 deg
 // CCW from forward (about the axle); x = y = 0: no return in that sector (open, out of range, or masked).
 // The bridge (station/bridge/lidar_obstacles.py) sends only whole scans that passed its pitch gate, with its range /

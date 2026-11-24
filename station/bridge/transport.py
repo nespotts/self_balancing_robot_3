@@ -7,6 +7,8 @@ import asyncio
 import os
 import threading
 
+PENDING_MAX = 4096               # PosixSerialLink: bytes queued behind a partial write before frames are dropped
+
 
 class LinkError(Exception):
     pass
@@ -68,6 +70,7 @@ class PosixSerialLink:
         self.path = path
         self.on_data, self.on_lost = on_data, on_lost
         self.closed = False
+        self.pending = bytearray()       # the unwritten rest of a frame (partial os.write)
         self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         try:
             tty.setraw(self.fd)
@@ -101,23 +104,58 @@ class PosixSerialLink:
             self.on_lost()
 
     def write(self, data):
+        """Whole frames only (#99): a partial os.write keeps the rest and sends it first (the event loop's writer),
+        so the Teensy never sees a cut frame followed by the next one. Kernel buffer full with nothing of this frame
+        written: dropped (heartbeats / cmd_vel are periodic); a frame that does not fit behind the rest: dropped."""
         if self.closed:
             return False
-        try:
-            os.write(self.fd, data)
+        if self.pending:                 # the rest of an earlier frame goes first, in order
+            if len(self.pending) + len(data) > PENDING_MAX:
+                return False
+            self.pending += data
             return True
+        try:
+            n = os.write(self.fd, data)
         except BlockingIOError:
-            return False  # kernel buffer full: drop (heartbeats/cmd_vel are periodic)
+            return False
         except OSError:
             self._lost()
             return False
+        if n < len(data):
+            self.pending = bytearray(data[n:])
+            try:
+                self.loop.add_writer(self.fd, self._writable)
+            except Exception:
+                self._lost()
+                return False
+        return True
+
+    def _writable(self):
+        try:
+            n = os.write(self.fd, self.pending)
+        except BlockingIOError:
+            return
+        except OSError:
+            self._lost()
+            return
+        del self.pending[:n]
+        if not self.pending:
+            try:
+                self.loop.remove_writer(self.fd)
+            except Exception:
+                pass
 
     def close(self):
         if self.closed:
             return
         self.closed = True
+        self.pending = bytearray()
         try:
             self.loop.remove_reader(self.fd)
+        except Exception:
+            pass
+        try:
+            self.loop.remove_writer(self.fd)
         except Exception:
             pass
         try:
