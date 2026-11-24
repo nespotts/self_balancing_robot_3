@@ -182,6 +182,7 @@ class Lidar:
         self.pts_sent = 0
         self.last_send = 0.0
         self.pts_dirty_msg = True
+        self.scan_listeners = []      # callables(scan), before the mapping: the navigator feed (lidar_obstacles.py, #77)
         mapper.lidar = self
 
     # ------------------------------------------------------------ settings
@@ -226,6 +227,11 @@ class Lidar:
             self._cpu_acc, self._cpu_t0 = 0.0, now
 
     def on_scan(self, scan):
+        for f in self.scan_listeners:
+            try:
+                f(scan)
+            except Exception as e:                  # a listener bug must not stop the mapping
+                self.reader.error = "scan listener: %s: %s" % (type(e).__name__, e)
         t0 = time.perf_counter()
         try:
             self.process_scan(scan)

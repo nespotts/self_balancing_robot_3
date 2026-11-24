@@ -196,8 +196,13 @@ static TelemetryPacket buildRadioTelemetry(uint8_t ack_seq) {
   t.x_cm = clamp16(odom.x_mm / 10.0f);
   t.y_cm = clamp16(odom.y_mm / 10.0f);
   t.speed_mms = clamp16(odom.speed_mms);
-  t.range_front_mm = sweep.frontMm(now_ms);
-  t.range_rear_mm = sweep.rearMm(now_ms);
+  if (nav.lidarFresh(now_ms)) {  // LD19 (#77): the navigator's corridor distances (0 = nothing in it)
+    t.range_front_mm = clampU16(nav.frontMm());
+    t.range_rear_mm = clampU16(nav.rearMm());
+  } else {
+    t.range_front_mm = sweep.frontMm(now_ms);
+    t.range_rear_mm = sweep.rearMm(now_ms);
+  }
   t.waypoint_count = nav.count();
   t.nav_index = nav.index();
   t.error_code = errorCode(now_ms);
@@ -324,6 +329,13 @@ static void onLinkFrame(uint8_t type, const uint8_t* p, uint8_t len) {
             link.log("waypoints: list full (%u), %u dropped", (unsigned)WAYPOINT_MAX, (unsigned)(count - added));
           nav.listChanged(g.replace != 0);  // also resumes from BLOCKED
         }
+      }
+      break;
+    case MSG_LIDAR_OBSTACLES:  // LD19 obstacle sectors from the bridge (#77): replace the sweep while fresh
+      if (len == sizeof(LidarObstacleFrame)) {
+        LidarObstacleFrame f;
+        memcpy(&f, p, sizeof(f));
+        nav.addLidar(f, navIn(now_ms));
       }
       break;
     case MSG_EVENT:

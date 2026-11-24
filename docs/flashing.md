@@ -35,7 +35,7 @@ tools\robot_console.ps1 --get-params   # also list params (sends one request)
 ```
 
 ```
-02:17:52  HELLO link v4 radio v2 params 94 firmware 'v4 2026-11-20 abc1234'
+02:17:52  HELLO link v5 radio v2 params 94 firmware 'v4 2026-11-20 abc1234'
 02:17:52  [log] imu ok
 02:17:52  tlm BALANCE ARMED,UPRIGHT    pitch +2.5  speed +150 mm/s  bat 11.80 V  loop 500 Hz
 ```

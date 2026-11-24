@@ -57,7 +57,9 @@ def main(argv=None):
     ap.add_argument("--lidar", nargs="?", const=5762, type=int, default=None, metavar="PORT",
                     help="fake LDROBOT LD19 spinning lidar (issue #76): real 47-byte packets on tcp://127.0.0.1:PORT "
                          "(default 5762); the in-process bridge reads them like the Pi's UART. The map then fills from "
-                         "dense 360 degree scans (the two VL53L0X sweep stops drawing into it)")
+                         "dense 360 degree scans (the two VL53L0X sweep stops drawing into it), and GOTO / EXPLORE / "
+                         "STATION stop for obstacles from the bridge's LD19 frames (#77; set rng.enable 0 to drop the "
+                         "sweep altogether)")
     a = ap.parse_args(argv)
     host, _, port = a.listen.rpartition(":")
     remote = a.remote or a.remote_disarmed

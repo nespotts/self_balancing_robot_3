@@ -19,7 +19,9 @@
 //     arms), remote_flags bits LINK_RF_LINK_ESTOP / LINK_RF_NAV_HANDOVER, HeartbeatFrame.clients
 //     counts (0 = nobody watching: the Pi does not supervise). A v3 bridge can't arm a v4 robot
 //     without the remote (fail-safe); a v4 bridge works with v3 firmware (the events are ignored).
-#define LINK_PROTOCOL_VERSION 4
+// v5: MSG_LIDAR_OBSTACLES (Pi -> Teensy, issue #77): LD19 obstacles for the navigator. v4 firmware ignores it
+//     (unknown type) and keeps using the range sweep; with a v4 bridge the v5 firmware uses the sweep as before.
+#define LINK_PROTOCOL_VERSION 5
 #define LINK_SYNC1 0xA5
 #define LINK_SYNC2 0x5A
 #define LINK_MAX_PAYLOAD 200
@@ -52,6 +54,7 @@ enum LinkMsgType : uint8_t {
   MSG_GOTO = 0x85,        // GotoFrame: add/replace waypoints. GOTO and EXPLORE follow the list;
                           // a new list while BLOCKED resumes.
   MSG_EVENT = 0x86,       // EventFrame: same events as RadioEvent, plus the link-only LinkEvent values
+  MSG_LIDAR_OBSTACLES = 0x87,  // LidarObstacleFrame (v5): one per LD19 scan that passed the bridge's checks, ~10 Hz
 };
 
 // Link-only EventFrame.event values (never sent by the remote; RadioEvent values stay < EVT_COUNT).
@@ -196,3 +199,25 @@ struct __attribute__((packed)) GotoFrame {
 struct __attribute__((packed)) EventFrame {
   uint8_t event;          // RadioEvent
 };
+
+// MSG_LIDAR_OBSTACLES (v5, issue #77): the nearest LD19 return in each of LINK_LIDAR_SECTORS sectors of one scan.
+// Robot frame: x forward, y left, mm from the axle centre. Sector i holds azimuths (i - 0.5) * 10 .. (i + 0.5) * 10 deg
+// CCW from forward (about the axle); x = y = 0: no return in that sector (open, out of range, or masked).
+// The bridge (station/bridge/lidar_obstacles.py) sends only whole scans that passed its pitch gate, with its range /
+// intensity / mask / floor filters applied, deskewed and moved into the robot frame of its newest telemetry pose;
+// age_ms = how old that pose is at sending. Firmware (navigator.h): frames older than LINK_LIDAR_MAX_AGE_MS are
+// dropped; no frame for LINK_LIDAR_FRESH_MS = no lidar (range sweep, or blind).
+#define LINK_LIDAR_SECTORS 36
+#define LINK_LIDAR_FRESH_MS 500
+#define LINK_LIDAR_MAX_AGE_MS 300
+struct __attribute__((packed)) LidarObstacleFrame {
+  uint8_t seq;            // + 1 per frame (wraps)
+  uint8_t sectors;        // LINK_LIDAR_SECTORS
+  uint16_t age_ms;
+  int16_t xy_mm[72];      // x0, y0, x1, y1, ... (2 x LINK_LIDAR_SECTORS)
+};  // 148 bytes
+
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(LidarObstacleFrame) == 148, "LidarObstacleFrame size changed - bump LINK_PROTOCOL_VERSION");
+static_assert(4 + 4 * LINK_LIDAR_SECTORS == sizeof(LidarObstacleFrame), "LidarObstacleFrame: 2 x int16 per sector");
+#endif

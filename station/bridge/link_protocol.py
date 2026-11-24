@@ -1,4 +1,4 @@
-"""Link protocol v4 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
+"""Link protocol v5 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
 
 Frame: 0xA5 0x5A | type u8 | len u8 | payload[len] | crc16 u16 LE
 crc16 = CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over type, len and payload.
@@ -7,7 +7,7 @@ Pure Python, 3.8+.
 """
 import struct
 
-LINK_PROTOCOL_VERSION = 4
+LINK_PROTOCOL_VERSION = 5
 LINK_SYNC1 = 0xA5
 LINK_SYNC2 = 0x5A
 LINK_MAX_PAYLOAD = 200
@@ -28,6 +28,7 @@ MSG_SET_PARAM = 0x83
 MSG_GET_PARAMS = 0x84
 MSG_GOTO = 0x85
 MSG_EVENT = 0x86
+MSG_LIDAR_OBSTACLES = 0x87    # v5 (#77): LD19 obstacle sectors for the navigator
 
 MSG_NAMES = {v: k for k, v in globals().items() if k.startswith("MSG_") and isinstance(v, int)}
 
@@ -60,6 +61,12 @@ TLM_BITS = {"armed": TLM_ARMED, "upright": TLM_UPRIGHT, "failsafe": TLM_FAILSAFE
             "nav_active": TLM_NAV_ACTIVE, "nav_done": TLM_NAV_DONE}
 
 GOTO_MAX_POINTS = 16
+
+# MSG_LIDAR_OBSTACLES (v5, #77): nearest LD19 return per 10 deg sector, robot frame (see LidarObstacleFrame)
+LINK_LIDAR_SECTORS = 36
+LINK_LIDAR_FRESH_MS = 500       # firmware: no frame for this long -> no lidar (sweep or blind)
+LINK_LIDAR_MAX_AGE_MS = 300     # firmware drops frames whose pose is older (bridge: does not send them)
+LIDAR_SECTOR_DEG = 360.0 / LINK_LIDAR_SECTORS
 
 # TelemetryFrame.remote_flags (v3)
 LINK_RF_ESTOP = 0x01      # E-stop latched (from the remote)
@@ -118,6 +125,8 @@ GOTO_HDR_FMT = "<BB"
 GOTO_POINT_FMT = "<2f"
 EVENT_FMT = "<B"
 EVENT_FIELDS = ("event",)
+LIDAR_OBST_FMT = "<BBH" + "h" * (2 * LINK_LIDAR_SECTORS)      # xy_mm[72] = x0, y0, x1, y1, ...
+LIDAR_OBST_FIELDS = ("seq", "sectors", "age_ms", "xy_mm")
 
 STRUCTS = {  # C struct name -> (format, fields); GotoFrame is variable length (see encode_goto)
     "HelloFrame": (HELLO_FMT, HELLO_FIELDS),
@@ -130,6 +139,7 @@ STRUCTS = {  # C struct name -> (format, fields); GotoFrame is variable length (
     "SetModeFrame": (SET_MODE_FMT, SET_MODE_FIELDS),
     "SetParamFrame": (SET_PARAM_FMT, SET_PARAM_FIELDS),
     "EventFrame": (EVENT_FMT, EVENT_FIELDS),
+    "LidarObstacleFrame": (LIDAR_OBST_FMT, LIDAR_OBST_FIELDS),   # xy_mm is an array: encode/decode_lidar_obstacles
 }
 
 _S = {name: struct.Struct(fmt) for name, (fmt, _f) in STRUCTS.items()}
@@ -138,6 +148,7 @@ RANGE_SIZE = _S["RangeFrame"].size              # 28
 PARAM_INFO_SIZE = _S["ParamInfoFrame"].size     # 38
 HELLO_SIZE = _S["HelloFrame"].size              # 28
 NAV_STATUS_SIZE = _S["NavStatusFrame"].size     # 20
+LIDAR_OBST_SIZE = _S["LidarObstacleFrame"].size  # 148
 
 
 # ---- CRC-16/CCITT-FALSE --------------------------------------------------------------------
@@ -294,12 +305,25 @@ def decode_goto(p):
     return {"replace": replace, "count": count, "points": pts}
 
 
+def decode_lidar_obstacles(p):
+    """-> {"seq", "sectors", "age_ms", "pts": [(x_mm, y_mm) per sector, (0, 0) = no return]}. A frame that is not
+    exactly LIDAR_OBST_SIZE bytes (or has another sector count) raises ValueError, like the firmware drops it."""
+    if len(p) != LIDAR_OBST_SIZE:
+        raise ValueError("LidarObstacleFrame: payload %d != %d bytes" % (len(p), LIDAR_OBST_SIZE))
+    v = _S["LidarObstacleFrame"].unpack_from(p)
+    if v[1] != LINK_LIDAR_SECTORS:
+        raise ValueError("LidarObstacleFrame: %d sectors, expected %d" % (v[1], LINK_LIDAR_SECTORS))
+    xy = v[3:]
+    return {"seq": v[0], "sectors": v[1], "age_ms": v[2],
+            "pts": [(xy[2 * i], xy[2 * i + 1]) for i in range(LINK_LIDAR_SECTORS)]}
+
+
 DECODERS = {
     MSG_TELEMETRY: decode_telemetry, MSG_RANGE: decode_range, MSG_LOG: decode_log,
     MSG_PARAM_INFO: decode_param_info, MSG_NAV_STATUS: decode_nav_status, MSG_HELLO: decode_hello,
     MSG_HEARTBEAT: decode_heartbeat, MSG_CMD_VEL: decode_cmd_vel, MSG_SET_MODE: decode_set_mode,
     MSG_SET_PARAM: decode_set_param, MSG_GET_PARAMS: lambda p: {}, MSG_GOTO: decode_goto,
-    MSG_EVENT: decode_event,
+    MSG_EVENT: decode_event, MSG_LIDAR_OBSTACLES: decode_lidar_obstacles,
 }
 
 
@@ -360,6 +384,27 @@ def goto_frames(points, replace=True):
 
 def encode_event(event):
     return encode_frame(MSG_EVENT, struct.pack(EVENT_FMT, event))
+
+
+def _i16(v):
+    v = int(round(v))
+    return -32768 if v < -32768 else (32767 if v > 32767 else v)
+
+
+def encode_lidar_obstacles(seq, age_ms, pts):
+    """pts: LINK_LIDAR_SECTORS (x_mm, y_mm) in the robot frame, None = no return in that sector (sent as 0, 0).
+    A point that would round to (0, 0) is sent as (1, 0): it is a return (at the axle), not "none"."""
+    if len(pts) != LINK_LIDAR_SECTORS:
+        raise ValueError("need %d sectors, got %d" % (LINK_LIDAR_SECTORS, len(pts)))
+    xy = []
+    for p in pts:
+        if p is None:
+            xy += (0, 0)
+            continue
+        x, y = _i16(p[0]), _i16(p[1])
+        xy += (x, y) if (x or y) else (1, 0)
+    age = max(0, min(0xFFFF, int(round(age_ms))))
+    return encode_frame(MSG_LIDAR_OBSTACLES, _S["LidarObstacleFrame"].pack(seq & 0xFF, LINK_LIDAR_SECTORS, age, *xy))
 
 
 # Teensy -> Pi encoders (used by the simulator and tests)

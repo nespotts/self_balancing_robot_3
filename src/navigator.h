@@ -1,6 +1,6 @@
 // Navigation (issue #8): waypoint following for MODE_GOTO / MODE_EXPLORE, position hold for MODE_HOLD,
-// and the obstacle check from the range sweep. Pure logic (time and pose are passed in), so it runs on a
-// host test (test/host/nav_sim.cpp) and station/sim/sim.py mirrors it line by line.
+// and the obstacle check from the range sweep or the LD19 lidar. Pure logic (time and pose are passed in), so
+// it runs on a host test (test/host/nav_sim.cpp) and station/sim/sim.py mirrors it line by line.
 //
 // GOTO / EXPLORE, per waypoint (list from EVT_MARK_WAYPOINT or MSG_GOTO, pose frame):
 //   TURNING  turn in place (nav.turn_kp x bearing error) until |error| < nav.align_deg
@@ -18,14 +18,23 @@
 //   nav.corridor_mm wide ahead / behind give front / rear distances, as a sensor range. Readings that hit
 //   lower than nav.floor_mm (sensor tipped down by the lean) are ignored. Slow down linearly from
 //   nav.slow_mm to rng.obstacle_mm. STATION commands get the same limit (main.cpp); MANUAL only the flag.
+// LD19 lidar (#77, MSG_LIDAR_OBSTACLES from the bridge, ~10 Hz): the nearest return per 10 deg sector of the
+//   newest scan, robot frame, placed in the pose frame on arrival (dead-reckoned back by the frame's age_ms).
+//   While a frame came in the last LINK_LIDAR_FRESH_MS (500 ms) these 36 points REPLACE the sweep's points:
+//   fresh lidar wins; corridor, side walls, slow-down, BLOCKED, stuck all work on them the same way (same
+//   params, front / rear still "as a sensor range" = x - 38.9 / 13.1 - x). The bridge already dropped tilted
+//   scans and floor hits (nav.floor_mm is not used), and returns closer than its min_range_mm (120 mm from the
+//   lidar) never arrive, so the swing-circle check below rarely fires with the lidar. Lidar stale: the sweep's
+//   points again (if it runs), else blind (below). Frames older than LINK_LIDAR_MAX_AGE_MS are dropped.
 // Side walls (#62): recent points beside the body (gap body side -> wall < nav.side_min_mm, 0 = off) steer
 //   away (nav.side_kp deg/s per mm inside it) and slow down (linear to nav.min_speed at gap 0). Turning in
 //   place: a wall close at one side and the target behind -> turn the nose away from it; something inside the
 //   corners' swing circle ahead / behind -> first step straight away from it (<= nav.stuck_backoff_mm).
 // Stuck (#62): driving / turning but < nav.stuck_mm (or 15 deg) of progress for nav.stuck_ms -> BLOCKED,
 //   log "nav: stuck ...", back off nav.stuck_backoff_mm. GOTO then goes on; EXPLORE waits for a new list.
-// No range readings for 3 s (rng.enable 0, sensor fault): no obstacle stop is possible, so EXPLORE pauses
-//   (stands still, keeps its state) and GOTO drives at most nav.blind_speed (0 = GOTO pauses too).
+// No fresh lidar frame and no range readings for 3 s (rng.enable 0, sensor fault): no obstacle stop is possible,
+//   so EXPLORE pauses (stands still, keeps its state) and GOTO drives at most nav.blind_speed (0 = GOTO pauses
+//   too). Without the sweep that is 500 ms after the last lidar frame (lidar silent / stopped, bridge gone).
 // Paused too while !upright or !live (nobody supervises, see ModeManager::supervised).
 #pragma once
 #include <stdint.h>
@@ -58,6 +67,9 @@ class Navigator {
 
   // ---- inputs
   void addRange(const RangeFrame& f, uint32_t now_ms);
+  // LD19 obstacles (#77): in = the pose now. false = dropped (wrong sector count, older than LINK_LIDAR_MAX_AGE_MS).
+  bool addLidar(const LidarObstacleFrame& f, const NavIn& in);
+  bool lidarFresh(uint32_t now_ms) const { return lidar_ms_ && now_ms - lidar_ms_ <= LINK_LIDAR_FRESH_MS; }
   void onModeChange(const NavIn& in);
   void onPoseReset();                 // pose is now (0,0,0): list, obstacle points and hold point dropped
   void update(const NavIn& in);       // every control step (or at >= 50 Hz)
@@ -101,7 +113,7 @@ class Navigator {
   bool stuckCheck(const NavIn& in, bool turning, bool trying);  // true: no progress for nav.stuck_ms
   float sideTurn(float* inside) const;                           // nav.side_*: turn away from side walls
   void sideAvoid(float vmax, float tmax);                        // driving: steer away, slow down
-  bool blind(uint32_t now_ms) const;  // no RangeFrame for kBlindMs
+  bool blind(uint32_t now_ms) const;  // no fresh lidar frame and no RangeFrame for kBlindMs
   void logBlind(uint8_t mode);
   void setTarget(const NavIn& in, float x, float y);
   void log(const char* fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -143,6 +155,11 @@ class Navigator {
   uint32_t last_range_ms_ = 0;
   uint32_t sensed_ms_ = 0;            // last RangeFrame of any kind (valid or not)
   static constexpr uint32_t kBlindMs = 3000;
+  // LD19 points of the newest MSG_LIDAR_OBSTACLES frame (world = pose frame), #77
+  float lx_[LINK_LIDAR_SECTORS] = {}, ly_[LINK_LIDAR_SECTORS] = {};
+  uint8_t lidar_n_ = 0;
+  uint32_t lidar_ms_ = 0;             // arrival of that frame (0 = none)
+  bool lidar_was_ = false;            // lidarFresh() at the last update (for the log line)
   // status
   uint8_t sent_state_ = 0xFF, sent_idx_ = 0xFF, sent_n_ = 0xFF;
   uint32_t sent_ms_ = 0;

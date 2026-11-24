@@ -8,7 +8,8 @@ developed on a PC.
   bal_p / bal_i / bal_d telemetry and the effect of a gain change look like the real robot.
 - A virtual room with walls/boxes and the servo-swept twin VL53L0X range sensor.
 - GOTO / EXPLORE / HOLD: Navigator is a line-by-line port of src/navigator.cpp (issue #8): same nav.* params,
-  NavStatus states, obstacle stop from the simulated range sweep.
+  NavStatus states, obstacle stop from the simulated range sweep, or from the bridge's LD19 obstacle frames
+  (MSG_LIDAR_OBSTACLES, #77) while they are fresh: `--lidar` (lidar_sim.py) feeds them through the real bridge.
 """
 import asyncio
 import math
@@ -348,6 +349,9 @@ class Navigator:
         self.pts = []                 # (x, y, t_ms), newest last, at most PTS
         self.last_range_ms = 0
         self.sensed_ms = 0            # last range reading of any kind (valid or not)
+        self.lidar_pts = []           # LD19 points of the newest MSG_LIDAR_OBSTACLES frame (world), #77
+        self.lidar_ms = 0             # its arrival (0 = none)
+        self.lidar_was = False        # lidar_fresh() at the last update (for the log line)
         self.warned_no_range = False
         self.sent = None
         self.sent_ms = 0
@@ -396,6 +400,23 @@ class Navigator:
             del self.pts[0]
         self.last_range_ms = now_ms or 1
 
+    def add_lidar(self, f, i):
+        """LD19 obstacles (#77): robot-frame points of the pose age_ms ago (dead-reckoned back from the pose now
+        with its speed and yaw rate) -> pose frame. They replace the previous frame's points. False = dropped."""
+        if f["sectors"] != lp.LINK_LIDAR_SECTORS or f["age_ms"] > lp.LINK_LIDAR_MAX_AGE_MS:
+            return False
+        age = f["age_ms"] * 0.001
+        hm = math.radians(i["heading"] - 0.5 * i["yaw_rate"] * age)   # mean heading over that time
+        ox, oy = i["x"] - i["speed"] * age * math.cos(hm), i["y"] - i["speed"] * age * math.sin(hm)
+        h = math.radians(i["heading"] - i["yaw_rate"] * age)
+        c, s = math.cos(h), math.sin(h)
+        self.lidar_pts = [(ox + x * c - y * s, oy + x * s + y * c) for x, y in f["pts"] if x or y]
+        self.lidar_ms = i["now_ms"] or 1
+        return True
+
+    def lidar_fresh(self, now_ms):
+        return bool(self.lidar_ms) and now_ms - self.lidar_ms <= lp.LINK_LIDAR_FRESH_MS
+
     def on_mode_change(self, i):
         self.mode = i["mode"]
         self.now_ms = i["now_ms"]
@@ -421,7 +442,10 @@ class Navigator:
                 self.log("nav: %u waypoints, going to %u" % (n, self.idx + 1))
 
     def blind(self, now_ms):
-        """No range reading for 3 s (rng.enable 0, sensor fault): no obstacle stop (safety review #38)."""
+        """No fresh lidar frame and no range reading for 3 s (rng.enable 0, sensor fault): no obstacle stop
+        (safety review #38)."""
+        if self.lidar_fresh(now_ms):
+            return False
         return not self.sensed_ms or now_ms - self.sensed_ms > BLIND_MS
 
     def _log_blind(self, mode):
@@ -436,6 +460,8 @@ class Navigator:
     def on_pose_reset(self):
         self.wp = []
         self.pts = []
+        self.lidar_pts = []
+        self.lidar_ms = 0                 # its points were in the old frame: no lidar until the next frame
         self.hold = (0.0, 0.0)
         self.list_changed(True)
 
@@ -448,9 +474,10 @@ class Navigator:
         half = (min(0.5 * P("nav.corridor_mm"), HALF_WIDTH_MM + 10.0) if P("nav.side_min_mm") > 0
                 else 0.5 * P("nav.corridor_mm"))
         age = P("nav.obst_age_ms")
+        lidar = self.lidar_fresh(i["now_ms"])  # fresh lidar wins: its points replace the sweep's (#77)
         front = rear = gl = gr = near = near_xr = 0.0
-        for px, py, t in self.pts:
-            if i["now_ms"] - t > age:
+        for px, py, t in ([(x, y, 0) for x, y in self.lidar_pts] if lidar else self.pts):
+            if not lidar and i["now_ms"] - t > age:
                 continue
             dx, dy = px - i["x"], py - i["y"]
             xr, yr = dx * c + dy * s, -dx * s + dy * c
@@ -587,6 +614,11 @@ class Navigator:
         self.speed = self.turn = 0.0
         self.obst_flag = False
         self.stuck_seen = False
+        lidar = self.lidar_fresh(i["now_ms"])
+        if lidar != self.lidar_was:
+            self.lidar_was = lidar
+            if i["mode"] in NAV_MODES:
+                self.log("nav: lidar obstacles on" if lidar else "nav: lidar obstacles lost (no scan for 0.5 s)")
         self._update_obstacles(i)
         if i["mode"] in (lp.MODE_GOTO, lp.MODE_EXPLORE):
             self._update_goto(i)
@@ -1089,6 +1121,8 @@ class SimRobot:
                 if added < d["count"]:
                     self.log("waypoints: list full (%u), %u dropped" % (WAYPOINT_MAX, d["count"] - added))
                 self.nav.list_changed(bool(d["replace"]))   # also resumes from BLOCKED
+        elif t == lp.MSG_LIDAR_OBSTACLES:          # LD19 obstacle sectors from the bridge (#77)
+            self.nav.add_lidar(d, self._nav_in(self.now()))
         elif t == lp.MSG_EVENT:
             ev = d["event"]
             if ev == lp.EVT_LINK_ESTOP:            # latching station E-stop (main.cpp onLinkFrame)
