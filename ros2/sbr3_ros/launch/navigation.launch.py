@@ -55,6 +55,9 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(nav_share, "launch", "navigation_launch.py")),
             launch_arguments=common.items()),
+        DeclareLaunchArgument("keepout", default_value="true", description="station zones -> Nav2 keepout filter"),
+        Node(package="sbr3_ros", executable="keepout_mask", name="keepout_mask", output="screen",
+             condition=IfCondition(LaunchConfiguration("keepout"))),
         Node(package="rviz2", executable="rviz2", name="rviz2", output="log",
              arguments=["-d", os.path.join(share, "rviz", "sbr3.rviz")],
              condition=IfCondition(LaunchConfiguration("rviz"))),
