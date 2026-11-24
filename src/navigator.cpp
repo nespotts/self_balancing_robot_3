@@ -78,6 +78,28 @@ void Navigator::addRange(const RangeFrame& f, uint32_t now_ms) {
   last_range_ms_ = now_ms ? now_ms : 1;
 }
 
+// LD19 obstacles (#77): robot-frame points of the pose age_ms ago (dead-reckoned back from the pose now with its
+// speed and yaw rate) -> pose frame. They replace the previous frame's points.
+bool Navigator::addLidar(const LidarObstacleFrame& f, const NavIn& in) {
+  if (f.sectors != LINK_LIDAR_SECTORS || f.age_ms > LINK_LIDAR_MAX_AGE_MS) return false;
+  const float age = (float)f.age_ms * 0.001f;
+  const float hm = (in.heading - 0.5f * in.yaw_rate * age) * kDeg;  // mean heading over that time
+  const float ox = in.x - in.speed * age * cosf(hm), oy = in.y - in.speed * age * sinf(hm);
+  const float h = (in.heading - in.yaw_rate * age) * kDeg;
+  const float c = cosf(h), s = sinf(h);
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < LINK_LIDAR_SECTORS; i++) {
+    const float x = f.xy_mm[2 * i], y = f.xy_mm[2 * i + 1];
+    if (x == 0 && y == 0) continue;  // no return in this sector
+    lx_[n] = ox + x * c - y * s;
+    ly_[n] = oy + x * s + y * c;
+    n++;
+  }
+  lidar_n_ = n;
+  lidar_ms_ = in.now_ms ? in.now_ms : 1;
+  return true;
+}
+
 void Navigator::onModeChange(const NavIn& in) {
   mode_ = in.mode;
   now_ms_ = in.now_ms;
@@ -103,8 +125,12 @@ void Navigator::onModeChange(const NavIn& in) {
   }
 }
 
-// No RangeFrame for kBlindMs (rng.enable 0, sensors dead): no obstacle stop is possible (safety review #38).
-bool Navigator::blind(uint32_t now_ms) const { return !sensed_ms_ || now_ms - sensed_ms_ > kBlindMs; }
+// No fresh lidar frame and no RangeFrame for kBlindMs (rng.enable 0, sensors dead): no obstacle stop is
+// possible (safety review #38).
+bool Navigator::blind(uint32_t now_ms) const {
+  if (lidarFresh(now_ms)) return false;
+  return !sensed_ms_ || now_ms - sensed_ms_ > kBlindMs;
+}
 
 void Navigator::logBlind(uint8_t mode) {
   if (mode == MODE_EXPLORE || P(P_NAV_BLIND_SPEED) <= 0)
@@ -118,6 +144,8 @@ void Navigator::logBlind(uint8_t mode) {
 void Navigator::onPoseReset() {
   n_ = 0;
   pt_n_ = 0;
+  lidar_n_ = 0;
+  lidar_ms_ = 0;  // its points were in the old frame: no lidar until the next frame
   hold_x_ = hold_y_ = 0;
   listChanged(true);
 }
@@ -131,10 +159,11 @@ void Navigator::updateObstacles(const NavIn& in) {
   const float half = P(P_NAV_SIDE_MIN_MM) > 0 ? fminf(0.5f * P(P_NAV_CORRIDOR_MM), kHalfWidth + 10.0f)
                                               : 0.5f * P(P_NAV_CORRIDOR_MM);
   const uint32_t age = (uint32_t)P(P_NAV_OBST_AGE_MS);
+  const bool lidar = lidarFresh(in.now_ms);  // fresh lidar wins: its points replace the sweep's (#77)
   float front = 0, rear = 0, gl = 0, gr = 0, near = 0, near_xr = 0;
-  for (uint8_t i = 0; i < pt_n_; i++) {
-    if (in.now_ms - pt_ms_[i] > age) continue;
-    const float dx = px_[i] - in.x, dy = py_[i] - in.y;
+  for (uint8_t i = 0; i < (lidar ? lidar_n_ : pt_n_); i++) {
+    if (!lidar && in.now_ms - pt_ms_[i] > age) continue;
+    const float dx = (lidar ? lx_[i] : px_[i]) - in.x, dy = (lidar ? ly_[i] : py_[i]) - in.y;
     const float xr = dx * c + dy * s, yr = -dx * s + dy * c;
     if (xr > -kSideBack && xr < kSideAhead && fabsf(yr) >= kSideInner) {  // beside the body: side gap
       const float g = fmaxf(1.0f, fabsf(yr) - kHalfWidth);
@@ -275,6 +304,11 @@ void Navigator::update(const NavIn& in) {
   speed_ = turn_ = 0;
   obst_flag_ = false;
   stuck_seen_ = false;
+  const bool lidar = lidarFresh(in.now_ms);
+  if (lidar != lidar_was_) {
+    lidar_was_ = lidar;
+    if (navMode(in.mode)) log(lidar ? "nav: lidar obstacles on" : "nav: lidar obstacles lost (no scan for 0.5 s)");
+  }
   updateObstacles(in);
   if (in.mode == MODE_GOTO || in.mode == MODE_EXPLORE) {
     updateGoto(in);

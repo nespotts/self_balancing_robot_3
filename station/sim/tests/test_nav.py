@@ -24,15 +24,38 @@ class NavRun:
         self.r = SimRobot(seed=seed)
         self.logs, self.navs, self.tlm = [], [], []
         self.hb = HB                   # heartbeat payload (clients = 1)
+        self.lidar = False             # send MSG_LIDAR_OBSTACLES (#77) every 0.1 s, like the bridge with an LD19
+        self.lidar_seq = 0
+        self.lidar_next = 0.0
+        self.ranges = 0                # RangeFrames the sim sent
 
     def frame(self, f):
         self.r.on_frame(f[2], payload(f))
+
+    def lidar_frame(self):
+        """What lidar_obstacles.py sends: nearest return (120..8000 mm, 1 deg rays from the axle) per sector, robot
+        frame of the pose now (the sim's odometry is exact, so the true pose is the odometry pose)."""
+        r = self.r
+        best = [None] * lp.LINK_LIDAR_SECTORS
+        for k in range(360):
+            d = r.room.raycast(r.X, r.Y, math.radians(r.TH + k), 8000.0)
+            if d is None or d < 120.0:
+                continue
+            i = int(math.floor(k / lp.LIDAR_SECTOR_DEG + 0.5)) % lp.LINK_LIDAR_SECTORS
+            if best[i] is None or d < best[i][0]:
+                best[i] = (d, d * math.cos(math.radians(k)), d * math.sin(math.radians(k)))
+        f = lp.encode_lidar_obstacles(self.lidar_seq, 0, [b and b[1:] for b in best])
+        self.lidar_seq += 1
+        self.frame(f)
 
     def run(self, seconds, until=None):
         r = self.r
         end = r.t + seconds
         while r.t + r.dt <= end:
             r.on_frame(lp.MSG_HEARTBEAT, self.hb)
+            if self.lidar and r.t >= self.lidar_next:
+                self.lidar_next = r.t + 0.1
+                self.lidar_frame()
             r.run_until(min(end, r.t + 0.05), max_steps=100000)
             for f in r.out:
                 t, p = f[2], payload(f)
@@ -42,6 +65,8 @@ class NavRun:
                     self.navs.append(lp.decode_nav_status(p))
                 elif t == lp.MSG_TELEMETRY:
                     self.tlm.append(lp.decode_telemetry(p))
+                elif t == lp.MSG_RANGE:
+                    self.ranges += 1
             r.out = []
             if until and until(self):
                 return True
@@ -272,6 +297,65 @@ class TestStation(unittest.TestCase):
         r = n.r
         self.assertGreater(r.room.clearance(r.X, r.Y), simmod.ROBOT_RADIUS)
         self.assertGreater(r.Y, -1500.0 + simmod.ROBOT_RADIUS)
+        self.assertLess(r.Y, -800.0)                      # it did drive
+        self.assertLess(abs(r.speed_f), 40.0)
+        self.assertTrue(n.tlm[-1]["status"] & lp.TLM_OBSTACLE)
+
+
+class TestLidarNav(unittest.TestCase):
+    """Issue #77: no sweep (rng.enable 0), obstacles only from MSG_LIDAR_OBSTACLES frames."""
+
+    def lidar_run(self, seed, points, mode):
+        n = NavRun(seed=seed)
+        n.r.set_param(n.r.pidx["rng.enable"], 0.0)
+        n.lidar = True
+        n.frame(lp.encode_goto(points))
+        n.stand_up(mode)
+        return n
+
+    def test_explore_lidar_only_stops_for_the_box(self):
+        n = self.lidar_run(31, [(600.0, 900.0), (2500.0, 900.0)], lp.MODE_EXPLORE)
+        self.assertTrue(n.run(60.0, lambda s: s.r.nav.state == lp.NAV_BLOCKED), n.logs[-5:])
+        n.run(2.0)
+        r = n.r
+        self.assertEqual(r.nav.state, lp.NAV_BLOCKED)
+        self.assertLess(r.X, 1200.0 - simmod.ROBOT_RADIUS)               # stopped short of the box
+        self.assertGreater(r.X, 600.0)                                    # after driving the first leg + some
+        self.assertGreater(r.room.clearance(r.X, r.Y), simmod.ROBOT_RADIUS)
+        blocked = [m for m in n.navs if m["state"] == lp.NAV_BLOCKED]
+        self.assertGreater(blocked[-1]["obstacle_mm"], 150.0)
+        self.assertLess(blocked[-1]["obstacle_mm"], r.P("rng.obstacle_mm") + r.P("nav.clear_mm"))
+        self.assertTrue(r.nav.lidar_fresh(int(r.t * 1000)))
+        self.assertFalse(any("paused" in l or "no range" in l for l in n.logs), n.logs)     # never blind
+        self.assertEqual(n.ranges, 0)                                     # and no sweep at all
+
+    def test_lidar_lost_pauses_explore_until_it_is_back(self):
+        n = self.lidar_run(32, [(3000.0, 0.0)], lp.MODE_EXPLORE)
+        self.assertTrue(n.run(20.0, lambda s: s.r.nav.state == lp.NAV_DRIVING and s.r.speed_f > 150))
+        n.lidar = False
+        n.run(1.5)                                                        # stale after 0.5 s, then ramp down
+        x0 = n.r.X
+        n.run(3.0)
+        self.assertLess(abs(n.r.X - x0), 80.0)                            # paused (balancing sway)
+        self.assertIn("nav: lidar obstacles lost (no scan for 0.5 s)", n.logs)
+        self.assertTrue(any("EXPLORE paused" in l for l in n.logs), n.logs[-5:])
+        n.lidar = True
+        n.run(3.0)
+        self.assertGreater(n.r.X - x0, 200.0)                             # going again
+
+    def test_station_cmd_vel_stops_with_lidar(self):
+        n = NavRun(seed=33)
+        n.r.set_param(n.r.pidx["rng.enable"], 0.0)
+        n.lidar = True
+        n.r.TH = -90.0                                    # facing the wall at y = -1500
+        n.stand_up(lp.MODE_STATION)
+        cmd = lp.encode_cmd_vel(200.0, 0.0)
+        end = n.r.t + 15.0
+        while n.r.t + n.r.dt <= end:
+            n.frame(cmd)
+            n.run(0.1)
+        r = n.r
+        self.assertGreater(r.room.clearance(r.X, r.Y), simmod.ROBOT_RADIUS)
         self.assertLess(r.Y, -800.0)                      # it did drive
         self.assertLess(abs(r.speed_f), 40.0)
         self.assertTrue(n.tlm[-1]["status"] & lp.TLM_OBSTACLE)

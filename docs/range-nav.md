@@ -77,7 +77,8 @@ GOTO and EXPLORE follow the list the same way; HOLD holds the spot it started at
 | Turning in place | corners sweep r 88 mm. Something ahead / behind within 105 mm → first step straight away (≤ `nav.stuck_backoff_mm`). Target behind and a wall close at one side → turn the nose away from that wall |
 | Stuck (#62) | driving (not in the last 3 × `arrive_mm`) or turning, but < `nav.stuck_mm` / 15° progress for `nav.stuck_ms` → BLOCKED, back off `nav.stuck_backoff_mm` (at 2 × `nav.min_speed`, ≤ 5 s). GOTO then goes on; EXPLORE waits for the planner (it replans 5 s later with +100 mm margin) |
 | Applies to | GOTO, EXPLORE, HOLD, STATION. MANUAL: `TLM_OBSTACLE` only |
-| No sweep | `rng.enable 0` (no RangeFrame for 3 s) → no obstacle stop → **EXPLORE paused**, **GOTO ≤ `nav.blind_speed`** (log `nav: no range readings - obstacle stop is off: …`) |
+| LD19 lidar (#77) | a `MSG_LIDAR_OBSTACLES` frame in the last 0.5 s: its 36 points (nearest per 10° sector) replace the sweep's points for everything above (log `nav: lidar obstacles on` / `… lost`). [ld19.md](ld19.md#obstacles-for-the-robot-issue-77) |
+| No sweep | no fresh lidar frame and `rng.enable 0` (no RangeFrame for 3 s) → no obstacle stop → **EXPLORE paused**, **GOTO ≤ `nav.blind_speed`** (log `nav: no range readings - obstacle stop is off: …`) |
 | Pose reset | clears the list, points and hold point |
 | GO_HOME | list = [first waypoint, or the origin], mode GOTO (never arms) |
 | NavStatusFrame | at once on a change of state / index / count, else 2 Hz in GOTO/EXPLORE/HOLD; `obstacle_mm` = blocking range |

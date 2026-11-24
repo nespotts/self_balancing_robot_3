@@ -56,6 +56,7 @@ and for the Tune tools `presets`, `score_state`, `score_runs`, `motor_state`, `m
 `status.lidar` (null without a lidar port): `{"state":"ok|waiting|no data|junk|stale|off","port","error","pps","scan_hz","rpm","packets","crc_errors","bytes_dropped","scans","scan_age_s","flowing","cpu_pct","cost_ms","tilt_ref","dropped":{...}}`; Health has a "Lidar" tile from it.
 `map.stats.lmatch` (LD19 scan matching, #78, [ld19.md](ld19.md#scan-matching-78)): `{"on":true,"lidar":true,"state":"matched|matched: pose fine|building the map|kept: <why>|off","score":0.98,"fix":"xy th","applied":[dx,dy,dth],"ok_pct":97,"ms":3.4,"matched":812,"rejected":9,"jumps":0,"moved_mm":640,"moved_deg":6.2}`
 (`applied`: the last correction step, mm / deg; `ms`: cost per match). Its settings are map settings (`{"t":"map","action":"set","settings":{"lidar_match":false}}`, `match_*`), in `settings.json`.
+`status.lidar_nav` (null without a lidar port): `{"sent":812,"age_s":0.04,"skipped":{"off","no_pose","stale","tilt","few","no_link"}}`, the obstacle frames for the robot's navigator ([below](#link-messages-to-the-robot)).
 `scan` (on connect and after each stop-and-scan): `{"t":"scan","corr":[dx,dy,dth],"applied":3,"last":{...},"history":[{"ok":true,"why":"","dx":-31,"dy":12,"dth":-1.2,"mm":33,"n":58,"inliers":51,"margin":0.11,"who":"auto","time":1795300000},...]}` (newest first, 20 kept; `why` says why a scan was not used).
 No WebSocket (old Kindle): `GET /api/state`, `GET|POST /api/cmd`.
 The Android app uses `POST /api/cmd` when it is left: `cmd_vel 0`, `{"t":"plan","action":"stop"}`, and `set_mode` BALANCE if the
@@ -137,3 +138,22 @@ unless you used **Save to robot** while it was raised (then that is the new defa
 Half-open phones are dropped (WebSocket ping every 15 s, closed after 45 s of silence or a few MB of unsent data). Log CSV
 exports and big downloads run in a worker thread, so they cannot stall the robot's 500 ms heartbeat; if the event loop is ever
 blocked for more than 0.2 s the Logs tab says so.
+
+## Link messages to the robot
+
+The bridge <-> Teensy link itself (framed binary, CRC16) is defined in
+[include/protocol/link_protocol.h](../include/protocol/link_protocol.h) (link v5), mirrored in `station/bridge/link_protocol.py`.
+New in v5:
+
+**`MSG_LIDAR_OBSTACLES` (0x87, Pi -> Teensy, ~10 Hz, issue #77)**: the LD19's nearest return per sector, for the navigator
+([ld19.md](ld19.md#obstacles-for-the-robot-issue-77)). Sent by `station/bridge/lidar_obstacles.py` once per good turn.
+
+| Byte | Field | |
+|---|---|---|
+| 0 | `seq` u8 | + 1 per frame |
+| 1 | `sectors` u8 | 36 (`LINK_LIDAR_SECTORS`); another count is dropped |
+| 2-3 | `age_ms` u16 | age of the pose the points are relative to (the bridge's newest telemetry); > 300 (`LINK_LIDAR_MAX_AGE_MS`) is dropped |
+| 4-147 | `xy_mm` 72 x i16 | x, y per sector: robot frame (x forward, y left, mm from the axle centre). Sector i = (i - 0.5) x 10 .. (i + 0.5) x 10 deg CCW from forward. `0, 0` = no return |
+
+No frame for 500 ms (`LINK_LIDAR_FRESH_MS`) = no lidar: the robot uses the sweep again, or goes blind. v4 firmware ignores the
+message; a v4 bridge never sends it.

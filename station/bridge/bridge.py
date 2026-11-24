@@ -13,6 +13,7 @@ from . import falls as falls_mod
 from . import health as health_mod
 from .httpws import HttpServer, Response, check_origin
 from .lidar import Lidar
+from .lidar_obstacles import LidarObstacles
 from .mapping import Mapper
 from .planner import Planner
 from .session_log import SessionLog, to_csv
@@ -171,6 +172,8 @@ class Bridge:
         self.range_listeners.append(self.mapper.on_range)
         # LD19 spinning lidar (#76): "/dev/ttyS5", "COM7" or "tcp://host:port" (simulator); None = no lidar
         self.lidar = Lidar(self.mapper, lidar_port, say=self.say, clock=_now) if lidar_port else None
+        # ... and its obstacles for the robot's navigator: MSG_LIDAR_OBSTACLES per scan (#77)
+        self.lidar_obst = LidarObstacles(self.lidar, self.send, clock=_now) if self.lidar else None
         self.planner =Planner(self, NAV_STATE_NAMES)           # route planning + explore on the map
 
         self.cmd = (0.0, 0.0)
@@ -631,6 +634,7 @@ class Bridge:
             "log_error": self.log.error,                   # why the session log is off ("" = fine)
             "zone_alert": self.zone_alert,                 # zones watchdog (#70): last stop / joystick block
             "lidar": self.lidar.status(now) if self.lidar else None,   # LD19 (#76): state, packets/s, rpm, CRC errors, scan age
+            "lidar_nav": self.lidar_obst.status(now) if self.lidar_obst else None,   # obstacle frames to the robot (#77)
         }
 
     def health_ctx(self):
