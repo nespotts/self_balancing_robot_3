@@ -31,7 +31,7 @@ case "$WHAT" in
   mapping)  ros2 launch sbr3_ros mapping.launch.py url:="$URL" "$@" ;;
   nav)      ros2 launch sbr3_ros navigation.launch.py url:="$URL" "$@" ;;
   localize) ros2 launch sbr3_ros localize.launch.py url:="$URL" "$@" ;;
-  teleop)   ros2 launch sbr3_ros teleop.launch.py url:="$URL" "$@" ;;
+  teleop)   ros2 launch sbr3_ros teleop.launch.py adapter:=true url:="$URL" "$@" ;;
   replay)   ros2 launch sbr3_ros replay.launch.py "$@" ;;
   adapter)  ros2 run sbr3_ros adapter --ros-args -p url:="$URL" ;;
   *) echo "usage: run.sh mapping|nav|localize|teleop|replay|adapter [URL|sim|none] [launch args]"; exit 2 ;;
