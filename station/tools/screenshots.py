@@ -95,6 +95,10 @@ SHOTS = [  # name, device, view, js to run after the view is shown, extra wait s
     ("phone-places-menu", PHONE, "map", "document.getElementById('place-sheet').hidden=true;document.getElementById('map-follow').click();"
      "document.getElementById('map-more').click()", 1),
     ("phone-explore", PHONE, "map", "document.getElementById('map-menu').hidden=true;sbr3.send({t:'map',action:'reset'});sbr3.send({t:'plan',action:'explore'})", 14),
+    # LD19 scan matching (issue #78): sim with --lidar --tour --drift 3 running for a minute; the map info line + the toggle
+    ("phone-scanmatch", PHONE, "map", "", 1.5),
+    ("phone-scanmatch-settings", PHONE, "map", "document.getElementById('map-more').click();"
+     "const s=document.getElementById('map-set');s.open=true;s.scrollIntoView()", 1),
     # last: disarm, then the first tap of the two-tap "Arm & Balance"
     ("phone-arm", PHONE, "drive", "sbr3.send({t:'set_mode',mode:0});"
      "setTimeout(()=>document.getElementById('arm-btn').click(),1800)", 2.5),

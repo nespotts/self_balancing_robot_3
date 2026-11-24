@@ -79,6 +79,7 @@ class Grid:
                        bytearray([UNKNOWN]) * (nx * self.T * ny * self.T))
         self.dirty = set()        # tiles changed since the last take_dirty() (relative to the corner)
         self.touched = set()      # tiles ever changed (what a full update sends)
+        self.fdirty = set()       # tiles changed since the scan matcher's likelihood field last looked (#78)
         self.warning = None
 
     def _set_area(self, cx0, cy0, W, H, cells):
@@ -108,6 +109,7 @@ class Grid:
         dtx, dty = dx // T, dy // T
         self.dirty = {(a + dtx, b + dty) for a, b in self.dirty}
         self.touched = {(a + dtx, b + dty) for a, b in self.touched}
+        self.fdirty = {(a + dtx, b + dty) for a, b in self.fdirty}
         self._set_area(nx0, ny0, nW, nH, new)
 
     def _grow(self, xmin, xmax, ymin, ymax):
@@ -232,10 +234,11 @@ class Grid:
         tx1 = min(self.ntx - 1, int((xmax - self.x0) // r))
         ty0 = max(0, int((ymin - self.y0) // r))
         ty1 = min(self.nty - 1, int((ymax - self.y0) // r))
-        d = self.dirty
+        d, f = self.dirty, self.fdirty
         for ty in range(ty0, ty1 + 1):
             for tx in range(tx0, tx1 + 1):
                 d.add((tx, ty))
+                f.add((tx, ty))
 
     # ------------------------------------------------------------ updates
     def integrate(self, ox, oy, free_ends, hit=None, weak=False):
@@ -555,6 +558,7 @@ class Grid:
         g.init_n = (int(n[0]), int(n[1]))
         g.dirty = set()
         g.touched = set(tuple(t) for t in d.get("touched", []))
+        g.fdirty = set(g.touched)
         m = d.get("model") or {}
         g.set_model(**{k: float(m[k]) for k in ("hit", "free", "lo", "hi") if k in m})
         g._set_area(cx0, cy0, W, H, bytearray(cells))

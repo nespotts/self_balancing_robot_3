@@ -159,7 +159,21 @@ for (const [id, t, key] of NUM) {
 }
 $("set-correct").onchange = (e) => cmd({ t: "map", action: "set", settings: { correct: e.target.checked } });
 $("set-stopscan").onchange = (e) => cmd({ t: "map", action: "set", settings: { stop_scan: e.target.checked } });
+$("set-lmatch").onchange = (e) => cmd({ t: "map", action: "set", settings: { lidar_match: e.target.checked } });
 $("set-scanpause").onchange = (e) => cmd({ t: "plan", action: "set", settings: { scan_pause: e.target.checked } });
+
+// LD19 scan matching (#78): one line for the map info box ("" when there is no lidar / it is off)
+export function matchLine() {
+  const L = occ.stats && occ.stats.lmatch;
+  if (!L || !L.lidar || !L.on || !L.state || L.state === "off") return "";
+  if (L.state.startsWith("matched")) {
+    const a = L.applied, fix = a && (a[0] || a[1] || a[2])
+      ? `fix ${Math.round(Math.hypot(a[0], a[1]))} mm ${Math.abs(a[2]).toFixed(1)}°` : "pose fine";
+    return `Scan match ✓ ${Math.round(100 * (L.score || 0))} % · ${fix} · ${L.ms} ms`;
+  }
+  const why = L.state.replace(/^kept: /, "");
+  return `Scan match: ${why.length > 38 ? why.slice(0, 37) + "…" : why}`;
+}
 
 // stop-and-scan pose corrections (#71): a toast when one is applied, the history behind the menu
 const fmtCorr = (e) => `${(e.mm / 10).toFixed(e.mm < 100 ? 1 : 0)} cm / ${Math.abs(e.dth).toFixed(1)}°`;
@@ -188,6 +202,8 @@ function syncSettings() {
   }
   if (occ.settings && "correct" in occ.settings) $("set-correct").checked = occ.settings.correct;
   if (occ.settings && "stop_scan" in occ.settings) $("set-stopscan").checked = occ.settings.stop_scan;
+  if (occ.settings && "lidar_match" in occ.settings) $("set-lmatch").checked = occ.settings.lidar_match;
+  $("set-lmatch-row").hidden = !(occ.stats && occ.stats.lmatch && occ.stats.lmatch.lidar);
   if (plan.settings && "scan_pause" in plan.settings) $("set-scanpause").checked = plan.settings.scan_pause;
   if (plan.settings && "zones_block_manual" in plan.settings) $("set-zblock").checked = plan.settings.zones_block_manual;
   const st = occ.stats || {};

@@ -2,7 +2,7 @@
 import { state, on, send, modeName, flag } from "./conn.js";
 import { toast } from "./ui.js";
 import { SENS_RGB, SENS_NEW } from "./chart.js";
-import { drawOccMap, drawPlan, planActive, plan, onChange, routeOn, hasMap } from "./occmap.js";
+import { drawOccMap, drawPlan, planActive, plan, onChange, routeOn, hasMap, matchLine } from "./occmap.js";
 import { drawPlaces, hitPlace, openSheet, openPlaceMenu, onPlacesChange } from "./places.js";
 import { drawZones, zoneDraw, zoneDrawing, bindZones } from "./zones.js";
 
@@ -214,6 +214,8 @@ function updateInfo() {
     if (n.waypoint_count) s += ` · ${Math.min(n.nav_index + 1, n.waypoint_count)}/${n.waypoint_count} · ${(n.distance_mm / 1000).toFixed(2)} m`;
   }
   if (flag("obstacle")) s += "\n⚠ obstacle ahead";
+  const ml = matchLine();
+  if (ml) s += "\n" + ml;
   info.textContent = s;
   info.style.whiteSpace = "pre-line";
 }
