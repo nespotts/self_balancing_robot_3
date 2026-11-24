@@ -128,7 +128,7 @@ class TestMatchesHeader(unittest.TestCase):
         self.assertEqual(len(lp.NAV_STATE_NAMES), lp.NAV_STATE_COUNT)
         self.assertEqual(len([k for k in d if k.startswith("NAV_")]), lp.NAV_STATE_COUNT)
         link_events = {k: v for k, v in d.items() if k.startswith("EVT_LINK_")}
-        self.assertEqual(sorted(link_events), ["EVT_LINK_ARM", "EVT_LINK_ESTOP", "EVT_LINK_ESTOP_RELEASE"])
+        self.assertEqual(sorted(link_events), ["EVT_LINK_ARM", "EVT_LINK_ESTOP", "EVT_LINK_ESTOP_RELEASE", "EVT_LINK_STUCK"])
         for k, v in link_events.items():
             self.assertEqual(getattr(lp, k), v, k)
             self.assertGreaterEqual(v, 0x80)    # never collides with a RadioEvent

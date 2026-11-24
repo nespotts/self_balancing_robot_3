@@ -110,6 +110,7 @@ void Navigator::onModeChange(const NavIn& in) {
   stop_since_ = 0;
   stuck_ = away_ = away_done_ = false;
   stuck_ms_ = 0;
+  lidar_stuck_ms_ = 0;
   if (in.mode == MODE_GOTO || in.mode == MODE_EXPLORE) {
     if (idx_ >= n_) idx_ = 0;  // list done (or empty): start over
     phase_ = n_ ? SEEK : DONE;
@@ -219,6 +220,11 @@ void Navigator::sideAvoid(float vmax, float tmax) {
 bool Navigator::stuckCheck(const NavIn& in, bool turning, bool trying) {
   if (!trying || P(P_NAV_STUCK_MS) <= 0) return false;
   stuck_seen_ = true;
+  if (!turning && lidar_stuck_ms_) {  // the lidar saw no motion while the wheels turn (#79)
+    lidar_stuck_ms_ = 0;
+    stuck_lidar_ = true;
+    return true;
+  }
   const bool moved = turning ? fabsf(in.heading - stuck_h_) >= kStuckDeg
                              : hypotf(in.x - stuck_x_, in.y - stuck_y_) >= P(P_NAV_STUCK_MM);
   if (!stuck_ms_ || turning != stuck_turn_ || moved) {
@@ -238,8 +244,12 @@ void Navigator::startStuck(const NavIn& in, bool turning) {
   driving_ = true;  // so the BLOCKED branch runs (backs off) even if it was turning in place
   stuck_ms_ = 0;
   if (in.mode == MODE_EXPLORE) latched_ = true;
-  log("nav: stuck, no progress %s for %.1f s (waypoint %u/%u)", turning ? "turning" : "driving",
-      (double)(P(P_NAV_STUCK_MS) / 1000.0f), (unsigned)idx_ + 1, (unsigned)n_);
+  if (stuck_lidar_)
+    log("nav: stuck, wheels turn but the lidar sees no motion (waypoint %u/%u)", (unsigned)idx_ + 1, (unsigned)n_);
+  else
+    log("nav: stuck, no progress %s for %.1f s (waypoint %u/%u)", turning ? "turning" : "driving",
+        (double)(P(P_NAV_STUCK_MS) / 1000.0f), (unsigned)idx_ + 1, (unsigned)n_);
+  stuck_lidar_ = false;
   back_mm_ = P(P_NAV_STUCK_BACK);
   backing_ = back_mm_ > 0;
   back_x_ = in.x;
@@ -321,6 +331,7 @@ void Navigator::update(const NavIn& in) {
     else dist_ = 0;
   }
   if (!stuck_seen_) stuck_ms_ = 0;  // not trying to move this step: the no-progress window starts over
+  if (lidar_stuck_ms_ && in.now_ms - lidar_stuck_ms_ > kLidarStuckMs) lidar_stuck_ms_ = 0;  // not driving: dropped
 }
 
 void Navigator::startBlocked(const NavIn& in) {
@@ -490,7 +501,9 @@ void Navigator::updateGoto(const NavIn& in) {
     const float obst = obst_;
     vl = 0;
     if (backing_) {
-      const float back = hypotf(in.x - back_x_, in.y - back_y_);
+      // backed off = travel backwards along the heading it blocked at (a robot still rolling on, or wheels still
+      // spinning forward after a lidar stuck, #79, is not backing off)
+      const float back = -((in.x - back_x_) * cosf(blk_h_ * kDeg) + (in.y - back_y_) * sinf(blk_h_ * kDeg));
       // stuck: twice as fast (a balancing robot pressed against a wall barely follows the slowest speed)
       float vb = -fmaxf(P(P_NAV_MIN_SPEED), 30.0f) * (stuck_ ? 2.0f : 1.0f);
       vb = limitSpeed(vb, vmax, true);

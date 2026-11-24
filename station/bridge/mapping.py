@@ -70,6 +70,11 @@ DEFAULTS = {
     "match_map_mm": 250.0,      # while matching, a turn goes into the map only after the robot moved this far ...
     "match_map_deg": 20.0,      # ... or turned this much ...
     "match_map_s": 5.0,         # ... or this long after the last one (the map is the reference: see lidarmatch.py)
+    # wheel slip (#79): hold the position while the wheels spin, "lost" + a wider search instead of mapping a bad pose
+    "match_slip": True,         # off: the #78 behaviour (a pose rejected for 10 s is mapped anyway)
+    "match_wide_mm": 400.0,     # lost: the search widens up to this ...
+    "match_wide_deg": 6.0,      # ... (the gyro heading does not slip: the heading window grows less)
+    "match_stuck_s": 2.5,       # slipping in GOTO / EXPLORE, the lidar pose still this long: the robot is stuck (0 = off)
 }
 LIMITS = {"pitch_limit_deg": (0.5, 45), "no_target_mm": (0, 4000), "max_hit_mm": (100, 8000),
           "min_mm": (0, 500), "cone_deg": (0, 30), "hit_arc_deg": (0, 30), "body_free_mm": (0, 150),
@@ -77,7 +82,8 @@ LIMITS = {"pitch_limit_deg": (0.5, 45), "no_target_mm": (0, 4000), "max_hit_mm":
           "match_min_score": (0, 1), "match_min_inliers": (0, 1), "match_min_curv": (0, 1), "match_min_margin": (0, 1),
           "match_gain": (0.05, 1), "match_deadband_mm": (0, 100), "match_deadband_deg": (0, 3),"match_step_mm": (1, 300), "match_step_deg": (0.05, 10), "match_jump_mm": (5, 1000),
           "match_jump_deg": (0.2, 30), "match_warmup": (0, 1000), "match_map_mm": (0, 2000), "match_map_deg": (0, 180),
-          "match_map_s": (0, 60), "match_max_turn_dps": (5, 1000)}
+          "match_map_s": (0, 60), "match_max_turn_dps": (5, 1000), "match_wide_mm": (100, 400),
+          "match_wide_deg": (1, 15), "match_stuck_s": (0, 30)}
 INTS = ("match_every_n", "match_points", "match_warmup")
 
 
@@ -101,6 +107,7 @@ class Mapper:
         self.corr_listeners = []         # callables(): the LD19 matcher moved corr (planner: route in the odometry frame)
         self.lmatch = lidarmatch.LidarMatch(self)   # LD19 scan-to-map matching (#78), fed by lidar.py
         self.scan_sent = 0               # stopscan.seq last broadcast
+        self.lm_sent, self.corr_sent, self.last_hdr = ("track", ""), None, 0.0   # last map header: matcher mode, corr, time
         self.lidar = None                # lidar.Lidar (#76), set by it
         self.n = {"readings": 0, "used": 0, "tilt": 0, "no_target": 0, "short": 0, "sweep_skipped": 0, "scans": 0}
         self.cpu_s = 0.0                 # time spent in on_range / poll since the last stats
@@ -284,12 +291,18 @@ class Mapper:
             self.zones_pending = True
         else:
             dirty = self.grid.take_dirty()
-            if dirty:
+            lm = self.lmatch
+            key = (lm.mode, lm.state if lm.mode != "track" else "")
+            # slipping / lost (#79) nothing is mapped, so no tiles would carry the new state and correction: header only
+            hdr = key != self.lm_sent or (lm.mode != "track" and self.corr != self.corr_sent)
+            if dirty or (hdr and now - self.last_hdr >= 1.0):
                 m = self._header(False)
-                m["tiles"] = self.grid.tiles_msg(dirty)
+                m["tiles"] = self.grid.tiles_msg(dirty) if dirty else []
                 out.append(json.dumps(m, separators=(",", ":")))
-                for f in self.extra_listeners:
-                    f()
+                self.lm_sent, self.corr_sent, self.last_hdr = key, list(self.corr), now
+                if dirty:
+                    for f in self.extra_listeners:
+                        f()
         if self.places_pending:
             self.places_pending = False
             out.append(self.places_msg())
@@ -352,6 +365,11 @@ class Mapper:
             return {"t": "map_list", "maps": self.list()}
         if act == "list":
             return {"t": "map_list", "maps": self.list()}
+        if act == "trust_pose":             # LD19 matcher lost (#79): take the pose as it is, map from here
+            if not self.lmatch.trust_pose(who):
+                return {"t": "error", "text": "the scan matcher is not lost"}
+            self.full_pending = True
+            return None
         if act == "scan":                   # "Scan & correct" (#71): match the next scan taken standing still
             if not self.n["used"]:
                 return {"t": "error", "text": "no map yet to match against"}
@@ -408,7 +426,9 @@ class Mapper:
         return (p["x"], p["y"]) if p else None
 
     def on_pose_reset(self):
-        """The robot's odometry was reset here: the new origin is the default Home."""
+        """The robot's odometry was reset here: the new origin is the default Home. With LD19 matching the correction
+        first keeps the robot where the lidar last saw it (#79), so the map pose does not jump to the old origin."""
+        self.lmatch.on_pose_reset()
         self.places.origin = [round(v, 1) for v in self.map_pose(0.0, 0.0, 0.0)[:2]]
         self.places_changed()
 

@@ -356,6 +356,8 @@ static void onLinkFrame(uint8_t type, const uint8_t* p, uint8_t len) {
         }
       } else if (p[0] == EVT_LINK_ARM) {
         modes.onLinkArm(now_ms);
+      } else if (p[0] == EVT_LINK_STUCK) {  // lidar: wheels turn, robot still (#79)
+        nav.onLidarStuck(now_ms);
       } else {
         handleEvent(p[0]);
       }

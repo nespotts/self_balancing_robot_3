@@ -43,6 +43,7 @@ rm /tmp/sbr3-bridge.release                   # bridge reconnects
 | `{"t":"plan","action":"home"}` / `{"t":"plan","action":"goto","place":"Couch"}` | plan a route to Home / a saved place (`arm` as for goto) |
 | `{"t":"zones","action":"add","kind":"nogo","pts":[[x,y],...]}` | virtual walls / no-go / fence / slow zones / mazes (see **Zones** below) |
 | `{"t":"plan","action":"solve","maze":"m4"}` | drive through that maze to its exit cell, timed (`arm` as for goto) |
+| `{"t":"map","action":"trust_pose"}` | LD19 matcher lost (#79): take the pose as it is and map from here (map menu **Trust the pose here**, shown only while lost). Error when it is not lost |
 | `{"t":"map","action":"scan"}` | stop-and-scan pose correction now (#71): the next two sweeps taken standing still are matched to the map (also with the `stop_scan` map setting off). Result: a `scan` message |
 | `{"t":"lidar","action":"set","settings":{"yaw_deg":90,...}}` | LD19 lidar (#76, see [ld19.md](ld19.md)): `get` / `set` / `defaults`; the reply (and every new client) is `{"t":"lidar","settings":{...},"defaults":{...},"status":{...}}`. Settings persist in `lidar.json` next to the saved maps. Error when the bridge has no lidar port |
 | `{"t":"sub","tune":true}` | receive every telemetry frame as `{"t":"tune","cols":[...],"rows":[...]}` |
@@ -54,8 +55,12 @@ and for the Tune tools `presets`, `score_state`, `score_runs`, `motor_state`, `m
 (sensor 0 = front / XSHUT 34, 1 = rear / XSHUT 28; angle in the robot frame, + = CCW; raw mm as sent). `status.rng_hz` = readings/s per sensor.
 `lidar_scan` (<= 3 Hz, LD19 only): `{"t":"lidar_scan","seq":812,"pts":[x0,y0,x1,y1,...]}`, the newest revolution in mm, odometry frame (what the Map draws as the "Lidar scan" layer).
 `status.lidar` (null without a lidar port): `{"state":"ok|waiting|no data|junk|stale|off","port","error","pps","scan_hz","rpm","packets","crc_errors","bytes_dropped","scans","scan_age_s","flowing","cpu_pct","cost_ms","tilt_ref","dropped":{...}}`; Health has a "Lidar" tile from it.
-`map.stats.lmatch` (LD19 scan matching, #78, [ld19.md](ld19.md#scan-matching-78)): `{"on":true,"lidar":true,"state":"matched|matched: pose fine|building the map|kept: <why>|off","score":0.98,"fix":"xy th","applied":[dx,dy,dth],"ok_pct":97,"ms":3.4,"matched":812,"rejected":9,"jumps":0,"moved_mm":640,"moved_deg":6.2}`
-(`applied`: the last correction step, mm / deg; `ms`: cost per match). Its settings are map settings (`{"t":"map","action":"set","settings":{"lidar_match":false}}`, `match_*`), in `settings.json`.
+`map.stats.lmatch` (LD19 scan matching, #78, [ld19.md](ld19.md#scan-matching-78)): `{"on":true,"lidar":true,"state":"matched|matched: pose fine|building the map|kept: <why>|wheel slip: ...|lost: searching ...|off","score":0.98,"fix":"xy th","applied":[dx,dy,dth],"ok_pct":97,"ms":3.4,"matched":812,"rejected":9,"jumps":0,"moved_mm":640,"moved_deg":6.2,"mode":"track|slip|lost","grip":0.97,"slip_s":null,"lost_s":null,"window":null,"slips":0,"lost":0,"found":0,"stuck":0,"checking":false,"checks":0}`
+(`applied`: the last correction step, mm / deg; `ms`: cost per match). #79 wheel slip ([ld19.md](ld19.md#wheel-slip-79)): `mode` `slip` = the wheels turn but the
+body does not follow (position held, nothing mapped), `lost` = the pose is being searched for (nothing mapped); `grip` = body / wheel travel at
+the last check; `slip_s` / `lost_s` = seconds in that mode; `window` = the lost search's `[mm, deg]`; `checking` = `lost` only to check
+the pose after a lidar gap (quiet, lost after 3 s); `slips` / `lost` / `found` / `stuck` / `checks` = counts. While slipping / lost a `map` message without tiles carries the new state and `corr` (<= 1 Hz). Its settings are map settings
+(`{"t":"map","action":"set","settings":{"lidar_match":false}}`, `match_*`), in `settings.json`.
 `status.lidar_nav` (null without a lidar port): `{"sent":812,"age_s":0.04,"skipped":{"off","no_pose","stale","tilt","few","no_link"}}`, the obstacle frames for the robot's navigator ([below](#link-messages-to-the-robot)).
 `scan` (on connect and after each stop-and-scan): `{"t":"scan","corr":[dx,dy,dth],"applied":3,"last":{...},"history":[{"ok":true,"why":"","dx":-31,"dy":12,"dth":-1.2,"mm":33,"n":58,"inliers":51,"margin":0.11,"who":"auto","time":1795300000},...]}` (newest first, 20 kept; `why` says why a scan was not used).
 No WebSocket (old Kindle): `GET /api/state`, `GET|POST /api/cmd`.
@@ -142,7 +147,13 @@ blocked for more than 0.2 s the Logs tab says so.
 ## Link messages to the robot
 
 The bridge <-> Teensy link itself (framed binary, CRC16) is defined in
-[include/protocol/link_protocol.h](../include/protocol/link_protocol.h) (link v5), mirrored in `station/bridge/link_protocol.py`.
+[include/protocol/link_protocol.h](../include/protocol/link_protocol.h) (link v6), mirrored in `station/bridge/link_protocol.py`.
+New in v6: **`EVT_LINK_STUCK`** (0x83, a link-only `MSG_EVENT` value, issue #79): the bridge's LD19 matcher saw the wheels turn
+for `match_stuck_s` (2.5 s) in GOTO / EXPLORE while the robot did not move (wheel slip, a low obstacle the lidar does not see). The navigator's
+next driving stuck check (within 500 ms) takes it like its own: BLOCKED, log `nav: stuck, wheels turn but the lidar sees no motion (waypoint 1/2)`,
+back off `nav.stuck_backoff_mm`; the planner replans as after any `nav: stuck`. Not driving then (turning in place, stopped): dropped. v5 firmware
+ignores it (unknown event); a v5 bridge never sends it. No new params, no layout change.
+
 New in v5:
 
 **`MSG_LIDAR_OBSTACLES` (0x87, Pi -> Teensy, ~10 Hz, issue #77)**: the LD19's nearest return per sector, for the navigator

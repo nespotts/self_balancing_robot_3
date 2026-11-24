@@ -433,5 +433,56 @@ class TestWalls(unittest.TestCase):
         self.assertTrue(blocked)
 
 
+class TestWheelSlip(unittest.TestCase):
+    """Sim wheel slip (#79) and the navigator's lidar stuck (EVT_LINK_STUCK), mirror of test/host/nav_sim.cpp."""
+
+    def driving(self, seed=3):
+        n = NavRun(seed)
+        n.frame(lp.encode_goto([(2000.0, 300.0)], True))     # the tour's first leg: clear
+        n.stand_up(lp.MODE_GOTO)
+        n.assertTrue(n.run(8.0, lambda s: s.r.nav.state == lp.NAV_DRIVING and s.r.speed_f > 150))
+        return n
+
+    def test_slip_moves_the_odometry_not_the_body(self):
+        for ratio, lo, hi in ((1.0, 0.0, 0.03), (0.5, 0.4, 0.6)):
+            n = self.driving()
+            r = n.r
+            r.slip_now(1.0, ratio)
+            (ox, oy, _), (tx, ty) = r.odom(), (r.X, r.Y)
+            n.run(1.0)
+            (ox2, oy2, _), (tx2, ty2) = r.odom(), (r.X, r.Y)
+            wheels, body = math.hypot(ox2 - ox, oy2 - oy), math.hypot(tx2 - tx, ty2 - ty)
+            self.assertGreater(wheels, 150.0)
+            self.assertTrue(lo <= body / wheels <= hi, (ratio, wheels, body))
+            self.assertAlmostEqual(r.slip_mm, wheels - body, delta=10.0)
+            n.run(1.0)                                   # over: both move again
+            (ox3, oy3, _), (tx3, ty3) = r.odom(), (r.X, r.Y)
+            self.assertAlmostEqual(math.hypot(ox3 - ox2, oy3 - oy2), math.hypot(tx3 - tx2, ty3 - ty2), delta=5.0)
+            self.assertFalse(r.slipping())
+
+    def test_lidar_stuck_event_backs_off(self):
+        n = self.driving()
+        r = n.r
+        r.slip_now(10.0, 1.0)                            # wheels spin: the odometry says it is getting there
+        n.run(1.0)
+        self.assertEqual(r.nav.state, lp.NAV_DRIVING)    # its own check sees progress
+        n.frame(lp.encode_event(lp.EVT_LINK_STUCK))
+        n.run(0.3)
+        self.assertTrue(any(l.startswith("nav: stuck, wheels turn but the lidar sees no motion") for l in n.logs),
+                        n.logs[-5:])
+        self.assertTrue(r.nav.stuck)
+        self.assertEqual(r.nav.state, lp.NAV_BLOCKED)
+        self.assertLess(r.nav.speed, 0.0)                # backing off
+
+    def test_lidar_stuck_event_needs_driving(self):
+        n = NavRun(3)
+        n.stand_up(lp.MODE_BALANCE)
+        n.frame(lp.encode_event(lp.EVT_LINK_STUCK))
+        n.run(1.0)
+        self.assertFalse(n.r.nav.stuck)
+        self.assertEqual(n.r.nav.lidar_stuck_ms, 0)      # dropped after 500 ms
+        self.assertFalse(any(l.startswith("nav: stuck") for l in n.logs))
+
+
 if __name__ == "__main__":
     unittest.main()

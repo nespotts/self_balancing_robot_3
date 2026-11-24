@@ -5,6 +5,10 @@ matcher off and on, odometry drift / miscalibration, real LD19 packets (lidar_si
   python -m station.sim.lidar_eval --miscal             wheels 69.3 mm (params 66), track 131 (136), right wheel +1.5 %,
                                                         gyro 0.05 deg/s
   python -m station.sim.lidar_eval --drift 6 --seeds 1 2 3 --loops 2
+  python -m station.sim.lidar_eval --slip 0.5 2 5 --lever 170
+                                                        wheel slip (#79): one tour loop with one spin-out of each
+                                                        length on the first leg, #78 alone vs the #79 handling
+                                                        (--ratio 0.5: half slip; --lidar-off: no LD19 data meanwhile)
 
 Per run: stand up, drive the TOUR loop as planner gotos (map frame, a short stop at every corner) --loops times, then
 go to the saved places (Home = start, "Far" = (3500, 1400)) and measure where the robot really is.
@@ -60,7 +64,8 @@ def wall_stats(m, room, F=(0.0, 0.0, 0.0), occ_byte=150):
 
 
 class Run:
-    def __init__(self, seed, match, drift=3.0, scale=0.02, miscal=False, settings=None, lidar_settings=None):
+    def __init__(self, seed, match, drift=3.0, scale=0.02, miscal=False, settings=None, lidar_settings=None,
+                 sample_s=0.5, lever_mm=0.0):
         self.tmp = tempfile.mkdtemp()
         r = self.r = DriftRobot(seed=seed, drift_deg_min=0.0 if miscal else drift, drift_scale=0.0 if miscal else scale)
         if miscal:
@@ -71,15 +76,23 @@ class Run:
         m.places.add("Far", *FAR)
         self.lid = Lidar(m, "tcp://sim", clock=lambda: r.t)
         self.lid.apply_settings(lidar_settings or {}, save=False)
-        self.sim = LidarSim(seed=seed)
+        self.sim = LidarSim(seed=seed, lever_mm=lever_mm)
         self.stream, self.asm = ld19.Ld19Stream(), ld19.ScanAssembler()
         self.parser = lp.FrameParser()
         self.b = OfflineBridge(r, m)
+        self.robot_logs = []
+        stuck = lp.encode_event(lp.EVT_LINK_STUCK)[4:-2]
+        m.lmatch.stuck_listeners.append(lambda: r.on_frame(lp.MSG_EVENT, stuck))   # as the bridge's link does (#79)
         self.errs, self.herrs = [], []
+        self.err_t = []              # (sim time, pose error mm) per sample
+        self.sample_s = sample_s
         self.F = None                # world -> map frame (fixed when the first turn is mapped)
         self.next_sample = 0.0
         self.scan_s, self.scans = 0.0, 0
         self.match_ms = []
+        self.wide_ms = []            # matches while lost (the wide search, #79)
+        self.on_step = None          # callable(run) after every step() (tests: start a slip)
+        self.lidar_off = False       # no LD19 data (a dropout)
 
     def close(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -97,28 +110,41 @@ class Run:
                     elif t == lp.MSG_RANGE:
                         m.on_range(lp.decode_range(pl))
                     elif t == lp.MSG_LOG:
-                        self.b.planner.on_log(lp.decode_log(pl))
-            data = self.sim.step(r)
+                        text = lp.decode_log(pl)
+                        self.robot_logs.append((round(r.t, 2), text))
+                        self.b.planner.on_log(text)
+            data = self.sim.step(r, active=not self.lidar_off)
             if not data:
                 continue
             for p in self.stream.feed(data, now=r.t):
                 sc = self.asm.add(p)
                 if sc:
-                    k = m.lmatch.k
+                    lm = m.lmatch
+                    k = lm.n["matched"] + lm.n["rejected"]
+                    lost = lm.mode == "lost"
                     t0 = time.perf_counter()
                     lid.on_scan(sc)
                     self.scan_s += time.perf_counter() - t0
                     self.scans += 1
-                    if m.lmatch.k != k and m.lmatch.k % max(1, int(m.settings["match_every_n"])) == 0:
-                        self.match_ms.append(m.lmatch.cost_ms)
+                    if lm.n["matched"] + lm.n["rejected"] != k:
+                        (self.wide_ms if lost else self.match_ms).append(lm.cost_ms)
         if self.F is None and lid.n["used"]:
             self.F = frame((r.X, r.Y, r.TH), m.map_pose(*r.odom()))
         if r.t >= self.next_sample and lid.n["used"]:
-            self.next_sample = r.t + 0.5
-            x, y, h = m.map_pose(*r.odom())
-            tx, ty = tf(self.F, r.X, r.Y)
-            self.errs.append(math.hypot(x - tx, y - ty))
-            self.herrs.append(abs((h - r.TH - self.F[2] + 180.0) % 360.0 - 180.0))
+            self.next_sample = r.t + self.sample_s
+            e = self.pose_error()
+            self.errs.append(e[0])
+            self.herrs.append(e[1])
+            self.err_t.append((r.t, e[0]))
+        if self.on_step:
+            self.on_step(self)
+
+    def pose_error(self):
+        """(map pose - true pose mm, heading error deg), in the map frame."""
+        r, m = self.r, self.m
+        x, y, h = m.map_pose(*r.odom())
+        tx, ty = tf(self.F, r.X, r.Y)
+        return math.hypot(x - tx, y - ty), abs((h - r.TH - self.F[2] + 180.0) % 360.0 - 180.0)
 
     def stand_up(self):
         r = self.r
@@ -156,8 +182,9 @@ class Run:
             self.b.update()
 
 
-def run(seed, match, drift=3.0, scale=0.02, miscal=False, loops=3, settings=None, lidar_settings=None, quiet=True):
-    e = Run(seed, match, drift, scale, miscal, settings, lidar_settings)
+def run(seed, match, drift=3.0, scale=0.02, miscal=False, loops=3, settings=None, lidar_settings=None, quiet=True,
+        lever_mm=0.0):
+    e = Run(seed, match, drift, scale, miscal, settings, lidar_settings, lever_mm=lever_mm)
     try:
         e.stand_up()
         for _ in range(loops):
@@ -182,7 +209,77 @@ def run(seed, match, drift=3.0, scale=0.02, miscal=False, loops=3, settings=None
                "wall_fit": round(fit, 3), "occ_cells": n_occ, "occ_mm": round(occ_mm, 1),
                "scan_ms": round(1000.0 * e.scan_s / max(1, e.scans), 2), "scans": e.scans,
                "match_ms": round(sum(mm) / len(mm), 2) if mm else 0.0, "match_ms_p95": round(mm[int(0.95 * len(mm))], 2) if mm else 0.0,
-               "matched": lm.n["matched"], "rejected": lm.n["rejected"], "jumps": lm.n["jumps"]}
+               "matched": lm.n["matched"], "rejected": lm.n["rejected"], "jumps": lm.n["jumps"],
+               "slips": lm.n["slips"], "lost": lm.n["lost"], "stuck": lm.n["stuck"], "checks": lm.n["checks"]}
+        if not quiet:
+            print(out, flush=True)
+        return out
+    finally:
+        e.close()
+
+
+REC_MM, REC_HOLD_S = 50.0, 1.0       # recovered: the pose error under 50 mm and staying so for 1 s
+
+
+def run_slip(seed, dur, ratio=1.0, recover=True, drift=3.0, scale=0.02, leg=0, after_mm=400.0, lever_mm=0.0,
+             quiet=True, legs=None, lidar_off=False):
+    """One tour loop with one wheel-slip episode (#79): dur s, ratio (1 = wheels spin, body still), starting once the
+    robot has driven after_mm into TOUR leg `leg`. recover: the #79 slip / lost handling (False: #78 as merged).
+    Pose error sampled every 0.1 s; recovery = from the end of the episode until the error is < REC_MM for REC_HOLD_S.
+    legs: drive only the first n legs. lidar_off: no LD19 data during the episode either (nothing to see the slip with:
+    the pose comes back out of the matcher's normal window, the #79 "lost" search)."""
+    e = Run(seed, True, drift, scale, settings={"match_slip": recover}, sample_s=0.1, lever_mm=lever_mm)
+    ep = {"leg": -1}
+
+    def hook(run):
+        r = run.r
+        if "t0" in ep:
+            run.lidar_off = lidar_off and r.t < ep["t1"]
+            return
+        if ep["leg"] != leg or run.F is None:
+            return
+        if math.hypot(r.X - ep["start"][0], r.Y - ep["start"][1]) >= after_mm and r.nav.state == lp.NAV_DRIVING:
+            ep["t0"], ep["t1"] = r.t, r.t + dur
+            ep["e0"] = run.pose_error()[0]
+            r.slip_now(dur, ratio)
+        run.lidar_off = lidar_off and "t0" in ep and r.t < ep["t1"]
+    e.on_step = hook
+    try:
+        e.stand_up()
+        for i, p in enumerate(TOUR[:legs]):
+            ep["leg"], ep["start"] = i, (e.r.X, e.r.Y)
+            e.drive(lambda b, p=p: b.planner._begin_goto([tuple(p)], None, False), max_s=60.0)
+            e.settle(0.5)
+        e.settle(3.0)
+        lm = e.m.lmatch
+        t0, t1 = ep["t0"], ep["t1"]
+        during = [v for t, v in e.err_t if t >= t0]
+        at_end = min(e.err_t, key=lambda s: abs(s[0] - t1))[1]
+        rec = None
+        ok_since = None
+        for t, v in e.err_t:
+            if t < t1:
+                continue
+            if v < REC_MM:
+                ok_since = t if ok_since is None else ok_since
+                if t - ok_since >= REC_HOLD_S:
+                    rec = max(0.0, ok_since - t1)
+                    break
+            else:
+                ok_since = None
+        over = sum(0.1 for t, v in e.err_t if t >= t0 and v >= REC_MM)      # time the error was >= 50 mm
+        fit, n_occ, _ = wall_stats(e.m, e.r.room, e.F)
+        wm = sorted(e.wide_ms)
+        out = {"seed": seed, "dur_s": dur, "ratio": ratio, "recover": recover, "slip_mm": round(e.r.slip_mm),
+               "t0": round(t0, 2),
+               "err_before_mm": round(ep["e0"]), "err_max_mm": round(max(during)), "err_slip_end_mm": round(at_end),
+               "recovery_s": None if rec is None else round(rec, 1), "err_end_mm": round(e.err_t[-1][1]),
+               "wall_fit": round(fit, 3), "occ_cells": n_occ,
+               "slips": lm.n["slips"], "lost": lm.n["lost"], "found": lm.n["found"], "stuck": lm.n["stuck"],
+               "checks": lm.n["checks"],
+               "robot_stuck": sum(1 for _, s in e.robot_logs if s.startswith("nav: stuck")),
+               "wide_ms": round(sum(wm) / len(wm), 2) if wm else 0.0, "wide_ms_p95": round(wm[int(0.95 * len(wm))], 2) if wm else 0.0,
+               "wide_n": len(wm), "t_s": round(e.r.t)}
         if not quiet:
             print(out, flush=True)
         return out
@@ -191,7 +288,7 @@ def run(seed, match, drift=3.0, scale=0.02, miscal=False, loops=3, settings=None
 
 
 KEYS = ("err_mean_mm", "err_max_mm", "err_end_mm", "head_mean_deg", "head_max_deg", "head_end_deg", "far_mm", "home_mm",
-        "wall_fit", "occ_cells", "occ_mm", "scan_ms", "match_ms", "match_ms_p95")
+        "wall_fit", "occ_cells", "occ_mm", "scan_ms", "match_ms", "match_ms_p95", "slips", "lost", "stuck")
 
 
 def main(argv=None):
@@ -203,12 +300,33 @@ def main(argv=None):
     ap.add_argument("--loops", type=int, default=3)
     ap.add_argument("--every-n", type=int, default=None, help="match_every_n")
     ap.add_argument("--only-on", action="store_true")
+    ap.add_argument("--slip", type=float, nargs="+", default=None, metavar="SECONDS",
+                    help="wheel-slip runs (#79) instead: one tour loop with one episode of each length, old (#78) "
+                         "vs new handling")
+    ap.add_argument("--ratio", type=float, default=1.0, help="--slip: 1 = wheels spin, body still; 0.5 = half")
+    ap.add_argument("--lever", type=float, default=0.0, help="lidar this far above the axle (lean moves it)")
+    ap.add_argument("--lidar-off", action="store_true", help="--slip: no LD19 data during the episode (lost + wide search)")
     a = ap.parse_args(argv)
+    if a.slip:
+        rows = []
+        for dur in a.slip:
+            for seed in a.seeds:
+                for rec in (False, True):
+                    o = run_slip(seed, dur, a.ratio, rec, a.drift, a.scale, lever_mm=a.lever, lidar_off=a.lidar_off)
+                    rows.append(o)
+                    print(o, flush=True)
+        print("dur_s ratio  handling  err_before  err_max  err_at_slip_end  recovery_s  err_end  wall_fit  slips lost stuck")
+        for o in rows:
+            print("%5.1f %5.2f  %-8s  %10d  %7d  %15d  %10s  %7d  %8.3f  %5d %4d %5d" % (
+                o["dur_s"], o["ratio"], "new" if o["recover"] else "old", o["err_before_mm"], o["err_max_mm"],
+                o["err_slip_end_mm"], "never" if o["recovery_s"] is None else o["recovery_s"], o["err_end_mm"],
+                o["wall_fit"], o["slips"], o["lost"], o["stuck"]))
+        return
     st = {"match_every_n": a.every_n} if a.every_n else {}
     tot = {False: [], True: []}
     for seed in a.seeds:
         for on in ((True,) if a.only_on else (False, True)):
-            o = run(seed, on, a.drift, a.scale, a.miscal, a.loops, settings=st)
+            o = run(seed, on, a.drift, a.scale, a.miscal, a.loops, settings=st, lever_mm=a.lever)
             tot[on].append(o)
             print(o, flush=True)
     for on in (False, True):

@@ -60,6 +60,10 @@ def main(argv=None):
                          "dense 360 degree scans (the two VL53L0X sweep stops drawing into it), and GOTO / EXPLORE / "
                          "STATION stop for obstacles from the bridge's LD19 frames (#77; set rng.enable 0 to drop the "
                          "sweep altogether)")
+    ap.add_argument("--slip", nargs="?", const="1:2:20", default=None, metavar="RATIO:SECONDS:EVERY",
+                    help="wheel slip (#79): random episodes while driving, on average one per EVERY s, SECONDS long, in "
+                         "which the wheels turn but the body moves only (1 - RATIO) as much (default 1:2:20: wheels spin, "
+                         "body still, 2 s). The odometry then runs ahead; the LD19 matcher (--lidar) should catch it")
     a = ap.parse_args(argv)
     host, _, port = a.listen.rpartition(":")
     remote = a.remote or a.remote_disarmed
@@ -75,6 +79,13 @@ def main(argv=None):
         robot.use_floor_wheels()
     if a.drain is not None:
         robot.drain = a.drain / 60.0
+    if a.slip:
+        try:
+            parts = a.slip.split(":")
+            ratio, dur, every = (float(v) for v in parts[:3] + ["1", "2", "20"][len(parts):])
+        except ValueError:
+            ap.error("--slip RATIO:SECONDS:EVERY, e.g. 1:2:20")
+        robot.slip_random(ratio, dur, every, seed=a.seed)
     lidar = None
     if a.lidar is not None:
         from .lidar_sim import LidarSim

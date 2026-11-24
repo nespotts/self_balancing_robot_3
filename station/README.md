@@ -4,7 +4,7 @@ Drive, map, plot and tune the robot from any browser (phone, PC, Kindle). Python
 
 ```mermaid
 flowchart LR
-  T[Teensy 4.1<br>firmware v4] -- "USB serial<br>link protocol v5" --> B
+  T[Teensy 4.1<br>firmware v4] -- "USB serial<br>link protocol v6" --> B
   subgraph Pi[Orange Pi]
     B[bridge<br>python -m station.bridge] --> L[(logs, falls, maps)]
   end
@@ -107,5 +107,6 @@ Health (preflight checklist, battery minutes, tiles; it only looks, it never arm
 
 LD19 spinning lidar (dense 360 degree map input, Health tile, Map layer): [wiring, Pi setup, settings](../docs/ld19.md); try it with `python -m station.sim --lidar`.
 With it the bridge matches the turns to the map and corrects the drifting pose ([scan matching](../docs/ld19.md#scan-matching-78)): `python -m station.sim --lidar --tour --drift 3`; numbers: `python -m station.sim.lidar_eval`.
+Wheel slip ([#79](../docs/ld19.md#wheel-slip-79)): `python -m station.sim --lidar --tour --slip 1:2:20` (random 2 s spin-outs, about one per 20 s of driving); numbers: `python -m station.sim.lidar_eval --slip 0.5 2 5`.
 
 More: [Android app](android/README.md) | [features in detail](../docs/station-features.md) | [API, install, flashing contract](../docs/api.md)

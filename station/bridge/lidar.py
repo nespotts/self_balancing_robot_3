@@ -213,6 +213,9 @@ class Lidar:
 
     def on_tlm(self, d, t):
         self.hist.add(t, d["x_mm"], d["y_mm"], d["heading_deg"], d["pitch_deg"])
+        lm = getattr(self.mapper, "lmatch", None)
+        if lm is not None:
+            lm.on_tlm(d, t)                         # the robot's mode, for the lidar stuck check (#79)
 
     def flowing(self, now=None):
         """True while scans are being mapped (the VL53L0X sweep is then not needed for the map)."""
