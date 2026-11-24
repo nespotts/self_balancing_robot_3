@@ -354,6 +354,8 @@ def main(argv=None):
     secs = float(args[1]) if len(args) > 1 else 5.0
     rd = Ld19Reader(port, lambda sc: None, say=lambda t: print(t, flush=True))
 
+    last = {"state": None}
+
     async def go():
         task = asyncio.ensure_future(rd.run())
         end = time.monotonic() + secs
@@ -361,12 +363,13 @@ def main(argv=None):
             await asyncio.sleep(1.0)
             rd.tick(time.monotonic())
             st = rd.stats()
+            last["state"] = st["state"]          # before close(): a closed reader no longer reports "ok"
             print("%-8s %5.0f packets/s  %5.1f rpm  %d scans  %d bad CRC  %d bytes skipped  %s" % (
                 st["state"], st["pps"], st["rpm"], st["scans"], st["crc_errors"], st["bytes_dropped"], st["error"]), flush=True)
         task.cancel()
         rd.close()
     asyncio.run(go())
-    ok = rd.state() == "ok"
+    ok = last["state"] == "ok"
     print("RESULT:", "lidar OK" if ok else "no valid LD19 packets (see docs/ld19.md, Troubleshooting)")
     return 0 if ok else 1
 
