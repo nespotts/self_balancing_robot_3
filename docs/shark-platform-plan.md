@@ -3,7 +3,7 @@
 A gutted **Shark RV915** robot vacuum (RV9155WXUS) becomes a non-balancing 2-wheel differential-drive robot.
 Same stack as the balancing robot: Teensy 4.1 firmware, Orange Pi bridge, station web app, Android app, LD19.
 
-Planning only. No CAD until the components are final (#72). Issues: see [Issues](#issues).
+Planning only. No CAD until the components are final (#72). Epic #80, issues #81-#93: see [Issues](#issues).
 
 ```mermaid
 flowchart LR
@@ -556,4 +556,22 @@ Prices approximate, check before buying. Driver choice waits for the stall measu
 
 ## Issues
 
-Filled in when the issues are created.
+Epic **#80**. Label `shark`.
+
+| Milestone | Issue | Who |
+|---|---|---|
+| 1 | #81 Teardown + shell measurements | owner |
+| 1 | #82 Measure wheel modules, encoders, stall, bumper, cliff, drop | owner |
+| 1 | #83 Decide electronics / driver / battery, order parts | owner |
+| 1 | #84 Power + carrier board wiring | Claude, owner builds |
+| 1 | #85 Firmware: platform abstraction + `shark` env | Claude |
+| 1 | #86 Firmware: diff-drive, DRV887x mode, quadrature encoders | Claude |
+| 1 | #87 Battery pack-only mode (LiFePO4) | Claude |
+| 2 | #91 Odometry calibration + LD19 mapping | both |
+| 2-4 | #89 Station robot profile + Shark sim | Claude |
+| 3 | #88 Safety sensors -> stop (link v6) | Claude, owner wires |
+| 3-4 | #90 Mechanical: tray, cradle, covers, LD19 deck (after parts are final) | Claude CAD, owner prints |
+| 4 | #92 Autonomy parity + kid-mode basics | both |
+| 5 | #93 ROS 2 adapter, loop closure, follow-me, patrols | Claude |
+
+**Owner's first 3 actions:** #81 teardown (does the LiFePO4 fit?), #82 measurements (section 5), #83 order the "now" parts.
