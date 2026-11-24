@@ -928,6 +928,8 @@ class Planner:
         is in its odometry frame, so once the next waypoints are off by DRIFT_RESEND_MM the rest goes again (<= 1 / s)."""
         if self.mode == "idle" or not self.path or self.sent_corr is None or self.clock() - self.sent_at < 1.0:
             return
+        if self.replan_at is not None:        # stuck: backing off (a new list would end that), the replan follows
+            return
         rest = self._remaining()
         if not rest:
             return

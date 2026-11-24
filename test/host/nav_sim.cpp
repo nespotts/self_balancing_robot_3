@@ -482,6 +482,55 @@ static void testLidarStuck() {
   CHECK(b.nav.state() == NAV_ARRIVED);
 }
 
+// ---- lidar stuck (#79, EVT_LINK_STUCK): spinning wheels look like progress to the odometry; the bridge says "stuck"
+static void testLidarStuckEvent() {
+  printf("goto: wheels spin (odometry moves), bridge sends EVT_LINK_STUCK -> stuck, back off\n");
+  reset();
+  Bot b;
+  b.nav.add(3000, 0);
+  b.nav.listChanged(true);
+  b.nav.onModeChange(b.in());
+  b.run(2);
+  CHECK(b.nav.state() == NAV_DRIVING);
+  b.nav.onLidarStuck(b.ms);
+  b.run(0.05f);
+  CHECK(b.nav.stuck());
+  CHECK(b.nav.state() == NAV_BLOCKED);
+  b.run(0.4f);
+  CHECK(b.v < 0);  // backing off
+  b.run(20);
+  CHECK(b.nav.state() == NAV_ARRIVED);  // GOTO goes on
+
+  printf("  not driving (turning in place / arrived): the event is dropped after 500 ms\n");
+  reset();
+  Bot c;
+  c.nav.add(0, 2000);  // 90 deg to the left: turns in place first
+  c.nav.listChanged(true);
+  c.nav.onModeChange(c.in());
+  c.run(0.1f);
+  CHECK(c.nav.state() == NAV_TURNING);
+  c.nav.onLidarStuck(c.ms);
+  c.run(0.3f);
+  CHECK(!c.nav.stuck());
+  c.run(0.5f);               // driving now, but the event is too old
+  CHECK(!c.nav.stuck());
+  c.run(15);
+  CHECK(c.nav.state() == NAV_ARRIVED);
+
+  printf("  nav.stuck_ms 0 (stuck checks off): ignored\n");
+  reset();
+  g_param[P_NAV_STUCK_MS] = 0;
+  Bot d;
+  d.nav.add(3000, 0);
+  d.nav.listChanged(true);
+  d.nav.onModeChange(d.in());
+  d.run(2);
+  d.nav.onLidarStuck(d.ms);
+  d.run(0.1f);
+  CHECK(!d.nav.stuck());
+  CHECK(d.nav.state() == NAV_DRIVING);
+}
+
 int main() {  testThreeWaypoints();
   testEndHeading();
   testObstacle(MODE_GOTO);
@@ -499,6 +548,7 @@ int main() {  testThreeWaypoints();
   testLidarAge();
   testLidarWins();
   testLidarStuck();
+  testLidarStuckEvent();
   printf(g_fail ? "%d FAILED\n" : "all passed\n", g_fail);
   return g_fail ? 1 : 0;
 }

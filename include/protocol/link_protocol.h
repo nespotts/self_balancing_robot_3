@@ -21,7 +21,10 @@
 //     without the remote (fail-safe); a v4 bridge works with v3 firmware (the events are ignored).
 // v5: MSG_LIDAR_OBSTACLES (Pi -> Teensy, issue #77): LD19 obstacles for the navigator. v4 firmware ignores it
 //     (unknown type) and keeps using the range sweep; with a v4 bridge the v5 firmware uses the sweep as before.
-#define LINK_PROTOCOL_VERSION 5
+// v6: link-only event EVT_LINK_STUCK (issue #79): the bridge's LD19 scan matcher saw the wheels turn but the robot
+//     not move (wheel slip, a low obstacle). v5 firmware ignores it (only its own odometry stuck check); a v5 bridge
+//     never sends it. No layout change.
+#define LINK_PROTOCOL_VERSION 6
 #define LINK_SYNC1 0xA5
 #define LINK_SYNC2 0x5A
 #define LINK_MAX_PAYLOAD 200
@@ -70,6 +73,10 @@ enum LinkEvent : uint8_t {
   // or late mode request (another client, the app stopping in the background) can't start the motors.
   // Ignored while an E-stop (remote or link) is latched. The bridge sends it for {"arm": true} only.
   EVT_LINK_ARM = 0x82,
+  // v6 (#79): lidar stuck. The bridge's scan matcher (station/bridge/lidarmatch.py) saw the wheels turn for
+  // match_stuck_s while the matched pose stayed put (odometry progress is phantom). GOTO / EXPLORE, driving: the
+  // navigator's next stuck check takes it (BLOCKED, "nav: stuck ...", back off) if it comes within 500 ms; else dropped.
+  EVT_LINK_STUCK = 0x83,
 };
 #define LINK_ARM_WINDOW_MS 500
 

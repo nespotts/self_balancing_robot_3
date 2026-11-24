@@ -66,6 +66,18 @@ async def act_waypoints(cdp):
     return None
 
 
+async def until_slip(cdp, limit=300.0):
+    """Wheel slip shot (#79, sim with --slip): wait until the map info line says so."""
+    end = time.monotonic() + limit
+    while time.monotonic() < end:
+        r = await cdp.call("Runtime.evaluate", returnByValue=True,
+                           expression="(document.getElementById('map-info')||{}).textContent||''")
+        if "Wheel slip" in (r.get("result") or {}).get("value", ""):
+            return None
+        await asyncio.sleep(0.25)
+    return None
+
+
 FULL_RATE = "document.getElementById('tc-full').classList.contains('on')||document.getElementById('tc-full').click()"
 
 SHOTS = [  # name, device, view, js to run after the view is shown, extra wait s[, action]
@@ -97,6 +109,8 @@ SHOTS = [  # name, device, view, js to run after the view is shown, extra wait s
     ("phone-explore", PHONE, "map", "document.getElementById('map-menu').hidden=true;sbr3.send({t:'map',action:'reset'});sbr3.send({t:'plan',action:'explore'})", 14),
     # LD19 scan matching (issue #78): sim with --lidar --tour --drift 3 running for a minute; the map info line + the toggle
     ("phone-scanmatch", PHONE, "map", "", 1.5),
+    # wheel slip (issue #79): sim with --lidar --tour --slip 1:6:8, shot while the map info line says "Wheel slip"
+    ("phone-wheelslip", PHONE, "map", "", 0.6, until_slip),
     ("phone-scanmatch-settings", PHONE, "map", "document.getElementById('map-more').click();"
      "const s=document.getElementById('map-set');s.open=true;s.scrollIntoView()", 1),
     # last: disarm, then the first tap of the two-tap "Arm & Balance"

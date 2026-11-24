@@ -47,6 +47,7 @@
     </div>
     <div class="menu" id="map-menu" hidden>
       <button id="map-home" class="primary">Go home</button>
+      <button id="map-trust" class="warn" hidden title="The lidar lost the pose (wheel slip, carried, room changed): take the pose as it is and map from here">Trust the pose here</button>
       <button id="map-scan" title="Stand still ~3 s: match a full sweep to the map and fix the pose">Scan &amp; correct pose</button>
       <details class="map-set" id="scan-hist" hidden><summary>Pose corrections</summary><div id="scan-list" class="scan-list"></div></details>
       <button id="map-draw">Draw walls, zones, maze…</button>
@@ -75,6 +76,7 @@
         <label><input type="checkbox" id="set-scanpause"> Explore: stop to scan now and then</label>
         <label><input type="checkbox" id="set-correct"> Correct drift while driving (experimental)</label>
         <label id="set-lmatch-row" hidden><input type="checkbox" id="set-lmatch"> Lidar scan matching (fixes drift)</label>
+        <label id="set-lslip-row" hidden><input type="checkbox" id="set-lslip" checked> … hold the pose when the wheels slip</label>
         <p class="muted" id="map-stats"></p>
       </details>
     </div>

@@ -160,12 +160,21 @@ for (const [id, t, key] of NUM) {
 $("set-correct").onchange = (e) => cmd({ t: "map", action: "set", settings: { correct: e.target.checked } });
 $("set-stopscan").onchange = (e) => cmd({ t: "map", action: "set", settings: { stop_scan: e.target.checked } });
 $("set-lmatch").onchange = (e) => cmd({ t: "map", action: "set", settings: { lidar_match: e.target.checked } });
+$("set-lslip").onchange = (e) => cmd({ t: "map", action: "set", settings: { match_slip: e.target.checked } });
+$("map-trust").onclick = () => { cmd({ t: "map", action: "trust_pose" }); toast("Pose trusted: mapping from here", 2500); $("map-menu").hidden = true; };
 $("set-scanpause").onchange = (e) => cmd({ t: "plan", action: "set", settings: { scan_pause: e.target.checked } });
 
 // LD19 scan matching (#78): one line for the map info box ("" when there is no lidar / it is off)
 export function matchLine() {
   const L = occ.stats && occ.stats.lmatch;
   if (!L || !L.lidar || !L.on || !L.state || L.state === "off") return "";
+  // wheel slip / lost (#79): the pose is held / searched for, nothing goes into the map meanwhile
+  if (L.mode === "slip") return `⚠ Wheel slip · holding position · grip ${Math.round(100 * (L.grip || 0))} %`;
+  if (L.mode === "lost" && L.checking) return "Scan match: checking the pose after a lidar gap…";
+  if (L.mode === "lost") {
+    const w = L.window ? ` ±${Math.round(L.window[0] / 10)} cm` : "";
+    return `⚠ Pose lost ${Math.round(L.lost_s || 0)} s · searching${w} · not mapping` + (L.lost_s > 20 ? " (⋯ Trust pose)" : "");
+  }
   if (L.state.startsWith("matched")) {
     const a = L.applied, fix = a && (a[0] || a[1] || a[2])
       ? `fix ${Math.round(Math.hypot(a[0], a[1]))} mm ${Math.abs(a[2]).toFixed(1)}°` : "pose fine";
@@ -204,6 +213,9 @@ function syncSettings() {
   if (occ.settings && "stop_scan" in occ.settings) $("set-stopscan").checked = occ.settings.stop_scan;
   if (occ.settings && "lidar_match" in occ.settings) $("set-lmatch").checked = occ.settings.lidar_match;
   $("set-lmatch-row").hidden = !(occ.stats && occ.stats.lmatch && occ.stats.lmatch.lidar);
+  if (occ.settings && "match_slip" in occ.settings) $("set-lslip").checked = occ.settings.match_slip;
+  $("set-lslip-row").hidden = $("set-lmatch-row").hidden || !(occ.settings && occ.settings.lidar_match);
+  $("map-trust").hidden = !(occ.stats && occ.stats.lmatch && occ.stats.lmatch.mode === "lost");
   if (plan.settings && "scan_pause" in plan.settings) $("set-scanpause").checked = plan.settings.scan_pause;
   if (plan.settings && "zones_block_manual" in plan.settings) $("set-zblock").checked = plan.settings.zones_block_manual;
   const st = occ.stats || {};

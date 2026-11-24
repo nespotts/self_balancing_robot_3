@@ -174,6 +174,8 @@ class Bridge:
         self.lidar = Lidar(self.mapper, lidar_port, say=self.say, clock=_now) if lidar_port else None
         # ... and its obstacles for the robot's navigator: MSG_LIDAR_OBSTACLES per scan (#77)
         self.lidar_obst = LidarObstacles(self.lidar, self.send, clock=_now) if self.lidar else None
+        # ... and the matcher's stuck check: wheels turning, lidar pose still -> the navigator backs off (#79, link v6)
+        self.mapper.lmatch.stuck_listeners.append(lambda: self.send(lp.encode_event(lp.EVT_LINK_STUCK)))
         self.planner =Planner(self, NAV_STATE_NAMES)           # route planning + explore on the map
 
         self.cmd = (0.0, 0.0)

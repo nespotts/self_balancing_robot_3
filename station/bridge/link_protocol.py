@@ -1,4 +1,4 @@
-"""Link protocol v5 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
+"""Link protocol v6 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
 
 Frame: 0xA5 0x5A | type u8 | len u8 | payload[len] | crc16 u16 LE
 crc16 = CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over type, len and payload.
@@ -7,7 +7,7 @@ Pure Python, 3.8+.
 """
 import struct
 
-LINK_PROTOCOL_VERSION = 5
+LINK_PROTOCOL_VERSION = 6
 LINK_SYNC1 = 0xA5
 LINK_SYNC2 = 0x5A
 LINK_MAX_PAYLOAD = 200
@@ -46,6 +46,7 @@ EVENT_NAMES = ["NONE", "MARK_WAYPOINT", "CLEAR_WAYPOINTS", "GO_HOME", "RESET_POS
 EVT_LINK_ESTOP = 0x80          # station E-stop: IDLE + disarm, latched; no mode request can start the motors
 EVT_LINK_ESTOP_RELEASE = 0x81  # clears the latch only (still IDLE + disarmed; then the normal arming rules)
 EVT_LINK_ARM = 0x82            # explicit arm request: the next SET_MODE != IDLE within LINK_ARM_WINDOW_MS arms
+EVT_LINK_STUCK = 0x83          # v6 (#79): the bridge's lidar saw the wheels turn but no body motion: navigator stuck
 LINK_ARM_WINDOW_MS = 500
 
 TLM_ARMED = 0x01

@@ -70,7 +70,7 @@ class DriftRobot(SimRobot):
             return
         dth = self.TH - th0
         mid = math.radians(th0 + dth / 2)
-        ds = (self.X - x0) * math.cos(mid) + (self.Y - y0) * math.sin(mid)
+        ds = (self.X - x0) * math.cos(mid) + (self.Y - y0) * math.sin(mid) + self.slip_ds   # + wheel slip (#79)
         h_mid = math.radians(self.dth_o + dth / 2)
         self.dx_o += ds * (1 + self.drift_scale) * math.cos(h_mid)
         self.dy_o += ds * (1 + self.drift_scale) * math.sin(h_mid)

@@ -5,7 +5,9 @@ import random
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
+from station.bridge import link_protocol as lp
 from station.bridge import lidarmatch as lm
 from station.bridge.mapping import DEFAULTS, Mapper
 from station.bridge.occgrid import Grid
@@ -250,6 +252,7 @@ class TestLidarMatch(unittest.TestCase):
 
     def test_a_jump_waits_for_agreeing_matches_and_steps_are_rate_limited(self):
         m = self.m
+        m.apply_settings({"match_slip": False}, save=False)    # the #78 path (with #79 this is a slip: see TestSlip)
         for _ in range(12):
             self.turn((0, 0, 0), (0, 0, 0))
         moved = []
@@ -292,6 +295,234 @@ class TestLidarMatch(unittest.TestCase):
             self.turn((0, 0, 0), (0, 0, 0))
         m.reset()
         self.assertEqual((m.lmatch.turns, m.lmatch.n["matched"], m.lmatch.last), (0, 0, None))
+
+
+class Turns(unittest.TestCase):
+    """Feeds turns straight into Mapper.lmatch, like TestLidarMatch, with a moving true pose and odometry."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.m = Mapper(map_dir=self.tmp)
+        self.m.apply_settings({"match_every_n": 1}, save=False)
+        self.room = Room()
+        self.rng = random.Random(11)
+        self.t = 0.0
+        self.said = []
+        self.m.say = self.said.append
+
+        class L:
+            clock = staticmethod(lambda: self.t)
+        self.m.lidar = L()
+        self.lm = self.m.lmatch
+        self.lm.tlm_mode = lp.MODE_GOTO
+        self.mapped = 0
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def turn(self, true, guess, room=None):
+        m = self.m
+        self.t += 0.1
+        gx, gy, gh = m.map_pose(*guess)
+        pts = seen_from_guess(scan(room or self.room, true[0], true[1], true[2], self.rng), true, (gx, gy, gh))
+        ox, oy, mx, my, runs, pts = m.lmatch.on_scan(gx, gy, gx, gy, gh, [pts], pts)
+        if runs is not None:
+            m.integrate_scan(ox, oy, runs, (mx, my))
+            self.mapped += 1
+        return runs is not None
+
+    def err(self, true, guess):
+        x, y, _ = self.m.map_pose(*guess)
+        return math.hypot(x - true[0], y - true[1])
+
+    def build(self, n=22):
+        for _ in range(n):
+            self.turn((0, 0, 0), (0, 0, 0))
+
+
+class TestSlip(Turns):
+    """Wheel slip (#79): the wheels' travel is checked against the matched lidar poses."""
+
+    def test_driving_normally_is_not_slip(self):
+        self.build()
+        for k in range(1, 60):
+            p = (25.0 * k, 0.0, 0.0)
+            self.turn(p, p)
+        self.assertEqual((self.lm.mode, self.lm.n["slips"], self.lm.n["lost"]), ("track", 0, 0), self.said)
+        self.assertGreater(self.lm.grip, 0.8)
+
+    def test_spinning_wheels_hold_the_pose_then_grip_again(self):
+        self.build()
+        x = o = 0.0
+        for _ in range(20):                       # driving
+            x = o = x + 30.0
+            self.turn((x, 0, 0), (o, 0, 0))
+        modes, errs, mapped0 = [], [], self.mapped
+        for _ in range(20):                       # wheels spin 30 mm a turn, the body stays at x
+            o += 30.0
+            self.turn((x, 0, 0), (o, 0, 0))
+            modes.append(self.lm.mode)
+            errs.append(self.err((x, 0, 0), (o, 0, 0)))
+        first = modes.index("slip")
+        self.assertLessEqual(first, 4, modes)                 # found within 0.5 s
+        self.assertTrue(all(md == "slip" for md in modes[first:]), modes)
+        self.assertLess(max(errs), 150, errs)                 # (600 mm of wheel travel)
+        self.assertLess(max(errs[first + 2:]), 40, errs)      # held
+        self.assertLessEqual(self.mapped - mapped0, first + 1)   # not mapped while slipping
+        self.assertIn("wheel slip", self.lm.state)
+        st = self.m.stats()["lmatch"]
+        self.assertEqual((st["mode"], st["slips"]), ("slip", 1))
+        self.assertLess(st["grip"], 0.3)
+        for _ in range(15):                       # grip again
+            x += 30.0
+            o += 30.0
+            self.turn((x, 0, 0), (o, 0, 0))
+        self.assertEqual(self.lm.mode, "track", self.said)
+        self.assertLess(self.err((x, 0, 0), (o, 0, 0)), 30)
+        self.assertTrue(any("wheel slip over" in s for s in self.said), self.said)
+
+    def test_half_slip(self):
+        self.build()
+        x = o = 0.0
+        for _ in range(15):
+            x = o = x + 30.0
+            self.turn((x, 0, 0), (o, 0, 0))
+        errs = []
+        for _ in range(30):                       # the body gets half of it
+            x += 15.0
+            o += 30.0
+            self.turn((x, 0, 0), (o, 0, 0))
+            errs.append(self.err((x, 0, 0), (o, 0, 0)))
+        self.assertEqual(self.lm.n["slips"], 1)
+        self.assertLess(max(errs), 150, errs)
+        self.assertLess(max(errs[-10:]), 40, errs)            # the lidar carries the pose
+
+    def test_one_bad_match_does_not_start_a_slip(self):
+        self.build()
+        real = lm.match
+        calls = []
+
+        def fake(*a, **kw):
+            r = real(*a, **kw)
+            calls.append(1)
+            if len(calls) == 25 and r["ok"]:      # one turn "matched" 90 mm behind (a false peak)
+                r["dx"] -= 90.0
+            return r
+        x = 0.0
+        with mock.patch.object(lm, "match", fake):
+            for _ in range(30):
+                x += 30.0
+                self.turn((x, 0, 0), (x, 0, 0))
+        self.assertEqual((self.lm.mode, self.lm.n["slips"]), ("track", 0), self.said)
+        self.assertLess(self.err((x, 0, 0), (x, 0, 0)), 25)
+
+    def test_stuck_is_reported_while_driving_only(self):
+        hits = []
+        self.lm.stuck_listeners.append(lambda: hits.append(self.t))
+        self.build()
+        x = o = 0.0
+        for _ in range(15):
+            x = o = x + 30.0
+            self.turn((x, 0, 0), (o, 0, 0))
+        for _ in range(60):                       # 6 s: wheels spin, body still
+            o += 30.0
+            self.turn((x, 0, 0), (o, 0, 0))
+        self.assertEqual(len(hits), 2, hits)      # after ~2.5 s, then again after another 2.5 s
+        self.assertEqual(self.lm.n["stuck"], 2)
+        self.assertTrue(any("stuck" in s for s in self.said))
+        # not driving (BALANCE / STATION): no stuck
+        self.lm.tlm_mode = lp.MODE_STATION
+        for _ in range(40):
+            o += 30.0
+            self.turn((x, 0, 0), (o, 0, 0))
+        self.assertEqual(len(hits), 2)
+
+    def test_pose_reset_keeps_the_robot_where_it_is(self):
+        self.build()
+        x = 0.0
+        for _ in range(10):
+            x += 30.0
+            self.turn((x, 0, 0), (x, 0, 0))
+        self.m.on_pose_reset()                    # odometry back to 0 here
+        hx, hy = self.m.home_xy()
+        self.assertLess(math.hypot(hx - x, hy), 30)       # Home = where the reset happened
+        for _ in range(10):
+            self.turn((x, 0, 0), (0, 0, 0))
+        self.assertEqual(self.lm.mode, "track")
+        self.assertLess(self.err((x, 0, 0), (0, 0, 0)), 25)
+
+    def test_off_is_the_78_behaviour(self):
+        self.m.apply_settings({"match_slip": False}, save=False)
+        self.build()
+        x = o = 0.0
+        for _ in range(15):
+            x = o = x + 30.0
+            self.turn((x, 0, 0), (o, 0, 0))
+        for _ in range(20):
+            o += 30.0
+            self.turn((x, 0, 0), (o, 0, 0))
+        self.assertEqual((self.lm.mode, self.lm.n["slips"]), ("track", 0))
+        self.assertGreater(self.err((x, 0, 0), (o, 0, 0)), 60)        # (with it: < 30, see above)
+
+
+class TestLost(Turns):
+    """A pose out of the normal window (#79): lost, not mapped, searched wider until 2 strict matches agree."""
+
+    def test_found_again_with_a_wider_search(self):
+        self.build(30)
+        mapped0, modes, wide_ms = self.mapped, [], []
+        for _ in range(40):                       # the odometry jumped 300 mm (a long slip nobody saw)
+            self.turn((0, 0, 0), (300.0, 0, 0))
+            modes.append(self.lm.mode)
+            if self.lm.mode == "lost" and self.lm.last and self.lm.last.get("window"):
+                wide_ms.append(self.lm.cost_ms)
+        self.assertIn("lost", modes)
+        first, back = modes.index("lost"), len(modes) - modes[::-1].index("lost")
+        self.assertLessEqual(first, 6, modes)
+        self.assertEqual(modes[-1], "track", (modes, self.said))
+        self.assertLess(self.err((0, 0, 0), (300.0, 0, 0)), 25)
+        self.assertLessEqual(self.mapped - mapped0, first + (len(modes) - back) + 1)   # nothing mapped while lost
+        self.assertEqual(self.lm.n["found"], 1)
+        self.assertTrue(any("pose lost" in s for s in self.said) and any("found again" in s for s in self.said))
+        self.assertTrue(wide_ms)
+        self.assertLess(sum(wide_ms) / len(wide_ms), 80.0, wide_ms)   # ms per wide search on this PC (Pi: ~10 x)
+
+    def test_far_behind_is_found_back_along_the_travel(self):
+        self.build(30)
+        for _ in range(30):                       # 0.8 m of wheel travel the lidar did not see (beyond the window)
+            self.turn((0, 0, 0), (800.0, 0, 0))
+        self.assertEqual((self.lm.mode, self.lm.n["lost"], self.lm.n["found"]), ("track", 1, 1), self.said)
+        self.assertLess(self.err((0, 0, 0), (800.0, 0, 0)), 25)
+
+    def test_carried_away_stays_lost_until_trusted(self):
+        self.build(30)
+        mapped0 = self.mapped
+        for _ in range(80):                       # carried 0.86 m: beyond the widest window, no wheel travel to go by
+            self.turn((700.0, 500.0, 0), (0, 0, 0))
+        self.assertEqual(self.lm.mode, "lost")
+        self.assertEqual(self.mapped, mapped0)    # the wrong pose never reached the map
+        st = self.m.stats()["lmatch"]
+        self.assertEqual(st["window"], [400.0, 6.0])
+        self.assertGreater(st["lost_s"], 5.0)
+        self.assertTrue(self.lm.state.startswith("lost: searching +-400 mm"), self.lm.state)
+        self.assertIsNone(self.m.command({"action": "trust_pose"}, "test"))
+        self.assertEqual(self.lm.mode, "track")
+        self.assertTrue(self.turn((700.0, 500.0, 0), (0, 0, 0)))        # maps again (from the trusted pose)
+        self.assertEqual(self.m.command({"action": "trust_pose"})["t"], "error")
+
+    def test_changed_room_is_the_way_out(self):
+        self.build(30)
+        # furniture moved in: walls the map does not have close around the robot (most of the view)
+        changed = Segs(Room().segs + [(-400, -400, 500, -400), (500, -400, 500, 400), (-400, -400, -400, 400),
+                                      (-400, 400, 100, 400)])
+        modes = []
+        for _ in range(120):
+            self.turn((0, 0, 0), (0, 0, 0), room=changed)
+            modes.append(self.lm.mode)
+        self.assertIn("lost", modes, self.said)
+        self.assertEqual(modes[-1], "track", self.said)
+        self.assertTrue(any("re-anchored" in s for s in self.said), self.said)
+        self.assertLess(self.err((0, 0, 0), (0, 0, 0)), 30)
 
 
 class TestPlannerDrift(unittest.TestCase):
@@ -357,6 +588,41 @@ class TestSimDrift(unittest.TestCase):
         lmt = on[4]
         self.assertGreater(lmt.n["matched"], 10 * max(1, lmt.n["rejected"]))
         self.assertLess(sorted(on[5])[len(on[5]) // 2], 25.0)   # ms per match on this PC (Pi: ~10 x)
+
+
+class TestSimSlip(unittest.TestCase):
+    """Sim end to end (#79): real LD19 packets, a wheel-slip episode (wheels spin, body still) on the tour's first leg,
+    the #78 matcher alone vs with the slip handling. (Whole tour, 0.5 / 2 / 5 s: python -m station.sim.lidar_eval
+    --slip 0.5 2 5.)"""
+
+    def test_slip_is_held_and_stuck_reported(self):
+        from station.sim.lidar_eval import run_slip
+        old = run_slip(1, 2.0, recover=False, legs=2, lever_mm=170.0)
+        new = run_slip(1, 2.0, recover=True, legs=2, lever_mm=170.0)
+        self.assertGreater(old["err_slip_end_mm"], 400)          # odometry ran ~0.55 m ahead, the window is 0.1 m
+        self.assertIsNone(old["recovery_s"])
+        self.assertLess(new["err_max_mm"], 200, new)
+        self.assertLess(new["err_slip_end_mm"], 50, new)
+        self.assertEqual(new["recovery_s"], 0.0)
+        self.assertLess(new["err_end_mm"], 50)
+        self.assertGreater(new["wall_fit"], old["wall_fit"] + 0.3)   # the old one drew the room twice
+        self.assertEqual((new["slips"], new["lost"]), (1, 0))
+        # 5 s: the lidar sees the wheels spin in place -> the navigator is told it is stuck and backs off
+        stuck = run_slip(1, 5.0, recover=True, legs=2, lever_mm=170.0)
+        self.assertGreaterEqual(stuck["stuck"], 1)
+        self.assertGreaterEqual(stuck["robot_stuck"], 1)
+        self.assertLess(stuck["err_end_mm"], 50, stuck)
+
+    def test_slip_with_the_lidar_out_is_found_back_along_the_travel(self):
+        from station.sim.lidar_eval import run_slip
+        o = run_slip(1, 2.0, recover=True, legs=2, lever_mm=170.0, lidar_off=True)
+        self.assertGreater(o["err_slip_end_mm"], 400)            # nothing saw it: 0.6 m off when the lidar is back
+        self.assertEqual(o["checks"], 1, o)                      # a lidar gap: the pose is checked, found back
+        self.assertEqual(o["lost"], 0, o)                        # along the travel within CHECK_S (no "lost")
+        self.assertIsNotNone(o["recovery_s"])
+        self.assertLess(o["recovery_s"], 3.0)
+        self.assertLess(o["err_end_mm"], 50)
+        self.assertLess(o["wide_ms"], 40.0)                      # ms per wide search on this PC (Pi: ~10 x)
 
 
 if __name__ == "__main__":

@@ -24,9 +24,10 @@ POST_HALF_DEG = 1.5
 
 class LidarSim:
     def __init__(self, seed=None, x_mm=0.0, y_mm=0.0, yaw_deg=0.0, flip=False, height_mm=200.0, posts=True,
-                 noise_mm=6.0, dropout=0.01, bad_packets=0.0, lost_packets=0.0):
+                 noise_mm=6.0, dropout=0.01, bad_packets=0.0, lost_packets=0.0, lever_mm=0.0):
         self.rng = random.Random(seed)
         self.x, self.y, self.yaw, self.flip, self.height = x_mm, y_mm, yaw_deg, flip, height_mm
+        self.lever = lever_mm       # lidar this far above the axle: leaning moves it lever * sin(lean) forward (#79)
         self.posts = posts
         self.noise, self.dropout = noise_mm, dropout
         self.bad_packets, self.lost_packets = bad_packets, lost_packets
@@ -48,7 +49,8 @@ class LidarSim:
     def _packet(self, robot, n0):
         th = math.radians(robot.TH)
         c, s = math.cos(th), math.sin(th)
-        ox, oy = robot.X + c * self.x - s * self.y, robot.Y + s * self.x + c * self.y
+        fx = self.x + self.lever * math.sin(robot.theta)
+        ox, oy = robot.X + c * fx - s * self.y, robot.Y + s * fx + c * self.y
         lean = math.degrees(robot.theta)
         rng = self.rng
         room = robot.room

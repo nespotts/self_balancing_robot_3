@@ -32,6 +32,9 @@
 //   corners' swing circle ahead / behind -> first step straight away from it (<= nav.stuck_backoff_mm).
 // Stuck (#62): driving / turning but < nav.stuck_mm (or 15 deg) of progress for nav.stuck_ms -> BLOCKED,
 //   log "nav: stuck ...", back off nav.stuck_backoff_mm. GOTO then goes on; EXPLORE waits for a new list.
+//   Lidar stuck (#79, EVT_LINK_STUCK): spinning wheels count as odometry progress, so the bridge's LD19 matcher
+//   reports "wheels turn, robot still"; the next driving stuck check (within 500 ms, while trying to drive) takes it
+//   the same way. Turning in place needs no help: the heading is the gyro's.
 // No fresh lidar frame and no range readings for 3 s (rng.enable 0, sensor fault): no obstacle stop is possible,
 //   so EXPLORE pauses (stands still, keeps its state) and GOTO drives at most nav.blind_speed (0 = GOTO pauses
 //   too). Without the sweep that is 500 ms after the last lidar frame (lidar silent / stopped, bridge gone).
@@ -72,6 +75,7 @@ class Navigator {
   bool lidarFresh(uint32_t now_ms) const { return lidar_ms_ && now_ms - lidar_ms_ <= LINK_LIDAR_FRESH_MS; }
   void onModeChange(const NavIn& in);
   void onPoseReset();                 // pose is now (0,0,0): list, obstacle points and hold point dropped
+  void onLidarStuck(uint32_t now_ms) { lidar_stuck_ms_ = now_ms ? now_ms : 1; }  // EVT_LINK_STUCK (#79)
   void update(const NavIn& in);       // every control step (or at >= 50 Hz)
   // Obstacle limit for a speed command not made here (STATION; MANUAL with apply = false: flag only).
   float limitSpeed(float v, float vmax, bool apply);
@@ -138,6 +142,9 @@ class Navigator {
   bool stuck_ = false, stuck_turn_ = false, stuck_seen_ = false;
   uint32_t stuck_ms_ = 0;             // start of the current no-progress window (0 = none)
   float stuck_x_ = 0, stuck_y_ = 0, stuck_h_ = 0;
+  uint32_t lidar_stuck_ms_ = 0;       // EVT_LINK_STUCK arrival, waiting for a driving stuck check (0 = none), #79
+  bool stuck_lidar_ = false;          // the stuck being started came from it (log line)
+  static constexpr uint32_t kLidarStuckMs = 500;
   bool away_ = false, away_done_ = false;  // turning in place: stepping away from a close wall first
   float away_x_ = 0, away_y_ = 0;
   uint32_t away_ms_ = 0;

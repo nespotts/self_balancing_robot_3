@@ -125,6 +125,7 @@ SWING_R_MM = 105.0        # turning in place, the corners sweep r 88 (+ margin)
 SIDE_BACK_MM, SIDE_AHEAD_MM, SIDE_INNER_MM = 45.0, 300.0, 40.0   # side window: body rear .. 300 ahead
 BLOCKED_TURN_DEG = 30.0   # GOTO blocked by a wall alongside: turn away at most this much
 STUCK_DEG = 15.0
+LIDAR_STUCK_MS = 500      # Navigator::kLidarStuckMs (#79)
 
 
 def _box(cx, cy, w, h):
@@ -340,6 +341,8 @@ class Navigator:
         self.stuck = self.stuck_turn = self.stuck_seen = False
         self.stuck_ms = 0
         self.stuck_pose = (0.0, 0.0, 0.0)
+        self.lidar_stuck_ms = 0       # EVT_LINK_STUCK arrival, waiting for a driving stuck check (#79)
+        self.stuck_lidar = False
         self.away = self.away_done = False
         self.away_pose = (0.0, 0.0, 0)
         self.obst_flag = False
@@ -427,6 +430,7 @@ class Navigator:
         self.stop_since = 0
         self.stuck = self.away = self.away_done = False
         self.stuck_ms = 0
+        self.lidar_stuck_ms = 0
         n = len(self.wp)
         if i["mode"] in (lp.MODE_GOTO, lp.MODE_EXPLORE):
             if self.idx >= n:
@@ -533,6 +537,10 @@ class Navigator:
         if not trying or P("nav.stuck_ms") <= 0:
             return False
         self.stuck_seen = True
+        if not turning and self.lidar_stuck_ms:     # the lidar saw no motion while the wheels turn (#79)
+            self.lidar_stuck_ms = 0
+            self.stuck_lidar = True
+            return True
         sx, sy, sh = self.stuck_pose
         moved = (abs(i["heading"] - sh) >= STUCK_DEG if turning
                  else math.hypot(i["x"] - sx, i["y"] - sy) >= P("nav.stuck_mm"))
@@ -551,8 +559,12 @@ class Navigator:
         self.stuck_ms = 0
         if i["mode"] == lp.MODE_EXPLORE:
             self.latched = True
-        self.log("nav: stuck, no progress %s for %.1f s (waypoint %u/%u)"
-                 % ("turning" if turning else "driving", P("nav.stuck_ms") / 1000.0, self.idx + 1, len(self.wp)))
+        if self.stuck_lidar:
+            self.log("nav: stuck, wheels turn but the lidar sees no motion (waypoint %u/%u)" % (self.idx + 1, len(self.wp)))
+        else:
+            self.log("nav: stuck, no progress %s for %.1f s (waypoint %u/%u)"
+                     % ("turning" if turning else "driving", P("nav.stuck_ms") / 1000.0, self.idx + 1, len(self.wp)))
+        self.stuck_lidar = False
         self.back_mm = P("nav.stuck_backoff_mm")
         self.backing = self.back_mm > 0
         self.back = (i["x"], i["y"], i["now_ms"])
@@ -633,6 +645,12 @@ class Navigator:
                 self.dist = 0.0
         if not self.stuck_seen:           # not trying to move this step: the no-progress window starts over
             self.stuck_ms = 0
+        if self.lidar_stuck_ms and i["now_ms"] - self.lidar_stuck_ms > LIDAR_STUCK_MS:
+            self.lidar_stuck_ms = 0       # not driving: dropped
+
+    def on_lidar_stuck(self, now_ms):
+        """EVT_LINK_STUCK (#79): the bridge's lidar saw the wheels turn but the robot not move."""
+        self.lidar_stuck_ms = now_ms or 1
 
     def _start_blocked(self, i):
         self.blocked = True
@@ -784,7 +802,10 @@ class Navigator:
             vl = 0.0
             if self.backing:
                 bx, by, bms = self.back
-                back = math.hypot(i["x"] - bx, i["y"] - by)
+                # backed off = travel backwards along the heading it blocked at (still rolling on / wheels spinning
+                # forward after a lidar stuck, #79, is not backing off)
+                hb = math.radians(self.blk_h)
+                back = -((i["x"] - bx) * math.cos(hb) + (i["y"] - by) * math.sin(hb))
                 # stuck: twice as fast (a balancing robot pressed against a wall barely follows the slowest speed)
                 vb = self.limit_speed(-max(P("nav.min_speed"), 30.0) * (2.0 if self.stuck else 1.0), vmax, True)
                 if self.obst_flag or back >= self.back_mm or i["now_ms"] - bms > 5000:
@@ -1026,6 +1047,12 @@ class SimRobot:
         self.on_stand = False
         self.tt = []                  # TT motors on the stand (see _motor_test_step)
         self.floor = None             # FloorWheel pair: volts motor layer + stiction (use_floor_wheels, #69)
+        # sim-only wheel slip (#79): during an episode the wheels (encoders, odometry) turn as commanded but the body
+        # moves / turns only (1 - ratio) as much; the gyro sees the body. The truth (X, Y, TH) stays right.
+        self.slip_eps = []            # [(t0, t1, ratio)]
+        self.slip_rand = None         # random episodes: (ratio, dur_s, every_s, Random), see slip_random()
+        self.slip_ds = 0.0            # wheel travel of the last step the body did not make, mm
+        self.slip_mm = 0.0            # ... all of it so far
         self.enc_ring = []
         self.out = []                 # frames to send
         self.log("boot sim v4, params DEFAULTS, imu ok, radio %s" % ("ok" if remote else "ok (no remote)"))
@@ -1088,6 +1115,40 @@ class SimRobot:
         """Sim-only: a shove (adds pitch rate), e.g. for testing recovery."""
         self.theta_rate += math.radians(deg_s)
 
+    # ---------------------------------------------------------------- wheel slip (sim only, #79)
+    def _odo_from_wheels(self):
+        """Slip needs odometry integrated from the wheels (as the firmware does), not the true pose: switch the
+        exact-odometry shortcut off (set_hardware with the params' own values, from the pose now)."""
+        if self.hw is None:
+            x, y, _ = self.odom()
+            self.hw = {"d": self.P("odo.wheel_d_mm"), "track": TRACK_MM, "lr": self.P("odo.lr_ratio")}
+            self.odx, self.ody = x, y
+
+    def slip_at(self, t0, dur_s, ratio=1.0):
+        """A wheel-slip episode from sim time t0 for dur_s: the body moves (1 - ratio) x what the wheels do
+        (1.0: wheels spin, body still; 0.5: it gets half of it)."""
+        self._odo_from_wheels()
+        self.slip_eps.append((float(t0), float(t0) + float(dur_s), max(0.0, min(1.0, float(ratio)))))
+
+    def slip_now(self, dur_s, ratio=1.0):
+        self.slip_at(self.t, dur_s, ratio)
+
+    def slip_random(self, ratio=1.0, dur_s=2.0, every_s=20.0, seed=None):
+        """Random episodes while driving (|speed| > 50 mm/s): on average one per every_s seconds of driving."""
+        self._odo_from_wheels()
+        self.slip_rand = (float(ratio), float(dur_s), max(0.5, float(every_s)), random.Random(seed))
+
+    def slip_ratio(self, now=None):
+        now = self.t if now is None else now
+        r = 0.0
+        for t0, t1, k in self.slip_eps:
+            if t0 <= now < t1:
+                r = max(r, k)
+        return r
+
+    def slipping(self):
+        return self.slip_ratio() > 0.0
+
     # ---------------------------------------------------------------- link in
     def on_frame(self, t, p):
         d = lp.decode(t, p)
@@ -1138,6 +1199,8 @@ class SimRobot:
             elif ev == lp.EVT_LINK_ARM:
                 if not self.link_estop:
                     self.arm_req = self.now()
+            elif ev == lp.EVT_LINK_STUCK:          # lidar: wheels turn, robot still (#79)
+                self.nav.on_lidar_stuck(int(self.now() * 1000.0))
             else:
                 self.on_event(ev)
 
@@ -1315,11 +1378,12 @@ class SimRobot:
             self.log("pi link lost: station commands stopped")
         self._update_mode()
         v_t, w_t = self._targets(now)
+        grip = 1.0 - self._slip_step(now, dt) if (self.slip_eps or self.slip_rand) else 1.0   # sim-only (#79)
 
         # sensors (what the firmware sees)
         pitch = math.degrees(self.theta) + IMU_MOUNT_DEG + rng.gauss(0, 0.015)
         pitch_rate = math.degrees(self.theta_rate) + rng.gauss(0, 0.4)
-        yaw_rate = math.degrees((self.vr - self.vl) / self.track_mm())
+        yaw_rate = math.degrees((self.vr - self.vl) / self.track_mm()) * grip    # the gyro: the body's rotation
         ctl_in = {"dt": dt, "now": now, "pitch": pitch, "pitch_rate": pitch_rate, "roll": rng.gauss(0, 0.2),
                   "heading": self.TH - self.oth + self.gdrift, "yaw_rate": yaw_rate + rng.gauss(0, 0.3),
                   "speed": self.speed_f, "speed_ok": True, "target_speed": v_t, "target_turn": w_t,
@@ -1379,14 +1443,19 @@ class SimRobot:
             self.theta_rate = 0.0
 
         stand_pose = (self.X, self.Y, self.TH) if self.on_stand else None
-        # move (stop at walls)
-        w = math.degrees((self.vr - self.vl) / self.track_mm())
+        # move (stop at walls). Wheel slip (#79): the body gets `grip` of the wheels' motion (the pendulum above still
+        # follows the wheels: an idealisation that keeps it balancing while they spin)
+        w = math.degrees((self.vr - self.vl) / self.track_mm()) * grip
         self.TH += w * dt
         self.gdrift += self.gyro_bias * dt
-        nx = self.X + v * math.cos(math.radians(self.TH)) * dt
-        ny = self.Y + v * math.sin(math.radians(self.TH)) * dt
+        nx = self.X + v * grip * math.cos(math.radians(self.TH)) * dt
+        ny = self.Y + v * grip * math.sin(math.radians(self.TH)) * dt
+        self.slip_ds = 0.0
         if abs(v) < 1e-3 or self.room.clearance(nx, ny) > ROBOT_RADIUS:
             self.X, self.Y = nx, ny
+            if grip < 1.0:
+                self.slip_ds = v * (1.0 - grip) * dt
+                self.slip_mm += abs(self.slip_ds)
             if self.hw:     # odometry: mis-scaled wheel travel along the (gyro) heading
                 hh = math.radians(self.TH - self.oth + self.gdrift)
                 dd = (self.vl * sl + self.vr * sr) / 2 * dt
@@ -1446,6 +1515,15 @@ class SimRobot:
         if self.nav.status_due(now_ms):
             self.out.append(lp.encode_nav_status(self.nav.status()))
             self.nav.status_sent(now_ms)
+
+    def _slip_step(self, now, dt):
+        """Slip ratio for this step; starts random episodes (slip_random) while driving."""
+        if self.slip_rand and not self.slip_ratio(now) and abs(self.vl + self.vr) > 100.0:
+            ratio, dur, every, rnd = self.slip_rand
+            if rnd.random() < dt / every:
+                self.slip_eps.append((now, now + dur, ratio))
+        self.slip_eps = [e for e in self.slip_eps if e[1] > now - 60.0]
+        return self.slip_ratio(now)
 
     # ---------------------------------------------------------------- wheels-up motor test (src/motor_test.cpp)
     def _motor_test_step(self, now, dt, pitch, pitch_rate, stand_pose):
