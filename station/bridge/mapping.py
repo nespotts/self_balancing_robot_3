@@ -47,6 +47,7 @@ DEFAULTS = {
     "body_free_mm": 50.0,       # the floor within this of the robot's centre is free (0 = off; body half width 76)
     "correct": False,           # continuous scan-to-map pose correction (experimental, odometry drift)
     "stop_scan": False,         # stop-and-scan pose correction whenever the robot stands still (#71)
+    "lidar_replaces_sweep": True,   # while LD19 scans are flowing (#76) the VL53L0X sweep does not draw into the map
 }
 LIMITS = {"pitch_limit_deg": (0.5, 45), "no_target_mm": (0, 4000), "max_hit_mm": (100, 8000),
           "min_mm": (0, 500), "cone_deg": (0, 30), "hit_arc_deg": (0, 30), "body_free_mm": (0, 150)}
@@ -70,7 +71,8 @@ class Mapper:
         self.matcher = scanmatch.Matcher(self)
         self.stopscan = scanmatch.StopScan(self)
         self.scan_sent = 0               # stopscan.seq last broadcast
-        self.n = {"readings": 0, "used": 0, "tilt": 0, "no_target": 0, "short": 0}
+        self.lidar = None                # lidar.Lidar (#76), set by it
+        self.n = {"readings": 0, "used": 0, "tilt": 0, "no_target": 0, "short": 0, "sweep_skipped": 0, "scans": 0}
         self.cpu_s = 0.0                 # time spent in on_range / poll since the last stats
         self.cpu_t0 = time.monotonic()
         self.cpu_pct = 0.0
@@ -141,6 +143,9 @@ class Mapper:
         if not S["enabled"]:
             return
         self.n["readings"] += 1
+        if S["lidar_replaces_sweep"] and self.lidar is not None and self.lidar.flowing():
+            self.n["sweep_skipped"] += 1           # the dense LD19 scan maps; the two sparse sensors would only fight it
+            return
         p = d["pitch_deg"]
         if not math.isfinite(p) or abs(p) > PITCH_ABS_MAX:
             self.n["tilt"] += 1
@@ -191,12 +196,26 @@ class Mapper:
         else:
             g.integrate_wedge(ox, oy, a, half, S["no_target_mm"], weak=True)
             self.n["no_target"] += 1
-        rb = S["body_free_mm"]
+        self._body_free(x, y)
+        self.n["used"] += 1
+        self.changed_since_save = True
+
+    def _body_free(self, x, y):
+        rb = self.settings["body_free_mm"]
         # the body's own spot, once per cell moved (standing still adds nothing): a far cone hit drawn into
         # a doorway goes once the robot has driven through it, whichever way it looked meanwhile
         if rb > 0 and (self.body_at is None or math.hypot(x - self.body_at[0], y - self.body_at[1]) >= self.grid.res):
             self.body_at = (x, y)
             self.grid.clear_disc(x, y, rb)
+
+    def integrate_scan(self, ox, oy, runs, robot_xy):
+        """One LD19 revolution (#76), map frame: ox, oy the lidar axis, runs the point runs (lidar.py),
+        robot_xy the axle centre (its own spot is free)."""
+        if not self.settings["enabled"]:
+            return
+        self.grid.integrate_scan(ox, oy, runs, margin_mm=self.grid.res)
+        self._body_free(robot_xy[0], robot_xy[1])
+        self.n["scans"] += 1
         self.n["used"] += 1
         self.changed_since_save = True
 
@@ -536,7 +555,7 @@ class Mapper:
         except OSError:
             return out
         for n in names:
-            if n.endswith(".json") and n not in ("settings.json", "planner.json") and NAME_RE.match(n[:-5]):
+            if n.endswith(".json") and n not in ("settings.json", "planner.json", "lidar.json") and NAME_RE.match(n[:-5]):
                 st = os.stat(os.path.join(self.dir, n))
                 out.append({"name": n[:-5], "size": st.st_size, "mtime": int(st.st_mtime)})
         out.sort(key=lambda d: -d["mtime"])

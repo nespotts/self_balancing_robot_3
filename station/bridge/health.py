@@ -237,6 +237,44 @@ def _tile(id, label, level, value, why=""):
     return {"id": id, "label": label, "level": level, "value": value, "why": why}
 
 
+LIDAR_RPM_OK = (570.0, 630.0)    # LD19: 10 Hz = 600 rpm, +-0.1 Hz once settled (~3 s after power-up)
+LIDAR_CRC_WARN = 0.02            # share of packets with a bad CRC
+
+
+def lidar_tile(l):
+    """LD19 tile from Lidar.status(): packets/s, rpm, CRC errors, last-scan age. A missing port is grey, not red:
+    the lidar may simply not be mounted yet."""
+    st = l.get("state")
+    pps, rpm, crc = l.get("pps", 0.0), l.get("rpm", 0.0), l.get("crc_errors", 0)
+    pk = max(1, l.get("packets", 0))
+    age = l.get("scan_age_s")
+    if not l.get("enabled", True):
+        return _tile("lidar", "Lidar", NA, "off", "lidar mapping is switched off in the lidar settings")
+    if st == "waiting":
+        return _tile("lidar", "Lidar", NA, "no port", "waiting for %s (%s)" % (l.get("port"), l.get("error") or "not present"))
+    if st in ("no data", "junk"):
+        return _tile("lidar", "Lidar", WARN, "silent" if st == "no data" else "junk",
+                     "port open but %s: check the power, the Tx wire and 230400 baud" % (
+                         "no bytes arrive" if st == "no data" else "no valid packet (wrong baud rate or Rx / Tx swapped)"))
+    if st == "stale":
+        return _tile("lidar", "Lidar", BAD, "stopped", "no packet for %s s" % (age if age is not None else "?"))
+    why = ["%.0f packets/s" % pps, "%.0f rpm" % rpm, "%d bad CRC" % crc]
+    lvl = OK
+    if crc / pk > LIDAR_CRC_WARN:
+        lvl = WARN
+        why.append("many CRC errors: check the wiring")
+    if not LIDAR_RPM_OK[0] <= rpm <= LIDAR_RPM_OK[1]:
+        lvl = worst([lvl, WARN])
+        why.append("speed off 600 rpm (settling or PWM pin not grounded)")
+    if age is not None and age > 0.5:
+        lvl = worst([lvl, WARN])
+        why.append("last scan %.1f s ago" % age)
+    if not l.get("flowing"):
+        why.append("not mapped (no robot pose / lidar settings off)")
+        lvl = worst([lvl, WARN])
+    return _tile("lidar", "Lidar", lvl, "%.0f/s %.0f rpm" % (pps, rpm), ", ".join(why))
+
+
 def evaluate(c):
     """Rules: context dict -> {"tiles": [...], "preflight": {...}}. See Health.context() for the keys."""
     t = c.get("tlm")
@@ -329,6 +367,10 @@ def evaluate(c):
         for id, lab in (("loop", "Loop"), ("imu", "IMU"), ("encl", "Enc L"), ("encr", "Enc R"), ("rngf", "Range F"),
                         ("rngr", "Range R"), ("radio", "RC remote"), ("fw", "Firmware")):
             tiles[id] = na(id, lab)
+
+    # ---- lidar (#76): only when the bridge has a lidar port configured
+    if c.get("lidar"):
+        tiles["lidar"] = lidar_tile(c["lidar"])
 
     # ---- E-stop
     latched = bool(c.get("estop") or c.get("robot_estop"))
@@ -434,7 +476,8 @@ def evaluate(c):
         head = "Ready, %d to check" % nwarn
     else:
         head = "Ready to arm"
-    order = ["link", "loop", "imu", "encl", "encr", "rngf", "rngr", "radio", "pi", "disk", "batt", "fw", "estop"]
+    order = ["link", "loop", "imu", "encl", "encr", "rngf", "rngr"] + (["lidar"] if "lidar" in tiles else []) + \
+            ["radio", "pi", "disk", "batt", "fw", "estop"]
     return {"tiles": [tiles[k] for k in order],
             "preflight": {"level": {OK: "green", WARN: "amber", BAD: "red", NA: "red"}[lv], "text": head, "items": pre}}
 

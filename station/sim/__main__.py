@@ -54,6 +54,10 @@ def main(argv=None):
                     help="maze test room (#70): only the outer walls; the map's virtual walls and mazes are built as "
                          "real walls in the sim (live, as you draw them); starts with a random W x H m maze (default 3x3) "
                          "ahead of the robot. Map > Draw > Maze > Solve drives through it")
+    ap.add_argument("--lidar", nargs="?", const=5762, type=int, default=None, metavar="PORT",
+                    help="fake LDROBOT LD19 spinning lidar (issue #76): real 47-byte packets on tcp://127.0.0.1:PORT "
+                         "(default 5762); the in-process bridge reads them like the Pi's UART. The map then fills from "
+                         "dense 360 degree scans (the two VL53L0X sweep stops drawing into it)")
     a = ap.parse_args(argv)
     host, _, port = a.listen.rpartition(":")
     remote = a.remote or a.remote_disarmed
@@ -69,7 +73,11 @@ def main(argv=None):
         robot.use_floor_wheels()
     if a.drain is not None:
         robot.drain = a.drain / 60.0
-    server = SimServer(robot, host or "127.0.0.1", int(port), a.garbage)
+    lidar = None
+    if a.lidar is not None:
+        from .lidar_sim import LidarSim
+        lidar = LidarSim(seed=a.seed)
+    server = SimServer(robot, host or "127.0.0.1", int(port), a.garbage, lidar=lidar, lidar_port=a.lidar or 0)
 
     async def run():
         jobs = [server.run()]
@@ -80,7 +88,8 @@ def main(argv=None):
                        http_host=a.host, http_port=a.http_port,
                        map_dir=os.environ.get("SBR3_MAP_DIR", "~/sbr3-maps"),
                        preset_dir=os.environ.get("SBR3_PRESET_DIR", "~/sbr3-presets"),
-                       falls_dir=os.environ.get("SBR3_FALLS_DIR", "~/sbr3-falls"))
+                       falls_dir=os.environ.get("SBR3_FALLS_DIR", "~/sbr3-falls"),
+                       lidar_port=("tcp://%s:%d" % (host or "127.0.0.1", a.lidar)) if a.lidar is not None else None)
             jobs.append(b.run())
             if a.maze:
                 from station.bridge.zones import wall_segments

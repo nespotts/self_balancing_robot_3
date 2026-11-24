@@ -10,6 +10,8 @@ export const state = {
   waypoints: [],                   // sent to the robot (from the bridge)
   ranges: [],                      // [i, hx, hy, rx, ry, valid, tilt, t_ms, sensor_id, sensor_angle_deg, range_mm]
   track: [],                       // [x, y]
+  lidar: null,                     // LD19 settings + status (issue #76); null = this bridge has no lidar port
+  lidarPts: [],                    // the last LD19 scan, flat [x0, y0, x1, y1, ...] mm, odometry frame
   logs: [],
   grid: null,                      // occupancy grid layer (issue #12), filled by a future "grid" message
 };
@@ -65,9 +67,11 @@ function handle(m) {
       for (const p of m.list) if (!(p.id in state.paramsFirst)) state.paramsFirst[p.id] = p.value;
       break;
     case "nav": state.nav = m; break;
+    case "lidar": state.lidar = m; break;
+    case "lidar_scan": state.lidarPts = m.pts; break;
     case "track": state.track = m.pts; break;
     case "waypoints": state.waypoints = m.points; break;
-    case "reset": state.ranges = []; state.track = []; state.waypoints = []; break;
+    case "reset": state.ranges = []; state.track = []; state.waypoints = []; state.lidarPts = []; break;
     case "log":
       state.logs.push(m);
       if (state.logs.length > MAX_LOGS) state.logs.splice(0, state.logs.length - MAX_LOGS);

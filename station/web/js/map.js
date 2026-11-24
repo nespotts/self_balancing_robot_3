@@ -8,7 +8,7 @@ import { drawZones, zoneDraw, zoneDrawing, bindZones } from "./zones.js";
 
 const C = {
   bg: "#151514", grid: "#262624", grid2: "#30302d", axis: "#45453f",
-  track: "#3987e5",
+  track: "#3987e5", lidar: "#34c3c9",
   robot: "#f0efec", heading: "#3987e5", wp: "#9085e9", wpPending: "#c3c2b7", target: "#d95926", text: "#f0efec",
 };
 const ROBOT = { l: 90, w: 152, track: 126.8, wheel: 66 };  // mm, from the CAD
@@ -17,7 +17,7 @@ const FADE_MS = 120000;
 const canvas = document.getElementById("map");
 const ctx = canvas.getContext("2d");
 const view = { cx: 0, cy: 0, s: 0.12, follow: true };   // s = px per mm
-const layers = { ranges: true, track: true, grid: true };
+const layers = { ranges: true, lidar: true, track: true, grid: true };
 let pending = [];
 let dirty = true, W = 0, H = 0, dpr = 1;
 let piNowBase = 0, piNowAt = 0;
@@ -113,6 +113,15 @@ function drawRanges() {
   });
 }
 
+// the live LD19 scan (issue #76): one dot per return of the newest revolution (the map itself holds the history)
+function drawLidar() {
+  const p = state.lidarPts;
+  if (!p || p.length < 2) return;
+  const size = Math.max(2, Math.min(4, 22 * view.s));
+  ctx.fillStyle = C.lidar;
+  for (let i = 0; i + 1 < p.length; i += 2) ctx.fillRect(sx(p[i]) - size / 2, sy(p[i + 1]) - size / 2, size, size);
+}
+
 function drawWaypoints() {
   const sent = state.waypoints || [], nav = state.nav;
   const navIdx = nav && nav.waypoint_count === sent.length ? nav.nav_index : -1;
@@ -185,6 +194,7 @@ function draw() {
   if (layers.track) drawTrack();
   drawPlan(ctx, sx, sy);
   if (layers.ranges) drawRanges();
+  if (layers.lidar) drawLidar();
   drawWaypoints();
   drawPlaces(ctx, sx, sy);
   drawRobot();
@@ -355,7 +365,7 @@ document.getElementById("map-follow").onclick = () => setFollow(!view.follow);
 const menu = document.getElementById("map-menu");
 document.getElementById("map-more").onclick = (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; };
 document.addEventListener("pointerdown", (e) => { if (!menu.hidden && !menu.contains(e.target) && e.target.id !== "map-more") menu.hidden = true; });
-for (const k of ["ranges", "track", "grid"]) {
+for (const k of ["ranges", "lidar", "track", "grid"]) {
   document.getElementById("lay-" + k).onchange = (e) => { layers[k] = e.target.checked; dirty = true; };
 }
 document.getElementById("map-clear-track").onclick = () => { state.track = []; state.ranges = []; menu.hidden = true; dirty = true; };
@@ -366,7 +376,9 @@ document.getElementById("map-reset-pose").onclick = () => {
 };
 
 on("tlm", (m) => { piNowBase = m.pt; piNowAt = performance.now(); dirty = true; updateInfo(); updateBar(); });
-for (const t of ["ranges", "waypoints", "nav", "reset", "hello", "track", "plan"]) on(t, () => { dirty = true; updateBar(); updateInfo(); });
+for (const t of ["ranges", "lidar_scan", "waypoints", "nav", "reset", "hello", "track", "plan"]) on(t, () => { dirty = true; updateBar(); updateInfo(); });
+// the Lidar layer switch only shows on a bridge that has a lidar port (issue #76)
+on("lidar", (m) => { document.getElementById("lay-lidar-row").hidden = false; dirty = true; });
 on("conn", updateInfo);
 setInterval(() => { dirty = true; }, 500);   // keep fading even when the robot is silent
 updateBar(); updateInfo();

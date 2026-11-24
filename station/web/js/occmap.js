@@ -192,6 +192,6 @@ function syncSettings() {
   if (plan.settings && "zones_block_manual" in plan.settings) $("set-zblock").checked = plan.settings.zones_block_manual;
   const st = occ.stats || {};
   $("map-stats").textContent = st.readings != null
-    ? `${occ.name ? occ.name + " · " : ""}${st.used} of ${st.readings} readings used · ${st.tilt} tilted · bridge CPU ${st.cpu_pct}%`
+    ? `${occ.name ? occ.name + " · " : ""}${st.scans ? st.scans + " lidar scans · " : ""}${st.used - (st.scans || 0)} of ${st.readings - (st.sweep_skipped || 0)} readings used · ${st.tilt} tilted · bridge CPU ${st.cpu_pct}%`
     : "";
 }

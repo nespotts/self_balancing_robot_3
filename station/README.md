@@ -105,4 +105,6 @@ Health (preflight checklist, battery minutes, tiles; it only looks, it never arm
 </p>
 <p>All green, an encoder fault</p>
 
+LD19 spinning lidar (dense 360 degree map input, Health tile, Map layer): [wiring, Pi setup, settings](../docs/ld19.md); try it with `python -m station.sim --lidar`.
+
 More: [Android app](android/README.md) | [features in detail](../docs/station-features.md) | [API, install, flashing contract](../docs/api.md)

@@ -41,5 +41,6 @@ Also in the app: **Find balance point** and **Calibrate odometry** (Tune), **Fal
 | Know the modes | [docs/modes.md](docs/modes.md) |
 | Look up a param | [docs/params.md](docs/params.md) |
 | Falls, tuning, map details | [docs/station-features.md](docs/station-features.md) |
+| Wire and set up the LD19 lidar | [docs/ld19.md](docs/ld19.md) |
 | Script the bridge (API) | [docs/api.md](docs/api.md) |
 | Firmware internals | [docs/firmware.md](docs/firmware.md) |
