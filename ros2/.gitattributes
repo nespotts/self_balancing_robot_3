@@ -1,0 +1,4 @@
+# everything here is read by Linux (WSL / the robot's SBC): LF; the PowerShell helpers stay CRLF
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary

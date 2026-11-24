@@ -17,6 +17,7 @@ from .lidar_obstacles import LidarObstacles
 from .mapping import AUTOSAVE_NAME, Mapper
 from .planner import Planner
 from . import profiles
+from .ros_stream import RosStream
 from .session_log import SessionLog, to_csv
 from .transport import LinkError, open_link
 from .tuning_api import TuningTools
@@ -194,6 +195,7 @@ class Bridge:
         # ... and the matcher's stuck check: wheels turning, lidar pose still -> the navigator backs off (#79, link v6)
         self.mapper.lmatch.stuck_listeners.append(lambda: self.send(lp.encode_event(lp.EVT_LINK_STUCK)))
         self.planner =Planner(self, NAV_STATE_NAMES)           # route planning + explore on the map
+        self.ros = RosStream(self, clock=_now)                 # opt-in scans + odometry for the ROS 2 adapter (#96)
 
         self.cmd = (0.0, 0.0)
         self.cmd_time = -10.0
@@ -370,6 +372,7 @@ class Bridge:
             self.health.on_tlm(d, self.tlm_time)
             if self.lidar:
                 self.lidar.on_tlm(d, self.tlm_time)           # pose / pitch history for the lidar scans (#76)
+            self.ros.on_tlm(d, self.tlm_time)                 # ROS stream odometry rows (#96)
             if d["radio_ok"] and not self.remote_seen:
                 self.remote_seen = True
                 self.push_status()
@@ -560,6 +563,7 @@ class Bridge:
                 self.broadcast(text, droppable=True)
         self._check_robot(now)
         self.planner.tick(now)
+        self.ros.tick(now)                                # ROS stream (#96): odometry batch, 2 Hz state
         for meta in self.falls.tick(now):                 # a fall record was just saved
             self.broadcast(json.dumps({"t": "fall", "fall": meta}, separators=(",", ":")))
         self.tools.tick(now)
@@ -1090,6 +1094,9 @@ class Bridge:
                         else:
                             self.tune_clients.discard(ws)
                         continue
+                    if m.get("t") == "ros":   # {"t": "ros", "action": "subscribe"} -> ROS stream (#96)
+                        ws.send(json.dumps(self.ros.command(ws, m)))
+                        continue
                     reply = self.run_command(m, who)
                     if reply:
                         ws.send(json.dumps(reply))
@@ -1100,6 +1107,7 @@ class Bridge:
         finally:
             self.clients.discard(ws)
             self.tune_clients.discard(ws)
+            self.ros.drop(ws)
             # a driving client went away: stop immediately rather than waiting for the timeout
             if self.cmd_active:
                 self.cmd_active = False

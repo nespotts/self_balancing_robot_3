@@ -47,6 +47,7 @@ rm /tmp/sbr3-bridge.release                   # bridge reconnects
 | `{"t":"map","action":"scan"}` | stop-and-scan pose correction now (#71): the next two sweeps taken standing still are matched to the map (also with the `stop_scan` map setting off). Result: a `scan` message |
 | `{"t":"lidar","action":"set","settings":{"yaw_deg":90,...}}` | LD19 lidar (#76, see [ld19.md](ld19.md)): `get` / `set` / `defaults`; the reply (and every new client) is `{"t":"lidar","settings":{...},"defaults":{...},"status":{...}}`. Settings persist in `lidar.json` next to the saved maps. Error when the bridge has no lidar port |
 | `{"t":"sub","tune":true}` | receive every telemetry frame as `{"t":"tune","cols":[...],"rows":[...]}` |
+| `{"t":"ros","action":"subscribe"}` | ROS stream for the ROS 2 adapter (#96, [ros2.md](ros2.md#the-bridge-ros-stream)): `ros_hello` now, then `ros_scan` (10 Hz), `ros_odom` (25 batches/s, 50 rows/s), `ros_state` (2 Hz), only to this client, droppable. `unsubscribe` / `get` |
 | `{"t":"preset"\|"score"\|"motor"\|"balpoint"\|"calib","action":...}` | Tune tools: see the docstring of `bridge/tuning_api.py` |
 
 Receive: `hello`, `status`, `health` (1 Hz: preflight, tiles, battery minutes; also `GET /api/health`), `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`, `map`, `plan`, `places`, `zones`, `scan`,
