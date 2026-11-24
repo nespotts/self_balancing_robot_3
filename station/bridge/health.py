@@ -359,8 +359,9 @@ def evaluate(c):
             lv = hello.get("link_version")
             tiles["fw"] = _tile("fw", "Firmware", OK if lv == lp.LINK_PROTOCOL_VERSION else WARN,
                                 str(hello.get("firmware", "?"))[:14],
-                                "link v%s" % lv if lv == lp.LINK_PROTOCOL_VERSION else
-                                "link v%s but the bridge speaks v%d" % (lv, lp.LINK_PROTOCOL_VERSION))
+                                ("link v%s" % lv if lv == lp.LINK_PROTOCOL_VERSION else
+                                 "link v%s but the bridge speaks v%d" % (lv, lp.LINK_PROTOCOL_VERSION)) +
+                                (", robot %s" % c["robot_name"] if c.get("robot_name") else ""))
         else:
             tiles["fw"] = na("fw", "Firmware", "no HELLO yet")
     else:

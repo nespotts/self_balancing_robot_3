@@ -54,7 +54,7 @@ flowchart LR
 
 Every fall is saved by itself: 5 s before + 2 s after (full telemetry rate, range readings, log lines, commands, the params then),
 about 100 KB at 100 Hz, 350 KB at 400 Hz. Newest first on **Logs → Falls**: tap one for the evidence, big plots and **Download record**.
-`~/sbr3-falls` keeps the last 200 files / 100 MB (`--falls-dir`). Cost on the Pi: one list append per frame; analysis and writing run in a thread.
+`~/sbr3-falls/<robot>` keeps the last 200 files / 100 MB (`--falls-dir`). Cost on the Pi: one list append per frame; analysis and writing run in a thread.
 
 | Chip | Rule (first one listed is the cause) |
 |---|---|
@@ -84,7 +84,7 @@ API: `GET /api/falls`, `GET /api/falls/<id>` (`?raw=1` = the file), `DELETE /api
 
 | | |
 |---|---|
-| **Preset ▾ / Apply** | built-in "v3 known good" and "2026-11-21 (kd 7.15, ki 1500)", plus your own (⋯ → Save current values as… / Compare… / Delete). Kept on the Pi in `~/sbr3-presets/*.json`. Apply = only the values that differ; asks first while the robot is armed. Never touches the motor test (`mot.test*`), `mot.drive_mode` and its brake limits, `cfg.*` |
+| **Preset ▾ / Apply** | built-in "v3 known good" and "2026-11-21 (kd 7.15, ki 1500)", plus your own (⋯ → Save current values as… / Compare… / Delete). Kept on the Pi in `~/sbr3-presets/<robot>/*.json`. Apply = only the values that differ; asks first while the robot is armed. Never touches the motor test (`mot.test*`), `mot.drive_mode` and its brake limits, `cfg.*` |
 | **Score** | **Last 20 s** (⋯: 10 / 20 / 30 / 60 s) or **Start … Stop** around a run (push it a few times). The bridge scores the full-rate session log like `tools/tune.py score`: pitch error rms, oscillation Hz, motor rms / saturation / sign flips, D noise, pushes > 3° with settle time and overshoot. Needs **Full rate** (400 Hz) |
 | **Runs side by side** | one column per run with the params active then (changed ones in yellow, `*` = changed during the run); best value per row highlighted. History lives in the bridge (and in the session log as `["score", t, {...}]`) |
 
@@ -170,8 +170,8 @@ Screenshots of these: `python -m station.tools.screenshots --url http://localhos
 | grey / white / black | unknown / free / wall (25 mm cells, built on the Pi from every range reading) |
 | size | **grows with the robot**: starts 20 x 20 m, adds 1 m tiles whenever a reading reaches past the edge. Memory cap 64 MB (200 x 200 m): past it the bridge says so in the log and the map stops growing |
 | doorways | hits are range-weighted: close = narrow and strong, far = weak, and a close free reading counts double, so a 260-300 mm doorway is not walled off by far readings. The floor under the robot (50 mm round its centre) is marked free, so a doorway it drove through stays open. Off: `range_weight` / `body_free_mm` = 0 map settings |
-| ⋯ → **Map** | on / off + opacity · **Save / Load map** (`~/sbr3-maps`) · **Clear map** |
-| ⋯ → Map & route settings | keep off walls (180 mm), prefer more room (300), narrow gaps: keep (35), robot radius (80), tilt limit, “no target” handling, pose correction when stopped (#71), drift correction while driving (experimental). Route settings are saved (`~/sbr3-maps/planner.json`) |
+| ⋯ → **Map** | on / off + opacity · **Save / Load map** (`~/sbr3-maps/<robot>`) · **Clear map** |
+| ⋯ → Map & route settings | keep off walls (180 mm), prefer more room (300), narrow gaps: keep (35), robot radius (80), tilt limit, “no target” handling, pose correction when stopped (#71), drift correction while driving (experimental). Route settings are saved (`~/sbr3-maps/<robot>/planner.json`) |
 | **Go** with a map | the bridge plans a route (purple) around obstacles, re-plans when the robot is blocked |
 | **Explore** | drives to the nearest unmapped edge until none is left; STOP ends it |
 | Narrow gap | no route / frontier with the wall margin → plan again keeping only radius + “narrow gaps” (25 mm cells; with range weighting off: sure walls only); explore then only goes for open space behind a gap (also when only a strip along the far room's wall is seen yet, with unknown open space right beyond it), keeps planning on this map until the robot is out of the gap, and stops after 6 such goals that show nothing new. Status: “squeezing through a narrow gap”; the robot slows down beside the walls (`nav.side_min_mm`). The sensor cone can draw a doorway under ~300 mm shut on the map: then it is not tried |

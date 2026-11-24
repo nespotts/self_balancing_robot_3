@@ -61,6 +61,7 @@ body does not follow (position held, nothing mapped), `lost` = the pose is being
 the last check; `slip_s` / `lost_s` = seconds in that mode; `window` = the lost search's `[mm, deg]`; `checking` = `lost` only to check
 the pose after a lidar gap (quiet, lost after 3 s); `slips` / `lost` / `found` / `stuck` / `checks` = counts. While slipping / lost a `map` message without tiles carries the new state and `corr` (<= 1 Hz). Its settings are map settings
 (`{"t":"map","action":"set","settings":{"lidar_match":false}}`, `match_*`), in `settings.json`.
+`status.robot_name` / `status.robot_source` (#97): the robot profile in use, `"balancer"`, `"shark"`, `"sim"` ... (`null` until the first HELLO + params are in), and how it was found: `"sys.platform"` (param 1 = balancer, 2 = shark), `"firmware"` (a simulator, `sim ...`), `"default"` (older firmware: balancer), `"override"` (`--robot NAME`). Maps, places, zones, `lidar.json`, `planner.json`, presets and fall records are kept per robot, see [the station README](../station/README.md#robot-profiles-one-pi-several-robots). The Pi can move between robots: a new connection is identified again from its own HELLO.
 `status.lidar_nav` (null without a lidar port): `{"sent":812,"age_s":0.04,"skipped":{"off","no_pose","stale","tilt","few","no_link"}}`, the obstacle frames for the robot's navigator ([below](#link-messages-to-the-robot)).
 `scan` (on connect and after each stop-and-scan): `{"t":"scan","corr":[dx,dy,dth],"applied":3,"last":{...},"history":[{"ok":true,"why":"","dx":-31,"dy":12,"dth":-1.2,"mm":33,"n":58,"inliers":51,"margin":0.11,"who":"auto","time":1795300000},...]}` (newest first, 20 kept; `why` says why a scan was not used).
 No WebSocket (old Kindle): `GET /api/state`, `GET|POST /api/cmd`.
@@ -70,7 +71,7 @@ That `set_mode` has no `arm`, so it can never arm a robot that was disarmed mean
 
 ### Saved places
 
-Names on the map (Home, Couch, ...), stored with the map in `~/sbr3-maps/<map>.places.json` (map frame, mm).
+Names on the map (Home, Couch, ...), stored with the map in `~/sbr3-maps/<robot>/<map>.places.json` (map frame, mm).
 
 | | |
 |---|---|
@@ -94,7 +95,7 @@ Names on the map (Home, Couch, ...), stored with the map in `~/sbr3-maps/<map>.p
 
 ### Zones
 
-Virtual walls, no-go zones, the keep-in fence, slow zones and mazes, stored with the map in `~/sbr3-maps/<map>.zones.json`
+Virtual walls, no-go zones, the keep-in fence, slow zones and mazes, stored with the map in `~/sbr3-maps/<robot>/<map>.zones.json`
 (map frame, mm; an unsaved map autosaves to `autosave.zones.json`). Points are sent in odometry mm, like `goto`.
 
 | `zones` action | |

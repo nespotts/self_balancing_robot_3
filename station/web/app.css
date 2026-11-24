@@ -92,6 +92,9 @@ body[data-view="health"] #view-health { display: block; }
   #pill-link.good .txt { display: none; }                  /* just the green dot */
 }
 @media (max-width: 360px) { #pill-batt { display: none; } }
+#pill-robot { color: var(--muted); }
+.hl-robot { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 10px; }
+@media (max-width: 420px) { #pill-robot { display: none; } }   /* phones: the name is on Health and Logs */
 
 /* desktop: tabs in the top bar, drive panel always on the right */
 @media (min-width: 900px) {

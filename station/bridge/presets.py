@@ -89,14 +89,17 @@ def _slug(name):
 
 class PresetStore:
     def __init__(self, folder):
-        self.dir = os.path.abspath(os.path.expanduser(folder))
+        self.dir = os.path.abspath(os.path.expanduser(folder)) if folder else None   # None: no robot profile yet (#97)
+
+    def set_dir(self, folder):
+        self.dir = os.path.abspath(os.path.expanduser(folder)) if folder else None
 
     def _path(self, name):
         return os.path.join(self.dir, _slug(name) + ".json")
 
     def list(self):
         out = [dict(p) for p in BUILTIN]
-        if os.path.isdir(self.dir):
+        if self.dir and os.path.isdir(self.dir):
             user = []
             for fn in os.listdir(self.dir):
                 if not fn.endswith(".json"):
@@ -125,6 +128,8 @@ class PresetStore:
         vals = {k: float(v) for k, v in values.items() if tunable(k)}
         if not vals:
             raise ValueError("no tuning parameters to save (robot not connected?)")
+        if not self.dir:
+            raise ValueError("no robot identified yet - nothing saved")
         os.makedirs(self.dir, exist_ok=True)
         d = {"name": name, "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "note": str(note)[:200], "values": vals}
         tmp = self._path(name) + ".tmp"

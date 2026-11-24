@@ -187,19 +187,26 @@ class Lidar:
 
     # ------------------------------------------------------------ settings
     def _settings_path(self):
-        return os.path.join(self.mapper.dir, "lidar.json")
+        return os.path.join(self.mapper.dir, "lidar.json") if self.mapper.dir else None
 
     def _load_settings(self):
         try:
             with open(self._settings_path(), encoding="utf-8") as f:
                 self.settings = clean_settings(json.load(f), self.settings)
-        except (OSError, ValueError):
+        except (OSError, ValueError, TypeError):
             pass
+
+    def reload_settings(self):
+        """The mapper moved to another robot profile (#97): defaults, then that folder's lidar.json."""
+        self.settings = dict(DEFAULTS)
+        self.settings["mask"] = [list(s) for s in DEFAULTS["mask"]]
+        self._load_settings()
+        self._mask = mask_table(self.settings["mask"])
 
     def apply_settings(self, s, save=True):
         self.settings = clean_settings(s, self.settings)
         self._mask = mask_table(self.settings["mask"])
-        if save:
+        if save and self.mapper.dir:
             try:
                 os.makedirs(self.mapper.dir, exist_ok=True)
                 with open(self._settings_path(), "w", encoding="utf-8") as f:

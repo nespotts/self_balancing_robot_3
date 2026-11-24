@@ -14,8 +14,9 @@ from . import health as health_mod
 from .httpws import HttpServer, Response, check_origin
 from .lidar import Lidar
 from .lidar_obstacles import LidarObstacles
-from .mapping import Mapper
+from .mapping import AUTOSAVE_NAME, Mapper
 from .planner import Planner
+from . import profiles
 from .session_log import SessionLog, to_csv
 from .transport import LinkError, open_link
 from .tuning_api import TuningTools
@@ -58,6 +59,8 @@ POLLER_TIMEOUT_S = 3.0
 # touch it again to hold the port longer. See README.md "Flashing while the bridge runs".
 DEFAULT_RELEASE_FILE = "/tmp/sbr3-bridge.release" if os.name == "posix" else \
     os.path.join(tempfile.gettempdir(), "sbr3-bridge.release")
+ROBOT_WAIT_S = 3.0        # identify the robot from its firmware string if sys.platform + the param list are not in after this (#97)
+PLATFORM_PARAM = profiles.PLATFORM_PARAM
 RELEASE_STALE_S = 15 * 60
 LINK_POLL_S = 0.25
 DEFAULT_LOG_MAX_MB = 2048
@@ -103,7 +106,7 @@ class Bridge:
     def __init__(self, port, web_dir, log_dir, http_host="0.0.0.0", http_port=8080, baud=115200,
                  release_file=None, log_max_mb=DEFAULT_LOG_MAX_MB, quiet=False, map_dir=None,
                  preset_dir="~/sbr3-presets", allow_any_origin=False, allow_hosts=(), allow_origins=(), falls_dir=None,
-                 lidar_port=None):
+                 lidar_port=None, robot=None):
         self.port = port
         self.baud = baud
         self.web_dir = web_dir
@@ -122,8 +125,22 @@ class Bridge:
         self.allow_origins = list(allow_origins)
         self.log = SessionLog(log_dir, log_max_mb)
         self.t_start = _now()
-        # black-box fall recorder (#50): ~/sbr3-falls on the Pi
-        self.falls = falls_mod.FallRecorder(falls_dir or os.path.join(self.log.dir, "falls"),
+        # Per-robot data (#97): maps / presets / falls live in <root>/<robot>/. The folders are bound once the robot is
+        # known (first HELLO + params, or --robot); until then nothing is written. Sessions logs stay shared.
+        self.map_root = os.path.abspath(os.path.expanduser(map_dir or os.path.join(self.log.dir, "maps")))
+        self.preset_root = os.path.abspath(os.path.expanduser(preset_dir))
+        self.falls_root = os.path.abspath(os.path.expanduser(falls_dir or os.path.join(self.log.dir, "falls")))
+        self.robot_override = None
+        if robot:
+            self.robot_override = profiles.clean_name(robot)
+            if not self.robot_override:
+                raise ValueError("robot name %r: use lower case letters, digits, - and _ (max 32)" % robot)
+        self.robot = None               # the bound profile name (None until identified)
+        self.robot_source = ""          # "override" | "sys.platform" | "firmware" | "default"
+        self.robot_pending = False      # a (re)connected robot is being identified (mapping is held meanwhile)
+        self.ident = {"hello": None, "params": {}, "t": 0.0}   # what this connection has said so far
+        # black-box fall recorder (#50): ~/sbr3-falls/<robot> on the Pi
+        self.falls = falls_mod.FallRecorder(None,
                                             params=self.param_values, session=lambda: self.log.name if self.log.f else None,
                                             say=self.say, clock=_now)
 
@@ -167,8 +184,8 @@ class Bridge:
         self.health = health_mod.Health(self.log.dir)       # Health page: preflight, battery minutes (#51)
         self.health_cache = None                            # last `health` message (JSON text), sent to new clients
         self.last_health = -10.0
-        self.tools = TuningTools(self, preset_dir)          # Tune page: presets, scored runs, motor test (#16)
-        self.mapper = Mapper(map_dir or os.path.join(self.log.dir, "maps"), say=self.say)   # main: ~/sbr3-maps
+        self.tools = TuningTools(self, None)                # Tune page: presets, scored runs, motor test (#16)
+        self.mapper = Mapper(None, say=self.say)            # main: ~/sbr3-maps/<robot>
         self.range_listeners.append(self.mapper.on_range)
         # LD19 spinning lidar (#76): "/dev/ttyS5", "COM7" or "tcp://host:port" (simulator); None = no lidar
         self.lidar = Lidar(self.mapper, lidar_port, say=self.say, clock=_now) if lidar_port else None
@@ -198,6 +215,10 @@ class Bridge:
         self.last_status = 0.0
         self.last_rate = _now()
         self.client_ids = 0
+        for root in (self.map_root, self.preset_root, self.falls_root):
+            profiles.migrate_flat(root, profiles.DEFAULT_ROBOT, say=self.say)    # the old flat layout -> balancer/
+        if self.robot_override:
+            self._bind_robot(self.robot_override, "override", fresh=False)
 
     # ------------------------------------------------------------------ util
     def say(self, text):
@@ -276,6 +297,7 @@ class Bridge:
                 self.parser = lp.FrameParser()
                 self.remote_seen = False
                 self.rt_offset = None
+                self._robot_link_up()
                 self._set_link_state("connected")
                 self._start_log()
                 try:
@@ -294,6 +316,8 @@ class Bridge:
             if self.log_failed:
                 self.log_failed = False
                 self.say("session log back: %s" % self.log.name)
+            if self.robot and not self.robot_pending:
+                self.log.record("robot", self.robot, self.robot_source)
             return True
         if not self.log_failed:       # say it once; the retry stays quiet
             self.log_failed = True
@@ -391,6 +415,8 @@ class Bridge:
             self.params[d["id"]] = d
             self.params_dirty = True
             self.log.record("param", d["id"], d["name"], d["value"], d["min"], d["max"])
+            self.ident["params"][d["name"]] = d["value"]
+            self._check_robot()
         elif t == lp.MSG_NAV_STATUS:
             d = _round_dict(lp.decode_nav_status(p))
             d.pop("reserved", None)
@@ -402,6 +428,10 @@ class Bridge:
             changed = self.hello is None or d["firmware"] != self.hello.get("firmware")
             self.hello = d
             self.log.record("hello", d)
+            if self.ident["hello"] is None:
+                self.ident["t"] = _now()
+            self.ident["hello"] = d
+            self._check_robot()
             if changed:
                 self.params = {}
                 self.params_dirty = True
@@ -528,6 +558,7 @@ class Bridge:
         if self.lidar:
             for text in self.lidar.poll(now):             # the live LD19 scan points, <= 3 Hz (#76)
                 self.broadcast(text, droppable=True)
+        self._check_robot(now)
         self.planner.tick(now)
         for meta in self.falls.tick(now):                 # a fall record was just saved
             self.broadcast(json.dumps({"t": "fall", "fall": meta}, separators=(",", ":")))
@@ -580,6 +611,78 @@ class Bridge:
             elif now - c.last_ping >= WS_PING_S:
                 c.ping()
 
+    # ------------------------------------------------------------------ robot profile (#97)
+    def robot_dirs(self, name):
+        return {"maps": profiles.robot_dir(self.map_root, name), "presets": profiles.robot_dir(self.preset_root, name),
+                "falls": profiles.robot_dir(self.falls_root, name)}
+
+    def _robot_link_up(self):
+        """A new connection: whoever is on the other end is identified again from its own HELLO + params.
+        A robot is already loaded: its map / lidar scans are held (not mapped) until the answer is in, so a different
+        robot never draws into the previous one's map."""
+        self.ident = {"hello": None, "params": {}, "t": _now()}
+        if self.robot_override is None:
+            self.robot_pending = True
+            if self.robot is not None:
+                self.mapper.hold = True
+
+    def _check_robot(self, now=None):
+        """Decide the robot once HELLO and the whole param list are in (sys.platform is a param), or after
+        ROBOT_WAIT_S from the HELLO (older firmware without it): then the firmware string decides."""
+        if not self.robot_pending or self.ident["hello"] is None:
+            return
+        n = self.ident["hello"].get("param_count", 0)
+        done = PLATFORM_PARAM in self.ident["params"] or (n and len(self.ident["params"]) >= n)
+        if not done and (now is None or now - self.ident["t"] < ROBOT_WAIT_S):
+            return
+        name, src = profiles.identify(self.ident["hello"], self.ident["params"])
+        self._set_robot(name, src)
+
+    def _set_robot(self, name, src):
+        self.robot_pending = False
+        self.mapper.hold = False
+        self.log.record("robot", name, src)
+        if name == self.robot:
+            return
+        if self.robot is not None:
+            self._park_robot("robot changed: %s -> %s" % (self.robot, name))
+        self._bind_robot(name, src, fresh=self.robot is not None)
+
+    def _park_robot(self, why):
+        """Leave the current profile: keep its map (autosave), stop the planner, let pending records finish."""
+        try:
+            m = self.mapper
+            if m.dir and m.changed_since_save and m.n["used"]:
+                m.save(AUTOSAVE_NAME, quiet=True)
+        except Exception as e:
+            self.say("could not save the %s map: %s" % (self.robot, e))
+        self.falls.flush(2.0)
+        self.planner.stop(why)
+
+    def _bind_robot(self, name, src, fresh):
+        """Point the mapper, lidar, planner, presets and falls at <root>/<name>/. fresh: another robot than before
+        (everything in memory is dropped); the first robot after a start keeps the readings taken meanwhile."""
+        d = self.robot_dirs(name)
+        self.mapper.bind(d["maps"], fresh=fresh)
+        if self.lidar:
+            if fresh:
+                self.lidar.hist.clear()
+                self.lidar.last_used = None
+            self.lidar.reload_settings()
+        self.planner.reload_settings()
+        self.tools.store.set_dir(d["presets"])
+        self.falls.set_dir(d["falls"])
+        self.robot, self.robot_source = name, src
+        self.say("robot profile: %s (%s); data in %s" % (name, src, d["maps"]))
+        self.push_status()
+        try:
+            self.broadcast(json.dumps(self.tools._presets_msg(), separators=(",", ":")))
+            if self.lidar:
+                self.broadcast(self.lidar.msg())
+            self.broadcast(self.planner.msg())
+        except Exception as e:
+            self.say("profile refresh: %s: %s" % (type(e).__name__, e))
+
     # ---- tlm.hz: the Tune page raises it to full rate; the bridge puts it back (#46)
     def _tlm_hz_param(self):
         return next((p for p in self.params.values() if p["name"] == "tlm.hz"), None)
@@ -629,6 +732,7 @@ class Bridge:
             "crc_errors": self.parser.crc_errors, "frames": self.parser.frames_ok,
             "clients": self.client_count(), "session": self.log.name if self.log.f else None,
             "estop": self.estop, "robot_estop": self.robot_estop,
+            "robot_name": self.robot, "robot_source": self.robot_source,    # profile in use (#97): balancer | shark | sim ...
             "cmd_active": self.cmd_active, "remote_seen": self.remote_seen,
             "uptime_s": int(now - self.t_start), "release_file": self.release_file,
             "tlm_boost": self.hz_base is not None,         # tlm.hz raised by the Tune page, restored when it closes
@@ -646,7 +750,7 @@ class Bridge:
                 "params": {p["name"]: p["value"] for p in self.params.values()}, "hello": self.hello,
                 "estop": self.estop, "robot_estop": self.robot_estop, "remote_seen": self.remote_seen,
                 "clients": self.client_count(), "log_error": self.log.error,
-                "lidar": self.lidar.status() if self.lidar else None}
+                "lidar": self.lidar.status() if self.lidar else None, "robot_name": self.robot}
 
     def _push_health(self, now):
         """Once a second: the Health page + battery minutes (a few hundred bytes; reads /proc and /sys only)."""

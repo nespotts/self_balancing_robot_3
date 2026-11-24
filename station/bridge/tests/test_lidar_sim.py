@@ -90,7 +90,7 @@ class TestLidarEndToEnd(unittest.TestCase):
             self.assertEqual(r["settings"]["every_n"], 2)
             ws.send(json.dumps({"t": "lidar", "action": "defaults"}))
             await wait_for(ws, lambda m: m["t"] == "lidar" and m["settings"]["yaw_deg"] == 0)
-            self.assertTrue(os.path.exists(os.path.join(self.tmp, "maps", "lidar.json")))
+            self.assertTrue(os.path.exists(os.path.join(self.tmp, "maps", "sim", "lidar.json")))   # per-robot folder (#97)
         finally:
             for t in tasks + [phys]:
                 t.cancel()

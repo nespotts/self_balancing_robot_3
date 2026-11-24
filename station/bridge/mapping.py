@@ -89,7 +89,8 @@ INTS = ("match_every_n", "match_points", "match_warmup")
 
 class Mapper:
     def __init__(self, map_dir="~/sbr3-maps", say=None, size_m=20.0, res_mm=25.0, max_cells=MAX_CELLS):
-        self.dir = os.path.abspath(os.path.expanduser(map_dir))
+        self.dir = os.path.abspath(os.path.expanduser(map_dir)) if map_dir else None   # None: no robot profile yet (#97), nothing is written
+        self.hold = False                # True: readings / scans are not mapped (a robot is being identified, #97)
         self.say = say or (lambda text: None)
         self.size_m, self.res_mm = size_m, res_mm
         self.max_cells = max_cells
@@ -127,13 +128,28 @@ class Mapper:
 
     # ------------------------------------------------------------ settings
     def _settings_path(self):
-        return os.path.join(self.dir, "settings.json")
+        return os.path.join(self.dir, "settings.json") if self.dir else None
+
+    def bind(self, map_dir, fresh=False):
+        """Use this folder from now on (robot profile, #97): its settings.json is loaded over the defaults.
+        fresh: a different robot - the map, places, zones and pose correction start empty (the caller saved the old ones)."""
+        if fresh:
+            self.reset()
+            self.pitch_ref, self.body_at = None, None
+            self.pitches.clear()
+        self.dir = os.path.abspath(os.path.expanduser(map_dir)) if map_dir else None
+        self.settings.clear()
+        self.settings.update(DEFAULTS)
+        self._load_settings()
+        self.last_autosave = time.monotonic()
+        self.full_pending = True
+        self.last_send = 0.0
 
     def _load_settings(self):
         try:
             with open(self._settings_path(), encoding="utf-8") as f:
                 self.apply_settings(json.load(f), save=False)
-        except (OSError, ValueError):
+        except (OSError, ValueError, TypeError):
             pass
 
     def apply_settings(self, s, save=True):
@@ -152,7 +168,7 @@ class Mapper:
                 lo, hi = LIMITS.get(k, (-1e9, 1e9))
                 v = max(lo, min(hi, v))
                 self.settings[k] = int(round(v)) if k in INTS else v
-        if save:
+        if save and self.dir:
             try:
                 os.makedirs(self.dir, exist_ok=True)
                 with open(self._settings_path(), "w", encoding="utf-8") as f:
@@ -178,7 +194,7 @@ class Mapper:
 
     def _on_range(self, d):
         S = self.settings
-        if not S["enabled"]:
+        if not S["enabled"] or self.hold:
             return
         self.n["readings"] += 1
         if S["lidar_replaces_sweep"] and self.lidar is not None and self.lidar.flowing():
@@ -249,7 +265,7 @@ class Mapper:
     def integrate_scan(self, ox, oy, runs, robot_xy):
         """One LD19 revolution (#76), map frame: ox, oy the lidar axis, runs the point runs (lidar.py),
         robot_xy the axle centre (its own spot is free)."""
-        if not self.settings["enabled"]:
+        if not self.settings["enabled"] or self.hold:
             return
         self.grid.integrate_scan(ox, oy, runs, margin_mm=self.grid.res)
         self._body_free(robot_xy[0], robot_xy[1])
@@ -314,7 +330,7 @@ class Mapper:
             out.append(self.zones_msg())
         if now - self.last_autosave >= AUTOSAVE_S:
             self.last_autosave = now
-            if self.changed_since_save and self.n["used"]:
+            if self.changed_since_save and self.n["used"] and self.dir:
                 self.save(AUTOSAVE_NAME, quiet=True)
         self.cpu_s += time.perf_counter() - t0
         dt = now - self.cpu_t0
@@ -340,6 +356,8 @@ class Mapper:
             return None
         if act == "save":
             name = str(m.get("name") or time.strftime("map-%Y%m%d-%H%M%S"))
+            if not self.dir:
+                return {"t": "error", "text": "map not saved: no robot identified yet (waiting for the robot)"}
             if not NAME_RE.match(name):
                 return {"t": "error", "text": "map name: letters, digits, - and _ only"}
             self.save(name)
@@ -433,7 +451,7 @@ class Mapper:
         self.places_changed()
 
     def places_path(self, name):
-        return os.path.join(self.dir, name + ".places.json") if NAME_RE.match(name or "") else None
+        return os.path.join(self.dir, name + ".places.json") if self.dir and NAME_RE.match(name or "") else None
 
     def save_places(self, name=None):
         name = name or self.name or AUTOSAVE_NAME
@@ -486,7 +504,7 @@ class Mapper:
 
     # ------------------------------------------------------------ zones (#70)
     def zones_path(self, name):
-        return os.path.join(self.dir, name + ".zones.json") if NAME_RE.match(name or "") else None
+        return os.path.join(self.dir, name + ".zones.json") if self.dir and NAME_RE.match(name or "") else None
 
     def save_zones(self, name=None):
         name = name or self.name or AUTOSAVE_NAME
@@ -562,9 +580,11 @@ class Mapper:
 
     # ------------------------------------------------------------ files
     def path(self, name):
-        return os.path.join(self.dir, name + ".json") if NAME_RE.match(name or "") else None
+        return os.path.join(self.dir, name + ".json") if self.dir and NAME_RE.match(name or "") else None
 
     def save(self, name, quiet=False):
+        if not self.dir:
+            raise OSError("no robot profile yet")
         os.makedirs(self.dir, exist_ok=True)
         p = self.path(name)
         tmp = p + ".tmp"
@@ -583,7 +603,7 @@ class Mapper:
     def load(self, name):
         p = self.path(name)
         if not p:
-            raise ValueError("bad map name")
+            raise ValueError("bad map name" if self.dir else "no robot identified yet")
         with open(p, encoding="utf-8") as f:
             g = Grid.from_json(f.read(), self.max_cells)
         self.grid = g
@@ -604,6 +624,8 @@ class Mapper:
 
     def list(self):
         out = []
+        if not self.dir:
+            return out
         try:
             names = os.listdir(self.dir)
         except OSError:

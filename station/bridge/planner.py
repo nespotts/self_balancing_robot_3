@@ -638,6 +638,11 @@ class Planner:
         except (OSError, ValueError, TypeError):
             return dict(DEFAULTS)
 
+    def reload_settings(self):
+        """The mapper moved to another robot profile (#97): that folder's planner.json."""
+        self.settings = self._load_settings()
+        self.boost = 0.0
+
     def _save_settings(self):
         p = self._settings_path()
         if not p:

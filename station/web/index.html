@@ -15,6 +15,7 @@
 <body data-view="map">
 <header class="topbar">
   <button class="pill" id="pill-link" title="Connection"><span class="dot"></span><span class="txt">…</span></button>
+  <span class="pill" id="pill-robot" title="Robot profile (its own maps, places and settings)" hidden><span class="txt"></span></span>
   <button class="pill" id="pill-mode" title="Mode"><span class="txt">—</span></button>
   <span class="pill" id="pill-armed"><span class="txt">—</span></span>
   <button class="pill" id="pill-batt" title="Battery and health"><span class="txt">— V</span></button>
@@ -274,7 +275,7 @@
   <section id="view-health" class="view">
     <div class="health">
       <div class="card hl-pre">
-        <div class="hl-head"><span class="hl-dot" id="hl-dot"></span><b id="hl-text">...</b></div>
+        <div class="hl-head"><span class="hl-dot" id="hl-dot"></span><b id="hl-text">...</b><small class="hl-robot" id="hl-robot"></small></div>
         <div class="hl-items" id="hl-items"></div>
       </div>
       <div class="card hl-batt" id="hl-batt"></div>
