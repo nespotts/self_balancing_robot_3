@@ -55,15 +55,17 @@ flowchart LR
 | Question | Decision | Why |
 |---|---|---|
 | **Same repo or new repo?** | **Same repo**, new PlatformIO envs `shark` / `shark_wifi` with `-DSBR_PLATFORM=2`, plus a read-only param `sys.platform` the station reads | ~80 % of the code is shared and still moving fast (#77, #78, #79). A fork would drift in weeks. One link protocol, one sim, one app, one test suite |
-| **Electronics** | **Duplicated** (owner, decided): new Teensy 4.1 (no Ethernet) + new SBC | both robots stay usable; the balancer is mid-tuning (#65) and mid-LD19 (#75) |
+| **Electronics** | **Own Teensy + IMU + drivers; SBC and LD19 shared for now** (owner, 2026-11-24): new Teensy 4.1 (no Ethernet), new GY-BNO08X, DRV8871 x2. The Pi Zero 2W (+ SD, USB cable) and the LD19 move between the robots; both are never used at the same time | saves ~$200 now. Tuning lives in each Teensy's EEPROM, so moving the Pi never touches it. ROS 2 runs on the PC until the Zero 3W is bought. The bridge must detect the robot from HELLO / `sys.platform` and keep **maps, places, zones, lidar.json, planner settings per robot** (#89) |
 | **Board** | **Spare balancer PCB** (50 x 91 mm) + a small **sensor add-on** board | see [8](#8-reusing-the-balancer-pcb): Teensy/IMU/radio/fuse/buck/divider/motor header are already there; 1 resistor swap, no trace cuts |
-| **SBC** | **Orange Pi Zero 3W 6 GB** (Allwinner A733: 2x A76 + 6x A55) | room for ROS 2 later. Image: Ubuntu 26.04 "Resolute" + ROS 2 2026 LTS; fallback Jammy + Humble. ROS 2 on the PC first, then on the robot |
-| IMU | BNO085 (same driver, same PCB socket) | gyro heading for scan matching and slip (#79); tilt = picked up |
+| **SBC** | **Now: the balancer's Orange Pi Zero 2W (shared). Later: Orange Pi Zero 3W 6 GB** (Allwinner A733: 2x A76 + 6x A55; 6 GB over 4 GB for ~$10: ROS 2 builds, vision later, not upgradeable) | room for ROS 2 on the robot later. Image: Ubuntu 26.04 "Resolute" + ROS 2 2026 LTS; fallback Jammy + Humble. ROS 2 on the PC first, then on the robot |
+| IMU | **GY-BNO08X** module (the PCB footprint; other BNO085 boards have a different pinout) | gyro heading for scan matching and slip (#79); tilt = picked up |
 | Battery | **4S LiFePO4 12 V 7 Ah** (owned), if it fits (measure first) | safe chemistry near a toddler, internal BMS, ~4 h. Plan B: aftermarket RVBAT850 4S Li-ion in the stock bay |
-| Motor driver | waits for the stall current: **<= ~2 A DRV8871** (Amazon), **higher DRV8874** (pololu.com) **or the owned HW-039s** | [7](#7-motor-driver) |
+| Motor driver | **DRV8871 x2, bought now** (owner): its current regulation (ILIM ~2 A) and thermal shutdown protect it even if stall is higher (only less stall torque). Fallback: the owned HW-039s. Still measure stall (5.3) | [7](#7-motor-driver) |
 | Encoders | Shark's own, on the PCB's **odometry headers** (A/B on SDA/SCL) | built-in 4.7 k pull-ups to 3.3 V; no new parts unless 5 V push-pull |
 | Display | Optional **Kindle Fire** with a native API-10 app polling the bridge | [11](#11-kindle-display) |
-| LD19 | borrow the balancer's for phase 2 if needed; buy a second before phase 4 | both robots need one |
+| LD19 | **shared with the balancer** (plug-in cable at both robots: LD19 -> Pi pins 2 / 9 / 13 + GND); buy a second only if both robots must run at once | saves ~$80 |
+| Measuring tools | the owner's **USB oscilloscope** (2 ch) instead of a logic analyzer: A/B encoder phase + voltage, cliff analog levels, switch bounce. Ground clip only on robot GND (it is the PC's ground) | owned |
+| Parts bin | owner has buck converters (incl. USB bucks), resistors, fuses, caps, perfboard, transistors, mux / shift-register ICs | most of the small parts are owned |
 
 ## 3. Architecture
 
@@ -135,7 +137,7 @@ Photos first: every connector before unplugging it, with a strip of tape labelle
 ## 5. Measurements
 
 Tools: multimeter (ohms, diode, DC V, DC A), **current-limited** bench supply, 10 k and 100 ohm resistors, jumper wires, phone camera (sees IR).
-Optional but very helpful: a $12 USB logic analyzer + PulseView.
+Use the owner's USB oscilloscope (2 channels) for the encoder (5.2) and cliff (5.5) steps: one channel per encoder output shows direction, voltage and pulses. **Its ground clip is the PC's ground: clip it only to the robot's GND.**
 
 > **Teensy 4.1 pins are 3.3 V only, not 5 V tolerant.** Nothing goes to the Teensy until its voltage is known.
 
@@ -708,17 +710,35 @@ Printed parts (section 12) start after milestone 1's measurements fix the compon
 
 ## 15. Shopping list
 
-Prices approximate, check before buying. Driver choice waits for the stall measurement.
+Prices approximate, check before buying.
+
+**Buy now (owner, 2026-11-24): ~$70-85**
+
+| Item | Qty | ~$ |
+|---|---|---|
+| Teensy 4.1, no Ethernet (headers: solder male pins, or a "with pins" listing) | 1 | 32 |
+| **GY-BNO08X** IMU module (fits the PCB socket) | 1 | 20-25 |
+| DRV8871 motor driver board | 2 | 15-25 |
+
+**Owned / borrowed:**
+- spare PCB;
+- Pi Zero 2W + SD + USB cable and the LD19 (borrowed from the balancer);
+- buck converters, resistors (470 k), fuses, caps, perfboard, transistors;
+- the USB oscilloscope;
+- the 12 V 7 Ah LiFePO4 packs;
+- the HW-039s.
+
+**Later (full list as planned before, kept for reference):**
 
 | Item | Qty | ~$ | When | Change |
 |---|---|---|---|---|
-| Teensy 4.1 (no Ethernet) | 1 | 32 | now | |
-| **Orange Pi Zero 3W 6 GB** + 64 GB A2 microSD + heatsink | 1 | ~70 | now | replaces the Zero 2W |
-| USB-C OTG to micro-B cable (SBC -> Teensy) | 1 | 6 | now | new |
-| BNO085 breakout (Adafruit 4754 or SparkFun) | 1 | 25 | now | |
+| Teensy 4.1 (no Ethernet) | 1 | 32 | **bought now** | |
+| **Orange Pi Zero 3W 6 GB** + 64 GB A2 microSD + heatsink | 1 | ~84 | **later** (when ROS 2 moves onto the robot) | replaces the shared Zero 2W |
+| USB-C OTG to micro-B cable (SBC -> Teensy) | 1 | 6 | with the Zero 3W | new |
+| GY-BNO08X IMU | 1 | 25 | **bought now** | |
 | Spare balancer PCB | 1 | owned | | **new: replaces the perfboard carrier** |
 | PCB parts: LM2596S module, 5 A + 3 A fuses, 470 uF, 330 k x2 + **470 k**, 100 k x3, 4.7 k x4, 10 k x2, female headers, buttons, buzzer | 1 set | 15 | now | replaces carrier parts |
-| USB logic analyzer 24 MHz 8 ch | 1 | 12 | **now (helps 5.2 / 5.5)** | |
+| ~~USB logic analyzer~~ | - | - | - | not needed: the owner's USB oscilloscope does 5.2 / 5.5 |
 | Driver: **DRV8871 x2** (Amazon) *or* DRV8874 x2 (pololu.com) *or* owned HW-039 | 2 | 15-25 | after 5.3 | DRV8871 now first choice <= 2 A |
 | 5 V 5 A buck, >= 24 V in (Pololu D36V50F5), for the SBC | 1 | 25 | now | now SBC-only |
 | 5 V 3 A buck with EN (Pololu D24V22F5 / mini-560), for the Kindle | 1 | 8 | with the Kindle | new |
@@ -733,7 +753,7 @@ Prices approximate, check before buying. Driver choice waits for the stall measu
 | Second LD19 | 1 | 70-100 | before milestone 4 | |
 | Optional: WS2812 ring, small speaker (kid mode) | 1 | 12 | later | |
 
-**Now: ~$270** (SBC upgrade included; drivers +$15-25 after 5.3).
+**Now: ~$70-85** (Teensy, IMU, drivers). The Zero 3W, second LD19 and Kindle parts come later; most small parts are owned.
 
 ## Issues
 
