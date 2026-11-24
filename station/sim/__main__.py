@@ -64,7 +64,24 @@ def main(argv=None):
                     help="wheel slip (#79): random episodes while driving, on average one per EVERY s, SECONDS long, in "
                          "which the wheels turn but the body moves only (1 - RATIO) as much (default 1:2:20: wheels spin, "
                          "body still, 2 s). The odometry then runs ahead; the LD19 matcher (--lidar) should catch it")
+    # sim-only extras for the ROS 2 tests (#98, extras.py)
+    ap.add_argument("--start", default=None, metavar="X,Y,DEG",
+                    help="start pose in the room (mm, mm, deg); the odometry reads 0, 0, 0 there")
+    ap.add_argument("--teleport-file", default=None, metavar="PATH",
+                    help="kidnapped robot: write 'x_mm y_mm deg' into PATH and the robot is carried there "
+                         "(the odometry does not notice)")
+    ap.add_argument("--truth-log", default=None, metavar="PATH",
+                    help="10 Hz CSV of the true pose and the odometry (wall time), for the ROS tests")
+    ap.add_argument("--box", action="append", default=[], metavar="CX,CY,W,H",
+                    help="an extra box in the room (mm), e.g. an obstacle that is not on a saved map; repeatable")
     a = ap.parse_args(argv)
+    from . import extras
+    try:
+        start = extras.parse_pose(a.start) if a.start else None
+        for b in a.box:
+            extras.parse_box(b)
+    except ValueError as e:
+        ap.error(str(e))
     host, _, port = a.listen.rpartition(":")
     remote = a.remote or a.remote_disarmed
     robot = DriftRobot(remote=remote, remote_armed=not a.remote_disarmed, seed=a.seed, head_error_deg=a.head_error,
@@ -75,6 +92,10 @@ def main(argv=None):
     if a.maze:
         from station.sim.sim import Room
         robot.room = Room(empty=True)
+    if a.box:
+        extras.add_boxes(robot, a.box)
+    if start:
+        extras.teleport(robot, *start, reset_odom=True)
     if a.stiction:
         robot.use_floor_wheels()
     if a.drain is not None:
@@ -94,6 +115,10 @@ def main(argv=None):
 
     async def run():
         jobs = [server.run()]
+        if a.teleport_file:
+            jobs.append(extras.teleport_watch(robot, os.path.expanduser(a.teleport_file)))
+        if a.truth_log:
+            jobs.append(extras.truth_log(robot, os.path.expanduser(a.truth_log)))
         if not a.no_bridge:
             from station.bridge.__main__ import DEFAULT_WEB
             from station.bridge.bridge import Bridge
