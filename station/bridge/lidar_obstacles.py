@@ -11,9 +11,18 @@ Per scan (the same packets lidar.py maps, before its every_n / ray_step / mappin
   2. per point the lidar.py filters: range window, intensity, mask, floor clip; range * cos(elevation) (horizontal).
   3. deskew: each packet's pose (telemetry interpolated) -> the point in the odometry frame -> the robot frame of the
      NEWEST telemetry pose; age_ms = how old that pose is now (the firmware dead-reckons that last bit).
-  4. the nearest point per 10 deg sector about the axle -> lp.encode_lidar_obstacles.
+  4. one point per 10 deg sector about the axle -> lp.encode_lidar_obstacles: the nearest point INSIDE the firmware's
+     driving corridor (|y| <= its half width, nearest by the front / rear distance the firmware computes from it), else
+     the nearest point (#99). Why: the firmware's front_ / rear_ are the minimum over the corridor points it gets, so
+     with this rule they come out exactly as from the whole scan (a side-wall return nearer than an in-path post in the
+     same sector can no longer hide the post). Side walls lose nothing they need: a sector keeps an in-corridor point
+     over a nearer outside one only where the corridor point is itself close (a side point the firmware uses is
+     < 300 mm ahead and > 16 deg off the axis; an in-corridor point in that sector is then < 321 mm ahead, a front
+     distance < 282 mm, inside rng.obstacle_mm 300), so the robot is stopped by it anyway. Finer forward sectors
+     would still hide a post behind a wall point in the same (narrower) sector, and would take sectors from the sides.
 Nothing is sent while the lidar is silent / stopped, tilted or without a pose: 500 ms after the last frame the firmware
-falls back to the sweep, or to its blind rules (EXPLORE pauses, GOTO <= nav.blind_speed).
+falls back to the sweep, or to its blind rules (EXPLORE pauses, GOTO <= nav.blind_speed). Nor before the robot profile is
+bound (#97: lidar.json, the mount settings, is loaded then), see ready.
 """
 import math
 import time
@@ -22,6 +31,23 @@ from . import link_protocol as lp
 from .lidar import MIN_POINTS, PITCH_ABS_MAX, POSE_STALE_S, TILT_REF_S, interp
 
 MAX_SCAN_AGE_S = 0.25         # the scan's last packet is older than this when it gets here: not sent
+# src/navigator.cpp: kAxisFwd, kSensorOut, kHalfWidth (front = x - 38.9 for x >= 26, rear = 13.1 - x)
+AXIS_FWD_MM, SENSOR_OUT_MM, HALF_WIDTH_MM = 26.0, 12.9, 76.0
+FRONT_OFF_MM, REAR_OFF_MM = AXIS_FWD_MM + SENSOR_OUT_MM, AXIS_FWD_MM - SENSOR_OUT_MM
+OUTSIDE_KEY = 1e9             # sort key offset of points outside the corridor (in-corridor keys are < 13000)
+NAV_DEFAULTS = {"nav.corridor_mm": 220.0, "nav.side_min_mm": 120.0}   # src/params.h
+
+
+def corridor_half(params):
+    """The corridor half width navigator.cpp updateObstacles uses, from the robot's params (defaults if not known)."""
+    def get(k):
+        try:
+            v = float(params.get(k, NAV_DEFAULTS[k]))
+        except (TypeError, ValueError, AttributeError):
+            return NAV_DEFAULTS[k]
+        return v if math.isfinite(v) else NAV_DEFAULTS[k]
+    c, smin = get("nav.corridor_mm"), get("nav.side_min_mm")
+    return min(0.5 * c, HALF_WIDTH_MM + 10.0) if smin > 0 else 0.5 * c
 
 
 def pitch_ref(hist, settings):
@@ -34,13 +60,17 @@ def pitch_ref(hist, settings):
 
 
 class LidarObstacles:
-    def __init__(self, lidar, send, clock=time.monotonic):
-        """lidar: lidar.Lidar (settings, mask, pose history; this registers for its scans). send(frame) -> bool."""
+    def __init__(self, lidar, send, clock=time.monotonic, params=None, ready=None):
+        """lidar: lidar.Lidar (settings, mask, pose history; this registers for its scans). send(frame) -> bool.
+        params() -> {name: value} of the robot's params (the corridor, #99); ready() -> False while the robot profile
+        (and with it lidar.json, the mount) is not bound yet (#97): nothing is sent then. None = always ready."""
         self.lidar = lidar
         self.send = send
         self.clock = clock
+        self.params = params
+        self.ready = ready
         self.seq = 0
-        self.n = {"sent": 0, "off": 0, "no_pose": 0, "stale": 0, "tilt": 0, "few": 0, "no_link": 0}
+        self.n = {"sent": 0, "off": 0, "unbound": 0, "no_pose": 0, "stale": 0, "tilt": 0, "few": 0, "no_link": 0}
         self.last_sent = None         # clock time of the last frame sent
         self.last_pts = None          # its sectors: [(x, y) or None] * 36, robot frame
         self.last_age_ms = None
@@ -66,6 +96,9 @@ class LidarObstacles:
         now = self.clock() if now is None else now
         if not S["enabled"]:
             n["off"] += 1
+            return None
+        if self.ready is not None and not self.ready():
+            n["unbound"] += 1                           # the mount settings of this robot are not loaded yet
             return None
         if now - scan.t1 > MAX_SCAN_AGE_S:
             n["stale"] += 1
@@ -94,7 +127,8 @@ class LidarObstacles:
         c1, s1 = cos(radians(h1)), sin(radians(h1))
         nsec = lp.LINK_LIDAR_SECTORS
         k_sec = nsec / (2.0 * math.pi)
-        best = [None] * nsec                            # (r^2, x, y)
+        half = corridor_half(self.params() if self.params else {})
+        best = [None] * nsec                            # (key, x, y): in the corridor first (#99), see the docstring
         used = 0
         idx = 0
         if not deskew:
@@ -130,10 +164,13 @@ class LidarObstacles:
                 x, y = ox + d * cos(ang), oy + d * sin(ang)
                 used += 1
                 i = int(math.floor(atan2(y, x) * k_sec + 0.5)) % nsec
-                r2 = x * x + y * y
+                if -half <= y <= half:                  # in the corridor: the firmware's front / rear distance
+                    key = x - FRONT_OFF_MM if x >= AXIS_FWD_MM else REAR_OFF_MM - x
+                else:
+                    key = OUTSIDE_KEY + x * x + y * y
                 cur = best[i]
-                if cur is None or r2 < cur[0]:
-                    best[i] = (r2, x, y)
+                if cur is None or key < cur[0]:
+                    best[i] = (key, x, y)
         if used < MIN_POINTS:
             n["few"] += 1
             return None

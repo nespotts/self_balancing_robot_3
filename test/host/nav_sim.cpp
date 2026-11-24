@@ -34,6 +34,13 @@ struct World {
   Seg segs[8];
   int n = 0;
   void add(float x1, float y1, float x2, float y2) { segs[n++] = {x1, y1, x2, y2}; }
+  void post(float cx, float cy, float w) {  // a square post, w mm wide (4 segments)
+    const float a = 0.5f * w;
+    add(cx - a, cy - a, cx + a, cy - a);
+    add(cx + a, cy - a, cx + a, cy + a);
+    add(cx + a, cy + a, cx - a, cy + a);
+    add(cx - a, cy + a, cx - a, cy - a);
+  }
   float ray(float ox, float oy, float a) const {  // distance to the first wall, or -1
     const float dx = cosf(a), dy = sinf(a);
     float best = -1;
@@ -102,8 +109,9 @@ struct Bot {
       nav.addRange(f, ms);
     }
   }
-  // what the bridge sends (lidar_obstacles.py): lidar at the axle, 1 deg rays, nearest return 120..8000 mm per
-  // 10 deg sector, robot frame, pose of now (age 0)
+  // what the bridge sends (lidar_obstacles.py): lidar at the axle, 1 deg rays, returns 120..8000 mm, per 10 deg
+  // sector the nearest one inside the corridor (|y| <= 86, by the firmware's front / rear distance) else the
+  // nearest (#99), robot frame, pose of now (age 0)
   void lidar() {
     const World& wd = lworld_own ? lworld : world;
     LidarObstacleFrame f = {};
@@ -111,16 +119,23 @@ struct Bot {
     f.sectors = LINK_LIDAR_SECTORS;
     const float hr = h * 0.0174533f;
     for (int s = 0; s < LINK_LIDAR_SECTORS; s++) {
-      float best = -1, bx = 0, by = 0;
+      float best = 0, bx = 0, by = 0;
+      bool have = false, best_in = false;
       for (int k = 0; k < 10; k++) {
         const float a = (s * 10.0f - 4.5f + k) * 0.0174533f;
         const float d = wd.ray(x, y, hr + a);
-        if (d < 120 || d > 8000 || (best > 0 && d >= best)) continue;
-        best = d;
-        bx = d * cosf(a);
-        by = d * sinf(a);
+        if (d < 120 || d > 8000) continue;
+        const float px = d * cosf(a), py = d * sinf(a);
+        const bool in = fabsf(py) <= 86.0f;
+        const float key = in ? (px >= 26 ? px - 38.9f : 13.1f - px) : d;
+        if (have && (best_in > in || (best_in == in && key >= best))) continue;
+        have = true;
+        best = key;
+        best_in = in;
+        bx = px;
+        by = py;
       }
-      if (best > 0) {
+      if (have) {
         f.xy_mm[2 * s] = (int16_t)lroundf(bx);
         f.xy_mm[2 * s + 1] = (int16_t)lroundf(by);
       }
@@ -436,29 +451,173 @@ static void testLidarAge() {
   CHECK(fabsf(nav.frontMm() - (380 - 38.9f)) < 0.5f);
 }
 
-static void testLidarWins() {
-  printf("lidar fresh wins over the sweep (sweep sees a wall the lidar does not)\n");
+static void testLidarUnion() {
+  printf("lidar + sweep both fresh: the union (#99), the sweep sees a wall the lidar does not, then the reverse\n");
   reset();
   Bot b;
   b.lidar_on = true;  // sweep on too
   b.lworld_own = true;
   b.world.add(800, -500, 800, 500);  // only the sweep sees this
   b.run(0.5);
+  CHECK(b.nav.lidarFresh(b.ms));
   b.nav.add(1500, 0);
   b.nav.listChanged(true);
   b.nav.onModeChange(b.in());
   b.run(15);
+  CHECK(b.nav.state() == NAV_BLOCKED);  // the sweep's wall counts although the lidar is fresh
+  const float gap = 800 - b.x - 26 - 12.9f;
+  printf("  stopped at x %.0f for the sweep's wall, gap %.0f mm\n", b.x, gap);
+  CHECK(gap > P(P_RNG_OBSTACLE_MM) - 60 && gap < P(P_RNG_OBSTACLE_MM) + 10);
+  b.world.n = 0;                       // the reverse: only the lidar sees it
+  b.lworld.add(800, -500, 800, 500);
+  b.run(5);
+  CHECK(b.nav.state() == NAV_BLOCKED);
+  CHECK(b.x < 800 - 26 - 12.9f - P(P_RNG_OBSTACLE_MM) + 10);
+  b.lworld.n = 0;                      // gone for both
+  b.run(15);
   CHECK(b.nav.state() == NAV_ARRIVED);
-  printf("  at %.0f (the sweep's wall at 800)\n", b.x);
-  b.mode = MODE_BALANCE;  // stand still
+  b.mode = MODE_BALANCE;               // stand still: a wall behind that only the lidar sees
   b.nav.onModeChange(b.in());
-  b.run(0.2);
-  CHECK(b.nav.rearMm() == 0);  // lidar: nothing behind
-  b.lidar_on = false;          // lidar gone: the sweep's points count again
+  b.lworld.add(1000, -500, 1000, 500);
+  b.run(0.3);
+  printf("  lidar fresh: rear %.0f mm (the lidar's wall at 1000)\n", b.nav.rearMm());
+  CHECK(b.nav.rearMm() > 400 && b.nav.rearMm() < 600);
+  b.lidar_on = false;                  // lidar gone: its points no longer count, the sweep sees nothing
   b.run(0.6);
   CHECK(!b.nav.lidarFresh(b.ms));
-  printf("  lidar stale: rear %.0f mm (sweep)\n", b.nav.rearMm());
-  CHECK(b.nav.rearMm() > 600 && b.nav.rearMm() < 800);  // the sweep's wall at 800, behind
+  CHECK(b.nav.rearMm() == 0);
+}
+
+// #99 (a): a narrow post comes into the lidar's dead zone (< 120 mm) while the robot is BLOCKED by it. It must stay
+// blocked (the old latch let go after nav.obst_age_ms of "no return"), and with nav.stuck_backoff_mm it backs off so
+// the post shows again; GOTO goes on once it is really gone.
+static void approachPost(Bot& b, float& px, float stop_at) {
+  while (px - 10 - b.x > stop_at) {  // a leg stepping closer: 5 mm per 50 ms
+    px -= 5;
+    b.world.n = 0;
+    b.world.post(px, 0, 20);
+    b.run(0.05f);
+  }
+}
+
+static void testLidarDeadZone() {
+  printf("goto, lidar only: a narrow post comes into the lidar's dead zone while blocked (#99)\n");
+  for (int backoff = 0; backoff < 2; backoff++) {
+    printf("  nav.stuck_backoff_mm %s\n", backoff ? "100 (default)" : "0");
+    reset();
+    if (!backoff) g_param[P_NAV_STUCK_BACK] = 0;
+    Bot b;
+    lidarOnly(b);
+    float px = 900;
+    b.world.post(px, 0, 20);
+    b.run(0.3);
+    b.nav.add(2500, 0);
+    b.nav.listChanged(true);
+    b.nav.onModeChange(b.in());
+    b.run(15);
+    CHECK(b.nav.state() == NAV_BLOCKED);
+    const float x0 = b.x;
+    approachPost(b, px, 100);  // the post's face 100 mm from the axle: no return (lidar min range 120)
+    printf("    post face %.0f mm from the axle, front %.0f mm\n", px - 10 - b.x, b.nav.frontMm());
+    if (!backoff) {
+      CHECK(b.nav.frontMm() > 0 && b.nav.frontMm() < 141);  // the ghost, not "nothing"
+      b.run(5);  // > nav.obst_age_ms of fresh frames with no return from it
+      CHECK(b.nav.state() == NAV_BLOCKED);
+      CHECK(b.x < x0 + 2);
+      CHECK(b.nav.speed() <= 0);
+      b.nav.listChanged(true);  // the planner sends the route again: still blocked
+      b.run(3);
+      CHECK(b.nav.state() == NAV_BLOCKED);
+      CHECK(b.x < x0 + 2);
+      CHECK(px - 10 - b.x > 95);  // never closer than the post put itself
+    } else {
+      float xmin = b.x;
+      for (int i = 0; i < 100; i++) {
+        b.run(0.05f);
+        xmin = fminf(xmin, b.x);
+      }
+      printf("    backed off %.0f mm, post face now %.0f mm, front %.0f mm\n", x0 - xmin, px - 10 - b.x,
+             b.nav.frontMm());
+      CHECK(px - 10 - xmin > 180);  // backed off far enough for the lidar to see it again
+      CHECK(b.nav.state() == NAV_BLOCKED);
+      CHECK(b.nav.frontMm() > 141 && b.nav.frontMm() < P(P_RNG_OBSTACLE_MM));  // seen again, still in the way
+      b.run(5);
+      CHECK(b.nav.state() == NAV_BLOCKED);
+      CHECK(px - 10 - b.x > 140);
+      b.world.n = 0;  // gone
+      b.run(20);
+      CHECK(b.nav.state() == NAV_ARRIVED);
+    }
+  }
+}
+
+// #99 (b): the lidar stops while BLOCKED (no sweep). The old latch let go after nav.obst_age_ms and GOTO drove at
+// nav.blind_speed into the obstacle. Now: never released without fresh data (also not by a new list); STATION can
+// still back away; lidar back + way clear -> goes on.
+static void testLidarLostBlocked() {
+  printf("goto, lidar only: lidar lost while blocked (#99)\n");
+  reset();
+  Bot b;
+  lidarOnly(b);
+  b.world.add(1000, -500, 1000, 500);
+  b.run(0.3);
+  b.nav.add(2000, 0);
+  b.nav.listChanged(true);
+  b.nav.onModeChange(b.in());
+  b.run(15);
+  CHECK(b.nav.state() == NAV_BLOCKED);
+  const float x0 = b.x;
+  b.lidar_on = false;
+  b.run(5);
+  CHECK(!b.nav.lidarFresh(b.ms));
+  CHECK(b.nav.state() == NAV_BLOCKED);
+  CHECK(b.x < x0 + 2);
+  CHECK(b.nav.obstacle());
+  b.nav.clearList();  // the planner replans (same route)
+  b.nav.add(2000, 0);
+  b.nav.listChanged(true);
+  b.run(3);
+  CHECK(b.nav.state() == NAV_BLOCKED);
+  CHECK(b.x < x0 + 2);
+  printf("  blind 8 s: stayed at x %.0f (blocked at %.0f)\n", b.x, x0);
+  b.mode = MODE_STATION;  // the station drives: forward still blocked, backwards allowed
+  b.nav.onModeChange(b.in());
+  b.run(0.1f);
+  CHECK(b.nav.limitSpeed(200, 450, true) == 0);
+  CHECK(b.nav.limitSpeed(-100, 450, true) == -100);
+  b.mode = MODE_GOTO;
+  b.nav.onModeChange(b.in());
+  b.lidar_on = true;  // back, the wall still there: still blocked
+  b.run(3);
+  CHECK(b.nav.state() == NAV_BLOCKED);
+  CHECK(b.x < x0 + 2);
+  b.world.n = 0;  // gone: goes on
+  b.run(3);
+  CHECK(b.nav.state() == NAV_DRIVING);
+}
+
+// #99: ghosts keep their place around the robot across a pose reset
+static void testGhostPoseReset() {
+  printf("lidar: a ghost survives a pose reset in the new frame\n");
+  reset();
+  Bot b;
+  lidarOnly(b);
+  b.x = 500;
+  b.y = 300;
+  b.h = 90;
+  b.world.post(500, 300 + 150 + 10, 20);  // 150 mm ahead (heading 90)
+  b.run(0.3);
+  b.world.n = 0;  // now "no return" (as if inside the min range)
+  b.lidar_on = false;
+  b.nav.update(b.in());
+  const float f0 = b.nav.frontMm();
+  CHECK(f0 > 100 && f0 < 141);
+  b.nav.onPoseReset();
+  b.x = b.y = 0;
+  b.h = 0;
+  b.nav.update(b.in());
+  printf("  front %.1f mm before, %.1f after the reset\n", f0, b.nav.frontMm());
+  CHECK(fabsf(b.nav.frontMm() - f0) < 1);
 }
 
 static void testLidarStuck() {
@@ -546,7 +705,10 @@ int main() {  testThreeWaypoints();
   testLidarSideWall();
   testLidarStale();
   testLidarAge();
-  testLidarWins();
+  testLidarUnion();
+  testLidarDeadZone();
+  testLidarLostBlocked();
+  testGhostPoseReset();
   testLidarStuck();
   testLidarStuckEvent();
   printf(g_fail ? "%d FAILED\n" : "all passed\n", g_fail);

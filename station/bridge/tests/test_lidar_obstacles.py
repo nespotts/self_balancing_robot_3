@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from station.bridge import link_protocol as lp
-from station.bridge.lidar_obstacles import MAX_SCAN_AGE_S, LidarObstacles
+from station.bridge.lidar_obstacles import MAX_SCAN_AGE_S, LidarObstacles, corridor_half
 from station.bridge.tests.test_lidar import Rig
 
 N = lp.LINK_LIDAR_SECTORS
@@ -74,11 +74,11 @@ def expected_sectors(room, x, y, th, mask=((87.0, 93.0), (267.0, 273.0)), rmin=1
 class Feed:
     """Rig + LidarObstacles; frames decoded as sent."""
 
-    def __init__(self, tmp, link=True, **kw):
+    def __init__(self, tmp, link=True, params=None, ready=None, **kw):
         self.rig = Rig(tmp, **kw)
         self.frames = []
         self.link = link
-        self.obst = LidarObstacles(self.rig.lidar, self.send, clock=lambda: self.rig.r.t)
+        self.obst = LidarObstacles(self.rig.lidar, self.send, clock=lambda: self.rig.r.t, params=params, ready=ready)
 
     def send(self, frame):
         if not self.link:
@@ -232,6 +232,16 @@ class TestGating(unittest.TestCase):
         self.assertIsNone(f.obst.build(sc, now=sc.t1 + MAX_SCAN_AGE_S + 0.01))
         self.assertGreater(f.obst.n["stale"], 0)
 
+    def test_nothing_sent_until_the_robot_profile_is_bound(self):
+        bound = {"ok": False}
+        f = Feed(self.tmp, ready=lambda: bound["ok"])
+        f.rig.run(1.0)
+        self.assertEqual(f.frames, [])                                      # default mount settings: not sent
+        self.assertGreater(f.obst.n["unbound"], 5)
+        bound["ok"] = True                                                  # profile + lidar.json bound
+        f.rig.run(1.0)
+        self.assertGreater(len(f.frames), 6)
+
     def test_listener_error_does_not_stop_the_mapping(self):
         f = Feed(self.tmp)
         f.rig.lidar.scan_listeners.insert(0, lambda sc: 1 / 0)
@@ -239,6 +249,93 @@ class TestGating(unittest.TestCase):
         self.assertGreater(f.rig.lidar.n["used"], 5)
         self.assertGreater(len(f.frames), 5)
         self.assertIn("ZeroDivisionError", f.rig.lidar.reader.error)
+
+
+def fw_view(pts, half=86.0):
+    """What src/navigator.cpp updateObstacles makes of a frame's points (robot at the frame's pose): front, rear,
+    left gap, right gap (0 = none)."""
+    front = rear = gl = gr = 0.0
+    for x, y in pts:
+        if not (x or y):
+            continue
+        if -45.0 < x < 300.0 and abs(y) >= 40.0:
+            g = max(1.0, abs(y) - 76.0)
+            if y > 0:
+                gl = g if gl == 0 or g < gl else gl
+            else:
+                gr = g if gr == 0 or g < gr else gr
+        if abs(y) > half:
+            continue
+        if x >= 26.0:
+            d = max(1.0, x - 38.9)
+            front = d if front == 0 or d < front else front
+        else:
+            d = max(1.0, 13.1 - x)
+            rear = d if rear == 0 or d < rear else rear
+    return front, rear, gl, gr
+
+
+class TestCorridorPoint(unittest.TestCase):
+    """#99: per sector the nearest point INSIDE the driving corridor, else the nearest, so a side-wall return nearer
+    than an in-path obstacle in the same sector cannot hide it."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_corridor_half_mirrors_the_firmware(self):
+        self.assertEqual(corridor_half({}), 86.0)                                         # defaults: side check on
+        self.assertEqual(corridor_half({"nav.corridor_mm": 120.0}), 60.0)
+        self.assertEqual(corridor_half({"nav.corridor_mm": 300.0, "nav.side_min_mm": 0.0}), 150.0)   # side check off
+        self.assertEqual(corridor_half({"nav.corridor_mm": "x", "nav.side_min_mm": float("nan")}), 86.0)
+
+    def test_post_between_close_walls(self):
+        """The reviewer's case: walls at +-150 / +-200 mm, a post at y 60..85 ahead. The robot steps toward it; front_
+        must see the post the whole way through the slow-down zone (nav.slow_mm 800) to the stop, and the side gaps
+        must still see the walls."""
+        from station.bridge.tests.test_ld19 import FakeRobot
+        from station.sim.lidar_sim import LidarSim
+        from station.sim.sim import Room
+        for wall in (150.0, 200.0):
+            room = Room(empty=True)
+            px = 2000.0                                                 # the post's near face, y 60..85
+            room.set_extra([(-500.0, wall, 3500.0, wall), (-500.0, -wall, 3500.0, -wall),
+                            (px, 60.0, px + 25.0, 60.0), (px + 25.0, 60.0, px + 25.0, 85.0),
+                            (px + 25.0, 85.0, px, 85.0), (px, 85.0, px, 60.0)])
+            f = Feed(self.tmp, robot=FakeRobot(room), sim=LidarSim(seed=3, posts=True, dropout=0.0))
+            worst = 0.0
+            for ahead in range(900, 149, -25):                          # post face this far ahead of the axle
+                f.rig.r.X = px - ahead
+                f.rig.lidar.hist.clear()                                # (a step, not a drive: no deskew across it)
+                f.rig.run(0.25)
+                d = f.frames[-1][1]
+                front, _rear, gl, gr = fw_view(d["pts"])
+                truth = ahead - 38.9
+                worst = max(worst, abs(front - truth))
+                self.assertLess(abs(front - truth), 25.0, (wall, ahead, front, d["pts"][:4], d["pts"][-3:]))
+                # side gaps still see the walls (nearest of a few noisy returns per sector: a bit short, never long)
+                self.assertTrue(wall - 76.0 - 30.0 < gr < wall - 76.0 + 5.0, (wall, ahead, gr))   # right: always
+                if ahead > 300:                                         # (closer, the post itself is beside the body)
+                    self.assertTrue(wall - 76.0 - 30.0 < gl < wall - 76.0 + 5.0, (wall, ahead, gl))
+            print("  walls +-%.0f: front_ within %.0f mm of the post all the way in" % (wall, worst))
+
+    def test_corridor_from_the_robot_params(self):
+        """Side check off, nav.corridor_mm 400: the corridor is +-200, so a wall at y 150 is in it and must win over a
+        nearer return outside (the firmware sees what it would see from the whole scan)."""
+        from station.bridge.tests.test_ld19 import FakeRobot
+        from station.sim.lidar_sim import LidarSim
+        from station.sim.sim import Room
+        room = Room(empty=True)
+        room.set_extra([(400.0, 150.0, 2000.0, 150.0),                  # in the wide corridor from x 400 on
+                        (300.0, 260.0, 300.0, 400.0)])                  # outside it, nearer, same sectors
+        params = {"nav.corridor_mm": 400.0, "nav.side_min_mm": 0.0}
+        f = Feed(self.tmp, robot=FakeRobot(room), sim=LidarSim(seed=4, posts=True, dropout=0.0),
+                 params=lambda: params)
+        f.rig.run(0.5)
+        front, _r, _l, _g = fw_view(f.frames[-1][1]["pts"], half=200.0)
+        self.assertAlmostEqual(front, 400.0 - 38.9, delta=25.0)
 
 
 if __name__ == "__main__":

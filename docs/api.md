@@ -158,7 +158,8 @@ ignores it (unknown event); a v5 bridge never sends it. No new params, no layout
 
 New in v5:
 
-**`MSG_LIDAR_OBSTACLES` (0x87, Pi -> Teensy, ~10 Hz, issue #77)**: the LD19's nearest return per sector, for the navigator
+**`MSG_LIDAR_OBSTACLES` (0x87, Pi -> Teensy, ~10 Hz, issue #77)**: one LD19 return per sector (the nearest inside the robot's
+driving corridor, else the nearest: #99), for the navigator
 ([ld19.md](ld19.md#obstacles-for-the-robot-issue-77)). Sent by `station/bridge/lidar_obstacles.py` once per good turn.
 
 | Byte | Field | |

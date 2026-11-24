@@ -17,6 +17,12 @@ static constexpr float kSideBack = 45.0f, kSideAhead = 300.0f;   // side window:
 static constexpr float kBlockedTurnDeg = 30.0f;           // GOTO blocked by a wall alongside: turn away <= this
 static constexpr float kSideInner = 40.0f;                // |lateral| below this = straight ahead / behind
 static constexpr float kStuckDeg = 15.0f;                 // turning: progress = this much heading change
+// LD19 dead zone (#99): the bridge drops returns closer than its min_range_mm (120 mm default, 60 on the robot) to
+// the lidar; + 60 mm for the mount offset (x_mm -12), the lean (170 mm above the axle) and a scan's travel. Lidar
+// points closer than this to the axle are kept as ghosts until the robot is this far from them again.
+static constexpr float kLidarDeadR = 180.0f;
+static constexpr float kDeadFront = kLidarDeadR - kAxisFwd - kSensorOut;  // the same, as a front distance (141)
+static constexpr float kGhostMerge = 40.0f;               // a new point this close to a ghost stands for it
 
 static float clampf(float v, float lim) { return v > lim ? lim : (v < -lim ? -lim : v); }
 
@@ -50,7 +56,8 @@ void Navigator::listChanged(bool replaced) {
   }
   if (n_ == 0) idx_ = 0;
   blocked_ = latched_ = backing_ = false;  // a new / changed list always resumes
-  blk_fwd_ = blk_rev_ = false;
+  if (fresh(now_ms_)) blk_fwd_ = blk_rev_ = false;  // ... but without fresh data a latch stays (#99)
+  dead_back_ = false;
   stop_since_ = 0;
   stuck_ = away_ = away_done_ = false;
   stuck_ms_ = 0;
@@ -97,6 +104,43 @@ bool Navigator::addLidar(const LidarObstacleFrame& f, const NavIn& in) {
   }
   lidar_n_ = n;
   lidar_ms_ = in.now_ms ? in.now_ms : 1;
+  // ghosts (#99): this frame's points within kLidarDeadR of the axle, plus the older ghosts still that close that no
+  // new point stands for (they may be inside the lidar's min range now); the kGhosts nearest are kept
+  float cx[kGhosts + LINK_LIDAR_SECTORS], cy[kGhosts + LINK_LIDAR_SECTORS], cr[kGhosts + LINK_LIDAR_SECTORS];
+  uint8_t m = 0;
+  for (uint8_t i = 0; i < n; i++) {
+    const float r = hypotf(lx_[i] - in.x, ly_[i] - in.y);
+    if (r >= kLidarDeadR) continue;
+    cx[m] = lx_[i];
+    cy[m] = ly_[i];
+    cr[m] = r;
+    m++;
+  }
+  const uint8_t m_new = m;
+  for (uint8_t j = 0; j < ghost_n_; j++) {
+    const float r = hypotf(gx_[j] - in.x, gy_[j] - in.y);
+    if (r >= kLidarDeadR) continue;
+    bool seen = false;
+    for (uint8_t i = 0; i < m_new && !seen; i++) seen = hypotf(cx[i] - gx_[j], cy[i] - gy_[j]) < kGhostMerge;
+    if (seen) continue;
+    cx[m] = gx_[j];
+    cy[m] = gy_[j];
+    cr[m] = r;
+    m++;
+  }
+  ghost_n_ = 0;
+  while (ghost_n_ < kGhosts && m) {
+    uint8_t b = 0;
+    for (uint8_t i = 1; i < m; i++)
+      if (cr[i] < cr[b]) b = i;
+    gx_[ghost_n_] = cx[b];
+    gy_[ghost_n_] = cy[b];
+    ghost_n_++;
+    m--;
+    cx[b] = cx[m];
+    cy[b] = cy[m];
+    cr[b] = cr[m];
+  }
   return true;
 }
 
@@ -105,7 +149,8 @@ void Navigator::onModeChange(const NavIn& in) {
   now_ms_ = in.now_ms;
   speed_ = turn_ = 0;
   blocked_ = latched_ = backing_ = false;
-  blk_fwd_ = blk_rev_ = false;
+  if (fresh(in.now_ms)) blk_fwd_ = blk_rev_ = false;  // without fresh data a latch stays (#99)
+  dead_back_ = false;
   driving_ = false;
   stop_since_ = 0;
   stuck_ = away_ = away_done_ = false;
@@ -133,6 +178,13 @@ bool Navigator::blind(uint32_t now_ms) const {
   return !sensed_ms_ || now_ms - sensed_ms_ > kBlindMs;
 }
 
+// Fresh obstacle data (#99): only this can release a BLOCKED latch (never blind, stale or "no data").
+// (signed: listChanged() passes the last update's time, and a frame may have come in a few ms after it)
+bool Navigator::fresh(uint32_t now_ms) const {
+  const auto recent = [now_ms](uint32_t t, uint32_t lim) { return t && (int32_t)(now_ms - t) <= (int32_t)lim; };
+  return recent(lidar_ms_, LINK_LIDAR_FRESH_MS) || recent(sensed_ms_, kSweepFreshMs);
+}
+
 void Navigator::logBlind(uint8_t mode) {
   if (mode == MODE_EXPLORE || P(P_NAV_BLIND_SPEED) <= 0)
     log("nav: no range readings - obstacle stop is off: %s paused", mode == MODE_EXPLORE ? "EXPLORE" : "GOTO");
@@ -147,6 +199,14 @@ void Navigator::onPoseReset() {
   pt_n_ = 0;
   lidar_n_ = 0;
   lidar_ms_ = 0;  // its points were in the old frame: no lidar until the next frame
+  // ghosts (#99): the same spots around the robot, in the new frame (the pose is (0,0,0) now)
+  const float c = cosf(pose_h_ * kDeg), s = sinf(pose_h_ * kDeg);
+  for (uint8_t i = 0; i < ghost_n_; i++) {
+    const float dx = gx_[i] - pose_x_, dy = gy_[i] - pose_y_;
+    gx_[i] = dx * c + dy * s;
+    gy_[i] = -dx * s + dy * c;
+  }
+  pose_x_ = pose_y_ = pose_h_ = 0;
   hold_x_ = hold_y_ = 0;
   listChanged(true);
 }
@@ -160,11 +220,19 @@ void Navigator::updateObstacles(const NavIn& in) {
   const float half = P(P_NAV_SIDE_MIN_MM) > 0 ? fminf(0.5f * P(P_NAV_CORRIDOR_MM), kHalfWidth + 10.0f)
                                               : 0.5f * P(P_NAV_CORRIDOR_MM);
   const uint32_t age = (uint32_t)P(P_NAV_OBST_AGE_MS);
-  const bool lidar = lidarFresh(in.now_ms);  // fresh lidar wins: its points replace the sweep's (#77)
+  const bool lidar = lidarFresh(in.now_ms);
+  // ghosts the robot has moved away from (the lidar would see them again if they were there) are dropped (#99)
+  uint8_t gn = 0;
+  for (uint8_t i = 0; i < ghost_n_; i++) {
+    if (hypotf(gx_[i] - in.x, gy_[i] - in.y) >= kLidarDeadR) continue;
+    gx_[gn] = gx_[i];
+    gy_[gn] = gy_[i];
+    gn++;
+  }
+  ghost_n_ = gn;
   float front = 0, rear = 0, gl = 0, gr = 0, near = 0, near_xr = 0;
-  for (uint8_t i = 0; i < (lidar ? lidar_n_ : pt_n_); i++) {
-    if (!lidar && in.now_ms - pt_ms_[i] > age) continue;
-    const float dx = (lidar ? lx_[i] : px_[i]) - in.x, dy = (lidar ? ly_[i] : py_[i]) - in.y;
+  auto take = [&](float px, float py) {
+    const float dx = px - in.x, dy = py - in.y;
     const float xr = dx * c + dy * s, yr = -dx * s + dy * c;
     if (xr > -kSideBack && xr < kSideAhead && fabsf(yr) >= kSideInner) {  // beside the body: side gap
       const float g = fmaxf(1.0f, fabsf(yr) - kHalfWidth);
@@ -178,7 +246,7 @@ void Navigator::updateObstacles(const NavIn& in) {
         near_xr = xr;
       }
     }
-    if (fabsf(yr) > half) continue;
+    if (fabsf(yr) > half) return;
     if (xr >= kAxisFwd) {  // ahead of the head: what sensor 0 would read straight ahead
       const float d = fmaxf(1.0f, xr - kAxisFwd - kSensorOut);
       if (front == 0 || d < front) front = d;
@@ -186,13 +254,30 @@ void Navigator::updateObstacles(const NavIn& in) {
       const float d = fmaxf(1.0f, kAxisFwd - kSensorOut - xr);
       if (rear == 0 || d < rear) rear = d;
     }
-  }
+  };
+  // fresh lidar and the sweep's recent points together (#99: the union), and the ghosts
+  if (lidar)
+    for (uint8_t i = 0; i < lidar_n_; i++) take(lx_[i], ly_[i]);
+  for (uint8_t i = 0; i < pt_n_; i++)
+    if (in.now_ms - pt_ms_[i] <= age) take(px_[i], py_[i]);
+  for (uint8_t i = 0; i < ghost_n_; i++) take(gx_[i], gy_[i]);
   front_ = front;
   rear_ = rear;
   gap_l_ = gl;
   gap_r_ = gr;
   near_mm_ = near;
   near_xr_ = near_xr;
+  // release evidence for limitSpeed (#99): since when fresh data shows nothing inside the clear distance
+  const bool ok = fresh(in.now_ms);
+  const float clear = P(P_RNG_OBSTACLE_MM) + P(P_NAV_CLEAR_MM) + P(P_NAV_BACKOFF_MM);
+  const uint32_t t = in.now_ms ? in.now_ms : 1;
+  if (!ok || (front > 0 && front < clear)) clr_fwd_ms_ = 0;
+  else if (!clr_fwd_ms_) clr_fwd_ms_ = t;
+  if (!ok || (rear > 0 && rear < clear)) clr_rev_ms_ = 0;
+  else if (!clr_rev_ms_) clr_rev_ms_ = t;
+  pose_x_ = in.x;
+  pose_y_ = in.y;
+  pose_h_ = in.heading;
 }
 
 // Side walls (#62): turn (deg/s, + = CCW = away from a right wall) away from walls closer than
@@ -269,7 +354,7 @@ float Navigator::limitSpeed(float v, float vmax, bool apply) {
   const bool fwd = v > 0;
   const float d = fwd ? front_ : rear_;
   bool& blk = fwd ? blk_fwd_ : blk_rev_;
-  uint32_t& close_ms = fwd ? close_fwd_ms_ : close_rev_ms_;
+  const uint32_t clr_ms = fwd ? clr_fwd_ms_ : clr_rev_ms_;
   float& close_mm = fwd ? close_fwd_mm_ : close_rev_mm_;
   const float stop = P(P_RNG_OBSTACLE_MM);
   if (stop <= 0) {
@@ -277,15 +362,13 @@ float Navigator::limitSpeed(float v, float vmax, bool apply) {
     obst_ = d;
     return v;
   }
-  // Blocked until the way is clear: nothing closer than stop + clear (+ backoff) seen in the corridor
-  // for nav.obst_age_ms (a sweep can miss a corner for a pass or two; no data is not "clear").
+  // Blocked until the way is clear: fresh data (updateObstacles) has shown nothing closer than stop + clear
+  // (+ backoff) in the corridor for nav.obst_age_ms (a sweep can miss a corner for a pass or two). No data,
+  // stale data or blind is never "clear" (#99); an obstacle in the lidar's dead zone stays as a ghost.
   const float clear = stop + P(P_NAV_CLEAR_MM) + P(P_NAV_BACKOFF_MM);
-  if (d > 0 && d < clear) {
-    close_ms = now_ms_ ? now_ms_ : 1;
-    close_mm = d;
-  }
+  if (d > 0 && d < clear) close_mm = d;
   if (d > 0 && d < stop) blk = true;
-  else if (blk && (d <= 0 || d > clear) && now_ms_ - close_ms >= (uint32_t)P(P_NAV_OBST_AGE_MS)) blk = false;
+  else if (blk && clr_ms && now_ms_ - clr_ms >= (uint32_t)P(P_NAV_OBST_AGE_MS)) blk = false;
   obst_ = d > 0 ? d : (blk ? close_mm : 0.0f);
   if (blk) {
     obst_flag_ = true;
@@ -337,6 +420,7 @@ void Navigator::update(const NavIn& in) {
 void Navigator::startBlocked(const NavIn& in) {
   blocked_ = true;
   blk_h_ = in.heading;
+  dead_back_ = false;
   if (in.mode == MODE_EXPLORE) latched_ = true;
   log("nav: blocked, obstacle at %.0f mm (waypoint %u/%u)", (double)obst_, (unsigned)idx_ + 1, (unsigned)n_);
   back_mm_ = P(P_NAV_BACKOFF_MM);
@@ -498,6 +582,17 @@ void Navigator::updateGoto(const NavIn& in) {
   if (latched_ || stuck_) obst_flag_ = true;  // EXPLORE: stays blocked until a new list; stuck: backing off
   if (obst_flag_) {
     if (!blocked_) startBlocked(in);
+    // closer than the lidar can see (its min range, #99): back off once so it shows again (or is seen to be gone)
+    if (!backing_ && !dead_back_ && front_ > 0 && front_ < kDeadFront && P(P_NAV_STUCK_BACK) > 0 &&
+        P(P_RNG_OBSTACLE_MM) > 0 && (lidarFresh(in.now_ms) || ghost_n_)) {
+      dead_back_ = backing_ = true;
+      back_mm_ = P(P_NAV_STUCK_BACK);
+      back_x_ = in.x;
+      back_y_ = in.y;
+      back_ms_ = in.now_ms;
+      blk_h_ = in.heading;
+      log("nav: obstacle %.0f mm ahead, too close for the lidar: backing off", (double)front_);
+    }
     const float obst = obst_;
     vl = 0;
     if (backing_) {
@@ -508,6 +603,7 @@ void Navigator::updateGoto(const NavIn& in) {
       float vb = -fmaxf(P(P_NAV_MIN_SPEED), 30.0f) * (stuck_ ? 2.0f : 1.0f);
       vb = limitSpeed(vb, vmax, true);
       if (obst_flag_ || back >= back_mm_ || in.now_ms - back_ms_ > 5000) {
+        if (back >= back_mm_) dead_back_ = false;  // backed off all the way: again if it is still that close (#99)
         backing_ = false;
         vb = 0;
       }

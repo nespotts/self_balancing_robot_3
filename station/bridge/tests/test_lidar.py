@@ -372,5 +372,40 @@ class TestMapping(unittest.TestCase):
         shutil.rmtree(rig2.mapper.dir, ignore_errors=True)
 
 
+class TestPoseJump(unittest.TestCase):
+    """#99: an odometry jump (pose reset; its log line may come after the telemetry) clears the pose history, so a scan
+    is never interpolated across it."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.L = Rig(self.tmp).lidar
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def tlm(self, t, x, y, h, w=0.0):
+        self.L.on_tlm({"x_mm": x, "y_mm": y, "heading_deg": h, "pitch_deg": 0.0, "yaw_rate_dps": w}, t)
+
+    def test_jumps_clear_the_history(self):
+        L = self.L
+        for i in range(50):                             # driving 1 m/s and turning 200 deg/s at 100 Hz: no jump
+            self.tlm(i * 0.01, 1500.0 + 10.0 * i, 0.0, 2.0 * i, 200.0)
+        self.assertEqual(len(L.hist.items()), 50)
+        self.assertEqual(L.n["pose_jumps"], 0)
+        self.tlm(0.50, 0.0, 0.0, 0.0)                   # pose reset 2 m away
+        self.assertEqual(L.n["pose_jumps"], 1)
+        self.assertEqual(L.hist.items(), [(0.50, 0.0, 0.0, 0.0, 0.0)])
+        for i in range(1, 10):
+            self.tlm(0.50 + i * 0.01, 2.0 * i, 0.0, 0.0)
+        self.tlm(0.60, 20.0, 0.0, 120.0)                # heading step the yaw rate (0) does not explain: a reset
+        self.assertEqual(L.n["pose_jumps"], 2)
+        self.assertEqual(len(L.hist.items()), 1)
+        self.tlm(0.61, 21.0, 0.0, 380.0)                # +260 = -100 wrapped: still a jump
+        self.assertEqual(L.n["pose_jumps"], 3)
+        self.tlm(1.62, 300.0, 0.0, 380.0)               # 1 s gap, 279 mm: travel, not a jump
+        self.assertEqual(L.n["pose_jumps"], 3)
+        self.assertEqual(len(L.hist.items()), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
