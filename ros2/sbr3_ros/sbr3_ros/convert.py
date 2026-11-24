@@ -77,6 +77,55 @@ def corr_to_tf(corr):
     return dx / 1000.0, dy / 1000.0, wrap_pi(math.radians(dth))
 
 
+def pose_inverse(p):
+    """(x, y, yaw) of b in a -> (x, y, yaw) of a in b."""
+    c, s = math.cos(p[2]), math.sin(p[2])
+    return -(c * p[0] + s * p[1]), -(-s * p[0] + c * p[1]), wrap_pi(-p[2])
+
+
+def pose_compose(a, b):
+    c, s = math.cos(a[2]), math.sin(a[2])
+    return a[0] + c * b[0] - s * b[1], a[1] + s * b[0] + c * b[1], wrap_pi(a[2] + b[2])
+
+
+def station_frame_tf(corr):
+    """odom <- station_map (x m, y m, yaw rad): the station's map frame (places, zones) as a child of odom, from the
+    bridge's correction (map pose = corr o odometry pose). TF then gives the ROS map <- station_map."""
+    return pose_inverse(corr_to_tf(corr or (0.0, 0.0, 0.0)))
+
+
+# ------------------------------------------------------------------ station places / zones
+def places_from_msg(m):
+    """bridge {"t": "places", "map": ..., "items": [{"name", "x", "y" (station map mm), "home"?}]} ->
+    [{"name", "x", "y" (m), "home"}]"""
+    out = []
+    for p in (m or {}).get("items") or []:
+        try:
+            out.append({"name": str(p["name"]), "x": float(p["x"]) / 1000.0, "y": float(p["y"]) / 1000.0,
+                        "home": bool(p.get("home"))})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def find_place(places, name):
+    """Case-insensitive, spaces collapsed; 'home' finds Home. -> place dict or None."""
+    key = " ".join(str(name or "").split()).lower()
+    return next((p for p in places if p["name"].lower() == key), None)
+
+
+def route_yaws(points, start=None):
+    """Heading for each goal: the direction it is approached from (previous point, or start), so the robot does not
+    turn on the spot when it arrives. A point on top of the previous one keeps the previous heading."""
+    yaws, prev, last = [], start, 0.0
+    for p in points:
+        if prev is not None and math.hypot(p[0] - prev[0], p[1] - prev[1]) > 1e-3:
+            last = math.atan2(p[1] - prev[1], p[0] - prev[0])
+        yaws.append(last)
+        prev = p
+    return yaws
+
+
 # ------------------------------------------------------------------ scans
 def decode_ranges(s):
     b = base64.b64decode(s)

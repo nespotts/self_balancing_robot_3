@@ -62,12 +62,19 @@ def setup(context):
         from launch_ros.event_handlers import OnStateTransition
         from launch_ros.events.lifecycle import ChangeState
         from lifecycle_msgs.msg import Transition
+        # slam_toolbox localization keeps adding recent scans to the map it publishes (wherever it thinks the robot
+        # is, also before the first pose). Nav2, loc_monitor and keepout_mask get the saved map from map_server
+        # on /map instead; slam_toolbox's own goes to /slam_toolbox/map.
         node = LifecycleNode(package="slam_toolbox", executable="localization_slam_toolbox_node",
                              name="slam_toolbox", namespace="", output="screen",
                              parameters=[os.path.join(share, "config", "slam_toolbox.yaml"),
                                          {"mode": "localization", "map_file_name": base, "map_start_at_dock": True,
-                                          "use_lifecycle_manager": False}])
-        acts += [node,
+                                          "use_lifecycle_manager": False, "map_name": "/slam_toolbox/map"}])
+        acts += [Node(package="nav2_map_server", executable="map_server", name="map_server", output="screen",
+                      parameters=[{"yaml_filename": base + ".yaml"}]),
+                 Node(package="nav2_lifecycle_manager", executable="lifecycle_manager", name="lifecycle_manager_map",
+                      parameters=[{"autostart": True, "node_names": ["map_server"]}]),
+                 node,
                  EmitEvent(event=ChangeState(lifecycle_node_matcher=matches_action(node),
                                              transition_id=Transition.TRANSITION_CONFIGURE)),
                  RegisterEventHandler(OnStateTransition(
@@ -91,8 +98,7 @@ def generate_launch_description():
         DeclareLaunchArgument("initial_pose", default_value="",
                               description="x,y,yaw (m, m, rad) in the map; empty = global match at start"),
         DeclareLaunchArgument("auto_recover", default_value="true", description="relocalize when lost (kidnapped)"),
-        DeclareLaunchArgument("keepout", default_value="false",
-                              description="station zones -> Nav2 keepout filter (+ places / zones markers for RViz)"),
+        DeclareLaunchArgument("keepout", default_value="false", description="station zones -> Nav2 keepout filter"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("nav_params", default_value=os.path.join(share, "config", "nav2.yaml")),
         OpaqueFunction(function=setup),

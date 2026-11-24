@@ -28,6 +28,8 @@ setup(
             "bag_tf_filter = sbr3_ros.bag_tf_filter:main",
             "loc_monitor = sbr3_ros.loc_monitor:main",
             "pose_logger = sbr3_ros.pose_logger:main",
+            "go_to = sbr3_ros.goal_test:main",
+            "patrol = sbr3_ros.patrol:main",
         ],
     },
 )
