@@ -58,6 +58,10 @@ class TestLidarEndToEnd(unittest.TestCase):
             self.assertTrue(b.tlm["status"] & lp.TLM_UPRIGHT)
             await until(lambda: b.lidar.n["used"] >= 25, 6.0)
             self.assertGreaterEqual(b.lidar.n["used"], 25)
+            # the far walls build up over the scans that follow, at a pace that depends on how smoothly the robot
+            # stood up (CPU load): wait for them instead of for a scan count, the assertions below are unchanged (#98)
+            await until(lambda: cell_max(b.mapper.grid, 4000, 0, 150) > UNKNOWN + 30
+                        and cell_max(b.mapper.grid, -1000, 0, 150) > UNKNOWN + 30, 6.0)
 
             st = b.lidar.status()
             self.assertEqual(st["state"], "ok")
@@ -81,7 +85,10 @@ class TestLidarEndToEnd(unittest.TestCase):
             h = b.health.tick(time.monotonic(), b.health_ctx())
             tile = [t for t in h["tiles"] if t["id"] == "lidar"][0]
             self.assertEqual(tile["level"], "ok", tile)
-            sc = await wait_for(ws, lambda m: m["t"] == "lidar_scan")
+            # A scan from now on: the socket's backlog starts with seq 1, the scan mapped while the robot was still
+            # standing up, when only some packets passed the pitch gate (a partial turn, 150..300 points, load-dependent) (#98)
+            live = b.lidar.pts_seq
+            sc = await wait_for(ws, lambda m: m["t"] == "lidar_scan" and m["seq"] > live)
             self.assertGreater(len(sc["pts"]), 300)
             self.assertEqual(len(sc["pts"]) % 2, 0)
             # settings over the command channel

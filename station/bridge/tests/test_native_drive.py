@@ -262,6 +262,12 @@ class TestNativeDrive(unittest.TestCase):
             c = await self.cmds(rel0)
             rel = await self.ev("window.__rel")
             self.assertIsNotNone(rel, "the page saw the touch end")
+            # rel0 was taken before the CDP round trip: while the touchEnd waited behind a busy browser the held pad
+            # legitimately kept sending its ~10 Hz cmd_vel. Those leading frames must come before the page's own touchend;
+            # from the first zero on, everything below is checked as before (#98)
+            while len(c) > 1 and c[0][1:] != [0, 0]:
+                self.assertLessEqual(c[0][0], rel, "drive frame after the touch end")
+                c = c[1:]
             self.assertTrue(c, "a stop after release")
             self.assertEqual(c[0][1:], [0, 0])
             self.assertLess(c[0][0] - rel, 150, "zero within 150 ms of release")
@@ -315,17 +321,26 @@ class TestNativeDrive(unittest.TestCase):
             await self.ev("__tilt.pitch = -20")
             await asyncio.sleep(0.5)
             await self.wait_active(b)
-            gone = time.monotonic()            # same clock as the bridge (time.monotonic)
             await self.cdp.call("Page.navigate", url="about:blank")
+            # Page.navigate returns before the old page is torn down, and on a busy machine the old page keeps sending
+            # cmd_vel for a long while after that: "gone" is the moment the new document is really there, not the
+            # moment of the call (the suite flaked on it, #98).
+            await self.until("location.href === 'about:blank'", what="old page gone")
+            gone = time.monotonic()            # same clock as the bridge (time.monotonic)
             moving = lambda: b.cmd_active and b.cmd != (0, 0)
+            # The bridge's 40 ms tick runs on this very event loop, so a stall of the loop (this process starved of CPU)
+            # delays its stop by as much: measure the longest stall of our own 5 ms poll and allow exactly that.
+            stall, prev = 0.0, time.monotonic()
             while moving() and time.monotonic() - gone < 2:
                 await asyncio.sleep(0.005)
+                now = time.monotonic()
+                stall, prev = max(stall, now - prev - 0.005), now
             stopped = time.monotonic()
             # Whichever comes first: the page's pagehide zero, the socket closing, or the bridge's 300 ms timeout
             # after the last cmd_vel it got (+ one 40 ms bridge tick). From the moment the page goes, one 100 ms
             # page tick may already be on its way.
-            self.assertLess(stopped - b.cmd_time, 0.3 + 0.04 + 0.03, "bridge kept forwarding after its timeout")
-            self.assertLess(stopped - gone, 0.1 + 0.3 + 0.04 + 0.03, "bridge still forwarding cmd_vel")
+            self.assertLess(stopped - b.cmd_time, 0.3 + 0.04 + 0.03 + stall, "bridge kept forwarding after its timeout")
+            self.assertLess(stopped - gone, 0.1 + 0.3 + 0.04 + 0.03 + stall, "bridge still forwarding cmd_vel")
             await self.touch("touchEnd")
 
             # ---- gamepad: stick drives in STATION, goes stale -> stop, B = E-stop
@@ -337,7 +352,9 @@ class TestNativeDrive(unittest.TestCase):
                 await asyncio.sleep(0.1)
             c = await self.cmds(t0)
             self.assertGreaterEqual(len(c), 7, c)
-            self.assertGreater(c[-1][1], 50, "gamepad forward")
+            # (not c[-1]: this emit loop runs through CDP round trips; when they stall past the stick's staleness
+            # limit the last frame is already the stale zero - the forward drive is what is checked, #98)
+            self.assertGreater(max(s for _, s, _ in c), 50, "gamepad forward")
             last = await self.ev("performance.now()")
             await asyncio.sleep(0.8)
             c = await self.cmds(last)
