@@ -1,16 +1,20 @@
 # Nav2 (Jazzy) for the SBR3 balancing robot. Based on nav2_bringup/params/nav2_params.yaml with:
 #  - frames base_link / odom / map (no base_footprint);
 #  - a small round footprint (r 0.12 m, the cage + sway), 2D obstacle layers from the LD19 /scan;
-#  - Regulated Pure Pursuit: smooth, slow (0.18 m/s), rotate-to-heading in place, no reversing;
-#  - gentle velocity smoothing: a balancing robot leans to accelerate, so hard steps make it pitch and rock.
+#  - rotation shim + Regulated Pure Pursuit: smooth, slow (0.18 m/s), turns in place first, no reversing;
+#  - gentle velocity smoothing: a balancing robot leans to accelerate, so hard steps make it pitch and rock;
+#  - collision monitor: half speed near anything, no driving into a hit; keepout filter from the station's zones.
 # The firmware still has the last word: STATION mode obstacle stop / slow-down, E-stop, link watchdog.
+# AMCL on a saved map (localize.launch.py). The start pose and kidnap recovery come from loc_monitor (a global scan
+# match -> /initialpose), so AMCL itself does no random-particle recovery. Tuned for the LD19 (480 beams) + a 5 cm map.
 amcl:
   ros__parameters:
-    alpha1: 0.2
-    alpha2: 0.2
-    alpha3: 0.2
-    alpha4: 0.2
+    alpha1: 0.15
+    alpha2: 0.15
+    alpha3: 0.15
+    alpha4: 0.15
     alpha5: 0.2
+    set_initial_pose: false            # loc_monitor sends it (global match, or initial_pose:=)
     base_frame_id: "base_link"
     beam_skip_distance: 0.5
     beam_skip_error_threshold: 0.9
@@ -18,11 +22,11 @@ amcl:
     do_beamskip: false
     global_frame_id: "map"
     lambda_short: 0.1
-    laser_likelihood_max_dist: 2.0
+    laser_likelihood_max_dist: 1.0
     laser_max_range: 8.0
     laser_min_range: 0.12
     laser_model_type: "likelihood_field"
-    max_beams: 90
+    max_beams: 120                     # of 480
     max_particles: 2000
     min_particles: 300
     odom_frame_id: "odom"
@@ -33,14 +37,14 @@ amcl:
     resample_interval: 1
     robot_model_type: "nav2_amcl::DifferentialMotionModel"
     save_pose_rate: 0.5
-    sigma_hit: 0.2
+    sigma_hit: 0.08                    # LD19 + a 5 cm map: tighter than the 0.2 default
     tf_broadcast: true
     transform_tolerance: 0.5
-    update_min_a: 0.15
-    update_min_d: 0.1
-    z_hit: 0.5
+    update_min_a: 0.1                  # a slow robot: update every 5 cm / 6 deg
+    update_min_d: 0.05
+    z_hit: 0.8
     z_max: 0.05
-    z_rand: 0.5
+    z_rand: 0.15
     z_short: 0.05
     scan_topic: scan
 
@@ -83,35 +87,45 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.15
       yaw_goal_tolerance: 0.5
+    # Rotation shim + Regulated Pure Pursuit (#98, compared in the sim with #96's RPP and MPPI, docs/ros2.md):
+    # the shim turns on the spot first when the path leaves > 35 deg off the heading (a balancing robot turns in
+    # place without leaning), then RPP follows the path: no reversing, slows for tight curves, near obstacles and
+    # at the goal, and stops for a collision ahead. MPPI overshot goals and stalled 0.2-0.3 m short in our tries.
     FollowPath:
-      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      angular_dist_threshold: 0.6
+      angular_disengage_threshold: 0.3
+      forward_sampling_distance: 0.4
+      rotate_to_heading_angular_vel: 0.7
+      max_angular_accel: 1.2
+      simulate_ahead_time: 1.0
+      rotate_to_goal_heading: true
       desired_linear_vel: 0.18
       lookahead_dist: 0.45
       min_lookahead_dist: 0.3
-      max_lookahead_dist: 0.8
-      lookahead_time: 1.5
-      rotate_to_heading_angular_vel: 0.6
+      max_lookahead_dist: 0.7
+      lookahead_time: 2.0
+      use_velocity_scaled_lookahead_dist: true    # a longer look ahead at speed: gentler curves
       transform_tolerance: 0.3
-      use_velocity_scaled_lookahead_dist: false
-      min_approach_linear_velocity: 0.05
-      approach_velocity_scaling_dist: 0.5
+      min_approach_linear_velocity: 0.04
+      approach_velocity_scaling_dist: 0.6         # ease into the goal
       use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 1.0
+      max_allowed_time_to_collision_up_to_carrot: 1.0   # 1.5 s stopped it at tight corners (box / partition)
       use_regulated_linear_velocity_scaling: true
       use_cost_regulated_linear_velocity_scaling: true
       regulated_linear_scaling_min_radius: 0.6
       regulated_linear_scaling_min_speed: 0.06
       use_fixed_curvature_lookahead: false
       curvature_lookahead_dist: 0.6
-      use_rotate_to_heading: true
+      use_rotate_to_heading: false                # the shim does it
       allow_reversing: false
       rotate_to_heading_min_angle: 0.6
-      max_angular_accel: 1.5
       max_robot_pose_search_dist: 10.0
       interpolate_curvature_after_goal: false
-      cost_scaling_dist: 0.3
+      cost_scaling_dist: 0.35
       cost_scaling_gain: 1.0
-      inflation_cost_scaling_factor: 4.0
+      inflation_cost_scaling_factor: 3.0
 
 local_costmap:
   local_costmap:
@@ -127,6 +141,12 @@ local_costmap:
       robot_radius: 0.12
       transform_tolerance: 0.3
       plugins: ["obstacle_layer", "inflation_layer"]
+      filters: ["keepout_filter"]
+      keepout_filter:                    # station zones (keepout_mask node); idle until it publishes
+        plugin: "nav2_costmap_2d::KeepoutFilter"
+        enabled: True
+        filter_info_topic: "/costmap_filter_info"
+        transform_tolerance: 0.3
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -142,10 +162,10 @@ local_costmap:
           obstacle_max_range: 3.5
           obstacle_min_range: 0.0
           inf_is_valid: false
-      inflation_layer:
+      inflation_layer:                   # wider, softer: plans keep off walls where there is room
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.35
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.45
       always_send_full_costmap: True
 
 global_costmap:
@@ -160,6 +180,12 @@ global_costmap:
       track_unknown_space: true
       transform_tolerance: 0.3
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      filters: ["keepout_filter"]
+      keepout_filter:
+        plugin: "nav2_costmap_2d::KeepoutFilter"
+        enabled: True
+        filter_info_topic: "/costmap_filter_info"
+        transform_tolerance: 0.3
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -177,10 +203,10 @@ global_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
-      inflation_layer:
+      inflation_layer:                   # wider, softer: plans keep off walls where there is room
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.35
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.45
       always_send_full_costmap: True
 
 map_saver:
@@ -267,17 +293,18 @@ route_server:
     CostmapScorer:
       plugin: "nav2_route::CostmapScorer"
 
-# A balancing robot leans to speed up or slow down: keep the steps small.
+# A balancing robot leans to speed up or slow down: keep the steps small. Controller -> cmd_vel_nav -> this ->
+# cmd_vel_smoothed -> collision_monitor -> cmd_vel -> the adapter (which slews at 0.4 m/s^2 on top).
 velocity_smoother:
   ros__parameters:
     smoothing_frequency: 20.0
     stamp_smoothed_velocity_with_smoothing_time: False
-    scale_velocities: False
+    scale_velocities: True               # scale v and w together: the path curvature stays right while limited
     feedback: "OPEN_LOOP"
-    max_velocity: [0.22, 0.0, 1.0]
-    min_velocity: [-0.10, 0.0, -1.0]
-    max_accel: [0.3, 0.0, 1.5]
-    max_decel: [-0.4, 0.0, -2.0]
+    max_velocity: [0.20, 0.0, 1.0]
+    min_velocity: [-0.08, 0.0, -1.0]
+    max_accel: [0.25, 0.0, 1.2]          # ~1.5 deg of lean to speed up
+    max_decel: [-0.30, 0.0, -1.5]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
@@ -294,12 +321,23 @@ collision_monitor:
     source_timeout: 1.0
     base_shift_correction: True
     stop_pub_timeout: 2.0
-    polygons: ["FootprintApproach"]
+    # slow to half inside 0.28 m of anything (robot r 0.12), and never drive into a hit within 1.5 s: speed
+    # ramps down as an obstacle gets closer instead of a last-moment stop (a hard stop pitches the robot)
+    polygons: ["Slowdown", "FootprintApproach"]
+    Slowdown:
+      type: "circle"
+      radius: 0.28
+      action_type: "slowdown"
+      slowdown_ratio: 0.5
+      min_points: 6
+      visualize: True
+      polygon_pub_topic: "collision_monitor_slowdown"
+      enabled: True
     FootprintApproach:
       type: "polygon"
       action_type: "approach"
       footprint_topic: "/local_costmap/published_footprint"
-      time_before_collision: 1.2
+      time_before_collision: 1.5
       simulation_time_step: 0.1
       min_points: 6
       visualize: False

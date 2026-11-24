@@ -3,6 +3,8 @@
 Publishes /scan (LaserScan, laser frame), /odom (Odometry), /tf odom -> base_link, /tf_static base_link -> laser,
 /imu (Imu: pitch / roll / heading + rates), /robot_state (std_msgs/String, JSON), /battery (BatteryState),
 and with use_bridge_correction:=true /tf map -> odom from the bridge's own LD19 scan matcher.
+Station data (#98): /tf odom -> station_map (the station's map frame, from the bridge's correction), and latched
+/station/places and /station/zones (std_msgs/String, JSON as the bridge sends them, station_map frame).
 Subscribes /cmd_vel (Twist) -> station cmd_vel, only while the robot is armed in STATION mode, with a deadman.
 It never arms the robot, never changes its mode and never releases an E-stop.
 
@@ -18,6 +20,7 @@ from builtin_interfaces.msg import Time
 from geometry_msgs.msg import TransformStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import BatteryState, Imu, LaserScan
 from std_msgs.msg import String
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
@@ -48,6 +51,7 @@ class Adapter(Node):
                                max_turn_accel=float(P("max_turn_accel", 2.0).value),
                                deadman_s=float(P("deadman_s", 0.5).value))
         self.laser_height_override = float(P("laser_height_m", -1.0).value)   # < 0: from the bridge's lidar.json
+        self.station_frame = P("station_frame", "station_map").value          # "" = no station frame / places / zones
 
         self.pub_scan = self.create_publisher(LaserScan, "scan", 10)
         self.pub_odom = self.create_publisher(Odometry, "odom", 20)
@@ -57,6 +61,12 @@ class Adapter(Node):
         self.tfb = TransformBroadcaster(self)
         self.static_tfb = StaticTransformBroadcaster(self)
         self.create_subscription(Twist, "cmd_vel", self.on_cmd_vel, 10)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=ReliabilityPolicy.RELIABLE)
+        self.pub_places = self.create_publisher(String, "station/places", latched)
+        self.pub_zones = self.create_publisher(String, "station/zones", latched)
+        self.station_corr = None                         # newest bridge correction (station map <- odom)
+        self.station_seen = {"places": None, "zones": None}
 
         self.clock_sync = cv.ClockSync()
         self.hello = None
@@ -138,6 +148,8 @@ class Adapter(Node):
                 self.on_state(m)
             elif t == "ros_hello":
                 self.on_hello(m)
+            elif t in ("places", "zones") and self.station_frame:
+                self.on_station(t, m)
             elif t == "error":
                 self.get_logger().warn("bridge: %s" % m.get("text"))
         except Exception as e:
@@ -182,6 +194,8 @@ class Adapter(Node):
         s.range_min, s.range_max = L["range_min"], L["range_max"]
         s.ranges = cv.scan_ranges(m, L["range_min"], L["range_max"])
         self.pub_scan.publish(s)
+        if m.get("corr") is not None:
+            self.station_corr = m["corr"]
         if self.use_bridge_correction and m.get("corr") is not None:
             self.publish_corr(m["corr"], m["ts"])
 
@@ -243,6 +257,8 @@ class Adapter(Node):
                 tf.transform.translation.x, tf.transform.translation.y = r["x"], r["y"]
                 tf.transform.rotation.x, tf.transform.rotation.y, tf.transform.rotation.z, tf.transform.rotation.w = q
                 tfs.append(tf)
+        if tfs and self.station_frame:
+            tfs.append(self.station_tf(tfs[-1].header.stamp))
         if tfs:
             self.tfb.sendTransform(tfs)
         if self.use_bridge_correction and self.last_corr is not None and tfs:
@@ -262,6 +278,33 @@ class Adapter(Node):
         self.pub_batt.publish(b)
         if self.use_bridge_correction and m.get("corr") is not None:
             self.last_corr = m["corr"]
+        if m.get("corr") is not None:
+            self.station_corr = m["corr"]
+
+    # ------------------------------------------------------------ station places / zones (#98)
+    def station_tf(self, stamp):
+        """odom -> station_map from the bridge's correction (identity until the first one arrives)."""
+        x, y, yaw = cv.station_frame_tf(self.station_corr)
+        tf = TransformStamped()
+        tf.header.stamp = stamp
+        tf.header.frame_id = self.odom_frame
+        tf.child_frame_id = self.station_frame
+        tf.transform.translation.x, tf.transform.translation.y = x, y
+        q = cv.quat_yaw(yaw)
+        tf.transform.rotation.x, tf.transform.rotation.y, tf.transform.rotation.z, tf.transform.rotation.w = q
+        return tf
+
+    def on_station(self, t, m):
+        """The bridge sends places / zones to every client on connect and after each change: republish (latched)
+        when they changed. The points stay in the station's map frame (mm), as sent."""
+        m = {k: v for k, v in m.items() if k in ("t", "map", "items", "undo")}
+        m["frame"] = self.station_frame
+        text = json.dumps(m, separators=(",", ":"))
+        if text == self.station_seen[t]:
+            return
+        self.station_seen[t] = text
+        (self.pub_places if t == "places" else self.pub_zones).publish(String(data=text))
+        self.get_logger().info("station %s: %d on map %s" % (t, len(m.get("items") or []), m.get("map")))
 
     # ------------------------------------------------------------ cmd_vel -> station
     def on_cmd_vel(self, tw):

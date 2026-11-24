@@ -1,0 +1,31 @@
+# Gamepad -> /cmd_vel (teleop_twist_joy) -> the adapter's safety gate (armed + STATION, 0.5 s deadman, caps, slew).
+# Mapping for an Xbox-style pad (Linux xpad / SDL numbering); see docs/ros2.md "Gamepad".
+#   hold LB (button 4) = deadman: nothing moves without it; release = stop
+#   hold RB (button 5) instead = "turbo" (faster caps below)
+#   left stick up/down (axis 1) = forward / back, left stick left/right (axis 0) = turn
+joy_node:
+  ros__parameters:
+    device_id: 0
+    deadzone: 0.12
+    autorepeat_rate: 20.0          # keeps /cmd_vel flowing while the stick is held still (the adapter's deadman)
+    coalesce_interval_ms: 20
+
+teleop_twist_joy_node:
+  ros__parameters:
+    require_enable_button: true
+    enable_button: 4
+    enable_turbo_button: 5
+    axis_linear:
+      x: 1
+    scale_linear:
+      x: 0.12                      # m/s at full stick (the adapter caps at 0.25)
+    scale_linear_turbo:
+      x: 0.22
+    axis_angular:
+      yaw: 0
+    scale_angular:
+      yaw: 0.8                     # rad/s
+    scale_angular_turbo:
+      yaw: 1.0
+    inverted_reverse: false
+    publish_stamped_twist: false

@@ -1,6 +1,8 @@
-"""Send one Nav2 goal and log what happened (for tests and docs).
+"""Send one Nav2 goal and log what happened (for tests and docs); go_to: the same to a saved station place.
 
   ros2 run sbr3_ros goal_test --ros-args -p x:=2.0 -p y:=0.5 -p yaw:=0.0 -p out:=/tmp/nav_goal.json
+  ros2 run sbr3_ros go_to --ros-args -p place:=Kitchen       (a place saved on the phone, see places.py; the goal
+                                                              heading is the direction the robot comes from)
 
 Records the robot pose in the map frame (tf map -> base_link, 5 Hz) and the newest global plan (/plan), and writes them
 with the result to `out` (JSON): {"goal": [x, y, yaw], "result": "succeeded|aborted|canceled|timeout|rejected",
@@ -19,6 +21,7 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 
 from .convert import quat_yaw
+from .places import StationPlaces
 
 RESULTS = {4: "succeeded", 5: "canceled", 6: "aborted"}
 
@@ -30,6 +33,7 @@ class GoalTest(Node):
         self.goal = (float(P("x", 1.0).value), float(P("y", 0.0).value), float(P("yaw", 0.0).value))
         self.timeout = float(P("timeout", 180.0).value)
         self.out = P("out", "/tmp/sbr3_nav_goal.json").value
+        self.place = P("place", "").value
         self.tf = Buffer()
         self.tfl = TransformListener(self.tf, self)
         self.track, self.plan, self.first_plan = [], [], None
@@ -38,6 +42,21 @@ class GoalTest(Node):
         self.client = ActionClient(self, NavigateToPose, "navigate_to_pose")
         self.t0 = None
         self.result = None
+        self.places = StationPlaces(self, self.tf) if self.place else None
+
+    def resolve_place(self):
+        """place:=name -> self.goal in the map frame, heading from the robot towards it. -> error text or None"""
+        if not self.places.wait(15.0):
+            return "no /station/places (is the adapter connected to the bridge?)"
+        try:
+            name, x, y = self.places.resolve(self.place)
+        except (KeyError, RuntimeError) as e:
+            return str(e)
+        rp = self.places.robot_pose()
+        yaw = math.atan2(y - rp[1], x - rp[0]) if rp and math.hypot(x - rp[0], y - rp[1]) > 0.05 else 0.0
+        self.goal = (x, y, yaw)
+        self.get_logger().info("place %s -> map (%.2f, %.2f)" % (name, x, y))
+        return None
 
     def on_plan(self, p):
         pts = [[round(s.pose.position.x, 3), round(s.pose.position.y, 3)] for s in p.poses]
@@ -56,6 +75,11 @@ class GoalTest(Node):
                            round(tf.transform.translation.y, 3), round(yaw, 3)])
 
     def run(self):
+        if self.places is not None:
+            err = self.resolve_place()
+            if err:
+                self.get_logger().error(err)
+                return "no_place"
         self.get_logger().info("waiting for navigate_to_pose ...")
         if not self.client.wait_for_server(timeout_sec=120.0):
             return "no_server"

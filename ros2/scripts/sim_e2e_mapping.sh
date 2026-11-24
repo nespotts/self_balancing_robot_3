@@ -1,7 +1,8 @@
 #!/bin/bash
 # End-to-end mapping test with the simulator, headless (no RViz):
 #   sim (--lidar --tour) -> bridge ROS stream -> adapter -> slam_toolbox; map snapshots every SNAP_S seconds.
-#   bash ros2/scripts/sim_e2e_mapping.sh [OUT_DIR] [SECONDS]      (SIM_EXTRA="--drift 3": odometry drift)
+#   bash ros2/scripts/sim_e2e_mapping.sh [OUT_DIR] [SECONDS]      (SIM_EXTRA="--drift 3": odometry drift;
+#   SLAM_PARAMS=/path/to.yaml: other slam_toolbox params)
 # Leaves OUT_DIR/map_<t>s.{yaml,pgm,png}, map_final.*, topic_hz.txt, frames.gv/.png, *.log
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -20,7 +21,8 @@ trap cleanup EXIT
 (cd "$REPO" && exec python3 -m station.sim --lidar --tour $SIM_EXTRA --http-port 8080 --log-dir "$HOME/sbr3-sim/logs") > "$OUT/sim.log" 2>&1 &
 SIM_PID=$!
 sleep 3
-ros2 launch sbr3_ros mapping.launch.py url:=ws://127.0.0.1:8080/ws rviz:=false > "$OUT/launch.log" 2>&1 &
+ros2 launch sbr3_ros mapping.launch.py url:=ws://127.0.0.1:8080/ws rviz:=false ${SLAM_PARAMS:+slam_params:=$SLAM_PARAMS} \
+  > "$OUT/launch.log" 2>&1 &
 LAUNCH_PID=$!
 T0=$(date +%s)
 snap() {

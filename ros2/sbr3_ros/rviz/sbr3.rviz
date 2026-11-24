@@ -126,6 +126,26 @@ Visualization Manager:
         Depth: 5
       Color: 0; 200; 255
       Value: true
+    - Class: rviz_default_plugins/Map
+      Name: Keep-out zones
+      Enabled: true
+      Topic:
+        Value: /keepout_filter_mask
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Color Scheme: costmap
+      Alpha: 0.35
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Station places + zones
+      Enabled: true
+      Topic:
+        Value: /station/markers
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

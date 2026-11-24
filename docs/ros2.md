@@ -1,12 +1,40 @@
 # ROS 2 on the PC (WSL2): slam_toolbox + Nav2
 
-Issue #96. ROS 2 Jazzy runs on the Windows PC in WSL2. The robot does not change: the bridge sends a small opt-in stream, and an adapter turns it into ROS topics.
+Issues #96 and #98. ROS 2 Jazzy runs on the Windows PC in WSL2. The robot does not change: the bridge sends a small opt-in stream, and an adapter turns it into ROS topics.
+
+| I want to | Run (PowerShell, repo root) | Section |
+|---|---|---|
+| Record a run | `ros2\record_run.ps1` | [Record and replay](#record-and-replay-rosbag2) |
+| Make a map, save it | `ros2\run_mapping.ps1`, `ros2\save_map.ps1 -Name room` | [Saved maps](#saved-maps-and-localization) |
+| Drive on a saved map | `ros2\run_localize.ps1 -Map room` | [Saved maps](#saved-maps-and-localization) |
+| Go to a place / patrol | `ros2\go_to.ps1 -Place kitchen`, `ros2\patrol.ps1 -Places "A,B"` | [Places](#places-and-patrols) |
+| Keep out of zones | automatic (zones drawn on the phone) | [Keep-out zones](#keep-out-zones) |
+| Drive with a gamepad | `ros2\teleop.ps1` | [Gamepad](#gamepad-optional) |
+| First time with the real robot | | [Checklist](#first-real-robot-session-checklist) |
 
 <p>
 <img src="img/ros2/rviz-nav2-driving-sim.png" width="49%">
 <img src="img/ros2/sim-nav2-goal1-reached.png" width="40%">
 </p>
 <p>Nav2 drives the sim robot through the bridge (RViz on WSLg), and the goal is reached on the slam_toolbox map. Blue lines are the sim's true walls.</p>
+
+## First real-robot session (checklist)
+
+Tonight's order: **record first, map, save, localize, then navigate.** Each step works before the next starts.
+
+| # | Do | Check |
+|---|---|---|
+| 0 | Robot on its stand, then on the floor. Phone: **Arm & Balance**, then **Manual** | the robot stands; STOP works |
+| 1 | Window 1: `powershell -File ros2\record_run.ps1 -Name first` | it prints the bag path. Leave it running all session |
+| 2 | Window 2: `powershell -File ros2\run_mapping.ps1` | RViz: red scan points on the walls, the map grows |
+| 3 | Drive slowly round the room with the phone joystick. Come back to the start (loop closure) | walls stay straight and single, no doubled walls |
+| 4 | Window 3: `powershell -File ros2\save_map.ps1 -Name room` | `~/maps/room.posegraph`, `.yaml`, `.pgm`, `.png` |
+| 5 | Ctrl+C window 2. Disarm, carry the robot somewhere else. `powershell -File ros2\run_localize.ps1 -Map room`, then Arm & Balance + Manual (scans count only while it stands) | log `global match ... fit 0.9+`, RViz: scan on the walls, `/localization_quality` > 0.7 |
+| 6 | RViz **2D Goal Pose** 1 m away (Nav2 drives at up to 0.18 m/s) | it drives there smoothly; STOP on the phone stops it |
+| 7 | Save places on the phone (Map > Places), then `powershell -File ros2\go_to.ps1 -Place kitchen` | it arrives within ~15 cm |
+| 8 | Ctrl+C window 1 | the bag replays offline: `powershell -File ros2\replay.ps1 -Bag <path>` |
+
+If step 5 says `global match not convincing`, give the start: `-InitialPose "x,y,yaw"` (map metres, radians), or drive a little.
 
 ## Architecture
 
@@ -18,14 +46,21 @@ flowchart LR
   end
   subgraph PC["Windows PC, WSL2 Ubuntu 24.04, ROS 2 Jazzy"]
     A["sbr3_ros adapter"]
-    S["slam_toolbox"]
+    S["slam_toolbox<br>(mapping or localization)"]
+    M["loc_monitor"]
+    K["keepout_mask"]
     N["Nav2"]
+    G["go_to / patrol"]
     R["RViz (WSLg)"]
   end
-  B -- "WebSocket /ws<br>ros_scan 10 Hz, ros_odom 50 Hz,<br>ros_state 2 Hz (~19 KB/s)" --> A
+  B -- "WebSocket /ws<br>ros_scan 10 Hz, ros_odom 50 Hz,<br>ros_state 2 Hz (~19 KB/s),<br>places, zones" --> A
   A -- "/scan /odom /tf /imu<br>/robot_state /battery" --> S
-  A --> N
+  A -- "/station/places<br>/station/zones" --> K
+  A --> G
   S -- "/map, map->odom" --> N
+  M -- "/initialpose" --> S
+  K -- "keepout mask" --> N
+  G -- "goals" --> N
   N -- "/cmd_vel" --> A
   A -- "cmd_vel (mm/s, deg/s)<br>STATION only, deadman 0.5 s" --> B
   S --> R
@@ -36,6 +71,7 @@ flowchart LR
 |---|---|
 | `map -> odom` | slam_toolbox, or AMCL, or the bridge's own LD19 matcher (`localization:=bridge`) |
 | `odom -> base_link` | adapter, from telemetry (50 Hz) |
+| `odom -> station_map` | adapter: the station's own map frame (places, zones), from the bridge's scan-match correction |
 | `base_link -> laser` | adapter, static, from lidar.json: x, y, height (208 mm on the robot), **yaw 0** (the bridge already applies the mount yaw) |
 
 <img src="img/ros2/tf-tree.png" width="40%">
@@ -53,6 +89,7 @@ This sets up the following:
 | WSL distro **Ubuntu-24.04** | `%LOCALAPPDATA%\wsl\Ubuntu-24.04`, user `sbr3` (passwordless sudo). WSL older than 2.4 cannot `--install` it by name, so the script imports Canonical's official image after checking its SHA256 |
 | ROS 2 **Jazzy** (apt) | `ros-jazzy-desktop`, `ros-jazzy-slam-toolbox`, `ros-jazzy-navigation2`, `ros-jazzy-nav2-bringup`, colcon, rosdep, `python3-websocket` |
 | `sbr3_ros` | built in `~/sbr3_ws` from a copy of `ros2/sbr3_ros` (colcon never writes into the Windows checkout) |
+| #98 needs nothing more | rosbag2 + mcap, joy, teleop_twist_joy come with `ros-jazzy-desktop`; MPPI, RPP, the rotation shim, the collision monitor and costmap filters with `ros-jazzy-navigation2`; numpy with ROS |
 
 Disk: **~9 GB** (the distro's `ext4.vhdx`). It is safe to run again.
 
@@ -119,6 +156,169 @@ WSL2's default NAT networking is fine here: WSL connects out to the robot. Nothi
 
 The adapter has not been run against the real robot yet: it was tested on the sim only.
 
+## Record and replay (rosbag2)
+
+<img src="img/ros2/bag-live-vs-offline.png" width="90%">
+
+The same 150 s sim run: the live map (left) and the map rebuilt offline from its bag (right). Both have 100 % of their wall cells within 10 cm of the true walls.
+
+| | Command |
+|---|---|
+| Record (2nd window) | `powershell -File ros2\record_run.ps1 [-Name kitchen] [-Seconds 120]` |
+| What | `/scan /odom /imu /tf /tf_static /robot_state /battery /cmd_vel /map` + Nav2, localization and station topics that are live |
+| Where | `~/sbr3-bags/<date>_<time>_<name>` in WSL (mcap); Windows: `\\wsl.localhost\Ubuntu-24.04\home\sbr3\sbr3-bags` |
+| Size | ~14 MB for 150 s (~95 KB/s) |
+| Replay: rebuild the map | `powershell -File ros2\replay.ps1 -Bag <path> [-SlamParams <yaml>] [-Rate 2]`, then `save_map.ps1 -Name room2` |
+| Replay: localize on a map | `powershell -File ros2\replay.ps1 -Bag <path> -Mode amcl -Map room` |
+
+```mermaid
+flowchart LR
+  B["bag (mcap)"] -- "--clock, /tf as /bag/tf" --> F["bag_tf_filter<br>drops map->odom"]
+  F -- "/tf" --> S["slam_toolbox or AMCL<br>use_sim_time"]
+  B -- "/scan /odom /tf_static" --> S
+  S -- "/map, map->odom" --> R["RViz / save_map"]
+```
+
+The adapter is off during a replay: the bag is the robot. Its own `map -> odom`, `/map` and localization topics move under `/bag/...`, so the offline slam_toolbox / AMCL makes new ones. Change `config/slam_toolbox.yaml` (or pass `-SlamParams`) and replay the same bag to tune.
+
+## Saved maps and localization
+
+<p>
+<img src="img/ros2/localize-slam.png" width="98%">
+</p>
+
+slam_toolbox localization on the saved sim map. The robot starts 2.6 m from the map origin, turned 135 deg: the global match (0.5 s) finds it as soon as it stands. A Nav2 goal, then the robot is **kidnapped** (teleported 3.2 m): lost after 3 s, found again 4.9 s after the jump, then a second goal. Error 2-3 cm throughout.
+
+| Step | Command |
+|---|---|
+| Map, then save | `run_mapping.ps1`, then `save_map.ps1 -Name room`: `~/maps/room.posegraph/.data` (slam_toolbox) + `.yaml/.pgm` (AMCL, map_server) + `.png` |
+| Localize + Nav2 | `powershell -File ros2\run_localize.ps1 -Map room` |
+| AMCL instead | `... -Localization amcl` |
+| Known start pose | `... -InitialPose "0,0,0"` (map m, m, rad) |
+| Sim, started elsewhere | `... -Map simroom -Sim -SimStart "2600,-200,135"` (world mm, deg) |
+
+**How the robot finds itself (`loc_monitor`).** At start it matches the scan against the whole saved map (every free 10 cm cell x 120 headings, then a fine search: ~0.5 s) and sends the result to `/initialpose`. Every 0.5 s it checks the **scan fit**: the share of scan points within 10 cm of a map wall (`/localization_quality`). Below 0.35 for 3 s = lost (carried, kidnapped): it matches again and moves the pose, but only when the new pose explains the scan clearly better (fit >= 0.6 and +0.2). It never drives the robot.
+
+**slam_toolbox or AMCL?** slam_toolbox localization is the default. Same map, same runs in the sim:
+
+| | slam_toolbox localization | AMCL |
+|---|---|---|
+| Found at start (global match) | 0.1 s after arming | 0.5 s |
+| Error standing / driving | 2.8 / 1.9-2.1 cm (max 3.6 cm) | 4.6 / 4.2-4.6 cm (max 6.4 cm) |
+| Kidnapped 3.2 m: found again | 4.9 s | 4.9 s |
+| Error after the kidnap | 2.2 cm | 5.7 cm |
+| Needs | `.posegraph` (save_map.ps1 saves it) | `.yaml/.pgm` only |
+
+slam_toolbox matches each scan against the saved scans of the graph: about 2x more precise here than AMCL's particles on a 5 cm grid. AMCL stays as the fallback (a map from elsewhere, only a `.pgm`). Both get the start and the kidnap recovery from `loc_monitor`. In both modes Nav2, `loc_monitor` and the keep-out mask use the **saved** grid (`map_server` on `/map`): slam_toolbox localization keeps adding recent scans to the map it publishes, so that one goes to `/slam_toolbox/map`.
+
+<img src="img/ros2/localize-amcl.png" width="98%">
+
+<img src="img/ros2/loop-closure-drift6.png" width="90%">
+
+**Loop closure** is on (`do_loop_closing: true` in `config/slam_toolbox.yaml`): a loop needs 10 matched scans in a row (~2 m of driving at 20 cm per scan), searched within 3 m, with the fine-match bar at 0.45 against false loops. In the sim room, with odometry drifting 6 deg/min + 2 % (twice #96's test), 200 s of touring: loop closing on 100 % of wall cells within 10 cm (median 1.5 cm), off 100 % (median 1.8 cm). In a room this small the LD19 sees every wall from everywhere, so scan matching alone already holds the map; loop closure matters once the robot leaves the room and comes back (a flat, a corridor). Tune it offline on a recorded bag: `replay.ps1 -Bag <path> -SlamParams <yaml>`.
+
+## Places and patrols
+
+<img src="img/ros2/rviz-localize-places-sim.png" width="98%">
+
+RViz with `run_localize.ps1 -Map simroom -Sim -SimStart "2600,-200,135"`: the robot found itself on the saved map, then `go_to.ps1 -Place kitchen` (blue track; reached 14 cm from the saved spot). Green dots: the station's places; pink: a no-go square and a virtual wall drawn in the station, as keep-out cost.
+
+<img src="img/ros2/places-patrol.png" width="70%">
+
+Sim test (`scripts/sim_e2e_places.sh`): the robot starts 1.1 m from the saved map's origin, turned 90 deg, so the station's frame and the ROS map differ. Kitchen, Couch and Window are saved in the station as the phone does. `go_to Kitchen`, then a patrol Couch -> Window -> Kitchen, 2 loops, dwell 3 s:
+
+| | Result |
+|---|---|
+| Kitchen resolved to | map (3.31, 1.27); true spot (3.30, 1.30) |
+| go_to Kitchen | succeeded, 56 s (round the box) |
+| Patrol | succeeded, 160 s, nothing missed |
+| Closest true distance at each visit | 8-14 cm (Nav2's goal tolerance is 15 cm) |
+| Stood at each place | 3.3-6.9 s (dwell 3 s + settling) |
+
+Places are the ones saved on the phone (Map > Places, per robot profile #97). The adapter republishes the bridge's list as `/station/places` and the station's map frame as a TF frame (`odom -> station_map`, from the bridge's own scan-match correction), so a place lands in the right spot on the ROS map whichever localization runs.
+
+| | Command (with `run_localize.ps1` or `run_nav.ps1` running, robot armed in Manual) |
+|---|---|
+| Go to a place | `powershell -File ros2\go_to.ps1 -Place kitchen` (any case; Home works) |
+| Patrol | `powershell -File ros2\patrol.ps1 -Places "Kitchen,Couch,Home" -Loops 3 -Dwell 5` |
+| Forever | `-Loops 0`, Ctrl+C stops (cancels the Nav2 goal) |
+
+The patrol sends each place to Nav2's waypoint follower in turn and waits `-Dwell` s there itself (Jazzy's waypoint follower reads its pause only at startup); each place faces the way it is approached (no spin on arrival); a place Nav2 cannot reach is logged and skipped; it waits for a good pose (`loc_monitor` "ok") before it starts. RViz shows the places (green dots + names) and zone outlines.
+
+Places follow the station's own map alignment (its scan-match correction). If the phone shows the robot in the wrong spot, the places are off by the same amount: fix the station's pose first (Scan & correct on the phone).
+
+## Smoother driving: controller, velocity smoother, collision monitor
+
+<img src="img/ros2/nav-compare.png" width="98%">
+
+Same saved map, same start, same three goals; a 30 cm box (red) that is **not on the map** sits on the first leg. Measured in the sim (`scripts/sim_e2e_goals.sh` + `nav_metrics.py`):
+
+| | goals | time | path | min clearance (centre to wall) | stops / reversals | peak accel / decel (cmd) | lean change (p95) |
+|---|---|---|---|---|---|---|---|
+| #96: RPP, smoother 0.3 / 0.4 m/s² | 3 / 3 | 59 s | 8.66 m | 32 cm | 0 / 0 | 0.38 / 0.28 m/s² | 0.8 deg |
+| **#98: rotation shim + RPP, smoother 0.25 / 0.3, collision-monitor slowdown** | 3 / 3 | 66 s | 8.85 m | **35 cm** | 0 / 0 | **0.31 / 0.24 m/s²** | 0.9 deg |
+| MPPI (2 tries, vx_min 0 and -0.06) | 0 / 1 | | | | | | |
+
+**Choice: rotation shim + Regulated Pure Pursuit.**
+- A balancing robot leans to change speed but turns on the spot for free: the shim turns first (path > 35 deg off), then RPP drives an arc it can lean into gently. RPP never reverses, slows for tight curves, near obstacles (cost-regulated) and into the goal.
+- MPPI overshot the first goal and then stalled 0.2-0.3 m short ("failed to make progress") in both tries; it is also the heavier controller (1500 sampled trajectories per step, a concern on the robot's Pi later). It stays an option for a later tuning pass (`scripts/nav2_variant.py` makes its params file).
+- 12 % slower, for 3 cm more clearance and ~20 % gentler commanded acceleration / braking. The sim's lean barely changes (0.8 vs 0.9 deg, its floor noise dominates); on the real robot the softer steps should show more. The box: the collision monitor halved the speed while passing it (the dip at 8 s); the plan went round it (the global costmap sees it on the scan).
+
+| Layer | #98 setting |
+|---|---|
+| Controller | rotation shim (turn first > 35 deg, 0.7 rad/s, 1.2 rad/s²) + RPP 0.18 m/s, look-ahead 0.3-0.7 m scaled with speed, approach slow-down from 0.6 m |
+| Velocity smoother | 0.25 m/s² up, 0.3 m/s² down (~1.5 deg of lean), 1.2 / 1.5 rad/s², v and w scaled together |
+| Collision monitor | half speed within 0.28 m of anything (robot r 0.12 m); "approach": never closer than 1.5 s to a hit |
+| Costmaps | inflation 0.45 m, softer (3.0): plans keep off walls where there is room |
+| Adapter (unchanged) | caps 0.25 m/s, 1 rad/s, slew 0.4 m/s² |
+
+## Keep-out zones
+
+<img src="img/ros2/keepout.png" width="98%">
+
+Sim test (`scripts/sim_e2e_keepout.sh`): walls drawn in the station (as on the phone) while ROS runs, the same goal (by the small box) three times:
+
+| Zones | Result |
+|---|---|
+| 1. A wall from the south wall to y = -0.2 m | **routes around its end**: succeeded, 28 s; the plan bends north round the lethal band + soft margin |
+| 2. Two more walls close the gap and the way north of the big box | **fails cleanly**: no plan, Nav2 aborts after 21 s of retries; the robot never moved towards the wall (0 track points on any wall) |
+| 3. Zones cleared on the station | the direct route again, succeeded, 31 s. Each change reached the mask in < 1 s |
+
+The station's **virtual walls, no-go zones, fence and mazes** (drawn on the phone, per robot) become a Nav2 **keepout filter** mask:
+
+```mermaid
+flowchart LR
+  P["phone: Map > Draw"] --> B["bridge zones<br>(station map, mm)"]
+  B -- "zones msg" --> A["adapter<br>/station/zones"]
+  A --> K["keepout_mask<br>TF map <- station_map<br>+ 15 cm (robot radius)"]
+  K -- "/keepout_filter_mask<br>/costmap_filter_info" --> N["Nav2 global + local costmap<br>KeepoutFilter"]
+```
+
+- Kept in sync: the mask is rebuilt when a zone changes (~1 s), when the map grows, or when relocalization moves the station frame by > 3 cm / 1 deg.
+- Each shape grows by 15 cm (robot radius 12 cm + margin) of lethal cost, then a 30 cm soft band: filters are applied after the inflation layer, and without the band plans grazed the lethal edge and the controller stopped for a "collision ahead".
+- Slow zones are not keep-out (the bridge still enforces them, and its zone watchdog stays on in STATION mode).
+- Off: `run_localize.ps1 -NoKeepout`.
+
+## Gamepad (optional)
+
+`teleop_twist_joy` -> `/cmd_vel` -> the adapter's safety gate (armed + STATION only, 0.5 s deadman, 0.25 m/s / 1 rad/s caps, slew).
+
+| Pad (Xbox-style) | Does |
+|---|---|
+| **LB** (hold) | deadman: nothing moves without it; let go = stop |
+| **RB** (hold, instead of LB) | turbo: faster caps |
+| Left stick up / down | forward / back, 0.12 m/s full stick (turbo 0.22) |
+| Left stick left / right | turn, 0.8 rad/s (turbo 1.0) |
+
+```powershell
+powershell -File ros2\teleop.ps1                 # next to run_mapping.ps1 / run_localize.ps1
+powershell -File ros2\teleop.ps1 -WithAdapter    # nothing else running
+```
+
+WSL2 does not see USB pads by itself: attach it once from an admin PowerShell with [usbipd-win](https://github.com/dorssel/usbipd-win) (`usbipd list`, `usbipd bind --busid <id>`, `usbipd attach --wsl --busid <id>`). Mapping: `config/teleop_joy.yaml`. Don't drive while Nav2 has a goal: both publish `/cmd_vel`.
+
+Tested in the sim with fake `/joy` messages (no pad here): stick pushed without LB: no `/cmd_vel`, the robot stays; with LB: 63 `/cmd_vel` at 0.12 m/s, the robot drove 0.37 m in 4 s; LB released: it stopped. `/cmd_vel` has one publisher (teleop) and one subscriber (the adapter).
+
 ## Safety
 
 | Rule | Where |
@@ -127,7 +327,9 @@ The adapter has not been run against the real robot yet: it was tested on the si
 | `/cmd_vel` drives only when the robot is armed, in **STATION**, with no E-stop and live telemetry; anything else is logged once and ignored | `convert.drivable` |
 | Deadman: no `/cmd_vel` for 0.5 s means one zero command, then silence. The bridge stops forwarding after 300 ms, and the firmware after its own timeout | `convert.CmdGate` |
 | Caps 0.25 m/s, 1.0 rad/s; slew 0.4 m/s², 2 rad/s² (adapter params `max_*`) | adapter |
-| Nav2: 0.18 m/s, velocity smoother 0.3 m/s² up and 0.4 m/s² down (a balancing robot leans to speed up) | `config/nav2.yaml` |
+| Nav2: 0.18 m/s, velocity smoother 0.25 m/s² up and 0.3 m/s² down (a balancing robot leans to speed up); collision monitor: half speed within 0.28 m of anything, no driving into a hit within 1.5 s | `config/nav2.yaml` |
+| Keep-out zones from the station in Nav2's costmaps (the bridge's zone watchdog stays on too) | `keepout_mask` |
+| `loc_monitor`, `go_to`, `patrol`, gamepad: none of them arms or changes the mode; they only reach the robot through `/cmd_vel` and the adapter | |
 | The Teensy keeps the last word: obstacle stop / slow-down in STATION, the link watchdog, E-stop, falls; the bridge's zones filter still applies | firmware, bridge |
 | Adapter closed: the bridge stops the robot at once (`cmd_vel 0`). Wi-Fi lost: no `cmd_vel` arrives, so forwarding stops after 300 ms | bridge |
 
@@ -166,6 +368,11 @@ The adapter has not been run against the real robot yet: it was tested on the si
 | Nav2 goal `outside bounds` | wait for the map to grow (`/map` every 2 s) before the first goal |
 | RViz window missing | WSLg comes with WSL 2: check that `echo $DISPLAY` prints `:0` in WSL. The RViz log line `indexed_8bit_image ... same texture image unit` is a harmless WSLg GL warning |
 | Costmap displays orange in mapping | normal: Nav2 is not running in `mapping.launch.py` |
+| `run_localize`: `global match not convincing` / robot drawn in the wrong spot | furniture moved a lot, or the room is very symmetric: give `-InitialPose "x,y,yaw"`, or RViz **2D Pose Estimate**, then drive a little |
+| `/localization_quality` stays < 0.6 | the map is old (furniture), or it is the wrong map: map again and `save_map.ps1` |
+| `go_to`: `no place called ...` | the list printed is what the bridge has for this robot's loaded map (places are per robot / map, #97) |
+| Goal refused next to a zone | the goal is inside a keep-out zone + 15 cm: pick a point further out |
+| `teleop.ps1`: nothing happens | the pad is not attached to WSL (`usbipd`), LB not held, or the robot is not armed in Manual |
 
 ## Package
 
@@ -173,15 +380,21 @@ The adapter has not been run against the real robot yet: it was tested on the si
 |---|---|
 | `ros2/sbr3_ros/sbr3_ros/adapter.py` | the node (`ros2 run sbr3_ros adapter --ros-args -p url:=...`) |
 | `ros2/sbr3_ros/sbr3_ros/convert.py` | conversions, clock sync, cmd_vel gate (no ROS, unit tested on Windows) |
-| `ros2/sbr3_ros/sbr3_ros/goal_test.py` | one Nav2 goal, logs the plan and track to JSON |
-| `ros2/sbr3_ros/launch/` | `mapping.launch.py`, `navigation.launch.py` (`localization:=slam\|amcl\|bridge`, `map:=`) |
-| `ros2/sbr3_ros/config/` | `slam_toolbox.yaml` (LD19, 5 cm, 20 cm / 0.2 rad per node), `nav2.yaml` (RPP, r 0.12 m footprint) |
-| `ros2/*.ps1`, `ros2/scripts/` | setup / run from PowerShell, build, e2e tests, `map_png.py` |
+| `ros2/sbr3_ros/sbr3_ros/goal_test.py` | one Nav2 goal (or `go_to`: a station place), logs the plan and track to JSON |
+| `.../loc_monitor.py`, `scanfit.py` | scan fit, global relocalization, kidnap recovery (numpy) |
+| `.../places.py`, `patrol.py` | station places in the map frame, waypoint-follower patrol |
+| `.../keepout_mask.py`, `keepout.py` | station zones -> keepout filter mask, RViz markers |
+| `.../bag_tf_filter.py`, `pose_logger.py` | replay helper; map pose / speed / pitch to CSV |
+| `ros2/sbr3_ros/launch/` | `mapping`, `navigation` (`localization:=slam\|amcl\|bridge`), `localize` (saved map), `replay`, `teleop` |
+| `ros2/sbr3_ros/config/` | `slam_toolbox.yaml` (LD19, 5 cm, loop closure), `nav2.yaml` (controller, smoother, collision monitor, keepout, AMCL), `teleop_joy.yaml` |
+| `ros2/*.ps1`, `ros2/scripts/` | setup / run from PowerShell, build, `sim_e2e_*.sh` tests + their `*_report.py` / `nav_metrics.py`, `map_png.py` |
 
-Tests: `python -m unittest discover -s ros2/sbr3_ros/test` (adapter, Windows or WSL), and `station/bridge/tests/test_ros_stream.py` (stream) inside the station suite.
+Tests: `python -m unittest discover -s ros2/sbr3_ros/test` (adapter, scan fit, places, keep-out; Windows or WSL), and `station/bridge/tests/test_ros_stream.py` + `station/sim/tests/test_extras.py` inside the station suite. Sim end-to-end (WSL): `sim_e2e_bag.sh`, `sim_e2e_localize.sh`, `sim_e2e_places.sh`, `sim_e2e_goals.sh`, `sim_e2e_keepout.sh`, `sim_e2e_teleop.sh`.
+
+Sim-only options used by these tests (`python -m station.sim --lidar ...`): `--start x,y,deg` (start pose; odometry reads 0 there), `--teleport-file PATH` (kidnap: write `x y deg`), `--truth-log PATH` (true pose CSV), `--box cx,cy,w,h` (an obstacle that is not on the saved map). `ros2/scripts/sim_station.py` saves places / zones in the local sim as the phone would (it refuses any other bridge).
 
 ## What's next
 
-- **Real robot:** first run with the robot on a stand, then on the floor, mapping only, then Nav2 at 0.1 m/s.
+- **Real robot:** the [checklist](#first-real-robot-session-checklist) above; Nav2 first at 0.1 m/s.
 - **On the robot's SBC** (#71: Pi 5 8 GB): run the same `sbr3_ros` there with `url:=ws://127.0.0.1:8080/ws`. slam_toolbox + Nav2 move with it, and the PC keeps RViz over DDS (same `ROS_DOMAIN_ID`; WSL needs mirrored networking for DDS discovery). Later the adapter could read the LD19 and the link directly and drop the WebSocket hop.
-- Loop closure / relocalisation on a saved map (`localization:=amcl`), and `localization:=bridge` to compare with the bridge's own matcher.
+- Slow zones as a Nav2 speed filter; `localization:=bridge` to compare with the bridge's own matcher.
