@@ -290,10 +290,10 @@ body[data-view="plots"] #view-plots { display: flex; flex-direction: column; gap
 .plot .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
 
 /* ---------- sensors (issue #19) ---------- */
-:root { --s0: #c98500; --s1: #d55181; }
+:root { --s0: #c98500; --s1: #d55181; --s2: #34c3c9; }
 .sens-key { margin-left: auto; font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
 .sens-key i, .sens-card .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
-.sens-key i.s0 { background: var(--s0); } .sens-key i.s1 { background: var(--s1); margin-left: 6px; }
+.sens-key i.s0 { background: var(--s0); } .sens-key i.s1 { background: var(--s1); margin-left: 6px; } .sens-key i.s2 { background: var(--s2); }
 #view-sensors { padding: 10px; }
 .sens { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
 .sens-bar { position: relative; display: flex; align-items: center; gap: 8px; min-height: 40px; }

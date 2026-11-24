@@ -12,6 +12,7 @@ from . import link_protocol as lp
 from . import falls as falls_mod
 from . import health as health_mod
 from .httpws import HttpServer, Response, check_origin
+from .lidar import Lidar
 from .mapping import Mapper
 from .planner import Planner
 from .session_log import SessionLog, to_csv
@@ -100,7 +101,8 @@ def _round_dict(d):
 class Bridge:
     def __init__(self, port, web_dir, log_dir, http_host="0.0.0.0", http_port=8080, baud=115200,
                  release_file=None, log_max_mb=DEFAULT_LOG_MAX_MB, quiet=False, map_dir=None,
-                 preset_dir="~/sbr3-presets", allow_any_origin=False, allow_hosts=(), allow_origins=(), falls_dir=None):
+                 preset_dir="~/sbr3-presets", allow_any_origin=False, allow_hosts=(), allow_origins=(), falls_dir=None,
+                 lidar_port=None):
         self.port = port
         self.baud = baud
         self.web_dir = web_dir
@@ -167,7 +169,9 @@ class Bridge:
         self.tools = TuningTools(self, preset_dir)          # Tune page: presets, scored runs, motor test (#16)
         self.mapper = Mapper(map_dir or os.path.join(self.log.dir, "maps"), say=self.say)   # main: ~/sbr3-maps
         self.range_listeners.append(self.mapper.on_range)
-        self.planner = Planner(self, NAV_STATE_NAMES)           # route planning + explore on the map
+        # LD19 spinning lidar (#76): "/dev/ttyS5", "COM7" or "tcp://host:port" (simulator); None = no lidar
+        self.lidar = Lidar(self.mapper, lidar_port, say=self.say, clock=_now) if lidar_port else None
+        self.planner =Planner(self, NAV_STATE_NAMES)           # route planning + explore on the map
 
         self.cmd = (0.0, 0.0)
         self.cmd_time = -10.0
@@ -335,6 +339,8 @@ class Bridge:
             self.log.tlm(d)
             self.falls.on_tlm(d, self.tlm_time)
             self.health.on_tlm(d, self.tlm_time)
+            if self.lidar:
+                self.lidar.on_tlm(d, self.tlm_time)           # pose / pitch history for the lidar scans (#76)
             if d["radio_ok"] and not self.remote_seen:
                 self.remote_seen = True
                 self.push_status()
@@ -361,6 +367,8 @@ class Bridge:
             self.health.on_log(text, _now())
             if text.startswith("pose reset"):     # remote or station: the default Home is where it happened
                 self.mapper.on_pose_reset()
+                if self.lidar:
+                    self.lidar.hist.clear()       # the pose jumped: never interpolate across it
             self.planner.on_log(text)             # "nav: stuck": replan with a larger margin (#62)
             m = GO_HOME_RE.match(text)
             if m:       # GO_HOME from the remote or a station event: route it around obstacles (#53)
@@ -512,6 +520,9 @@ class Bridge:
                 self.broadcast(json.dumps({"t": "ranges", "pts": pts}, separators=(",", ":")), droppable=True)
         for text in self.mapper.poll(now):                # occupancy grid tiles, ~2 Hz (#12)
             self.broadcast(text)
+        if self.lidar:
+            for text in self.lidar.poll(now):             # the live LD19 scan points, <= 3 Hz (#76)
+                self.broadcast(text, droppable=True)
         self.planner.tick(now)
         for meta in self.falls.tick(now):                 # a fall record was just saved
             self.broadcast(json.dumps({"t": "fall", "fall": meta}, separators=(",", ":")))
@@ -527,6 +538,8 @@ class Bridge:
             self.rng_hz = [c / dt if dt > 0 else 0.0 for c in self.rng_count]
             self.rng_count = [0, 0]
             self.last_rate = now
+            if self.lidar:
+                self.lidar.tick(now)
             self.push_status()
             self.log.flush()
         if now - self.last_health >= 1.0:
@@ -617,6 +630,7 @@ class Bridge:
             "tlm_base": self.hz_base,                      # ... and what it goes back to
             "log_error": self.log.error,                   # why the session log is off ("" = fine)
             "zone_alert": self.zone_alert,                 # zones watchdog (#70): last stop / joystick block
+            "lidar": self.lidar.status(now) if self.lidar else None,   # LD19 (#76): state, packets/s, rpm, CRC errors, scan age
         }
 
     def health_ctx(self):
@@ -625,7 +639,8 @@ class Bridge:
                 "tlm_hz": self.tlm_hz, "rng_hz": self.rng_hz, "crc_errors": self.parser.crc_errors,
                 "params": {p["name"]: p["value"] for p in self.params.values()}, "hello": self.hello,
                 "estop": self.estop, "robot_estop": self.robot_estop, "remote_seen": self.remote_seen,
-                "clients": self.client_count(), "log_error": self.log.error}
+                "clients": self.client_count(), "log_error": self.log.error,
+                "lidar": self.lidar.status() if self.lidar else None}
 
     def _push_health(self, now):
         """Once a second: the Health page + battery minutes (a few hundred bytes; reads /proc and /sys only)."""
@@ -771,6 +786,10 @@ class Bridge:
             if r is None and m.get("action") != "list":
                 self.planner.zones_changed()
             return r
+        elif t == "lidar":     # LD19 settings: get / set / defaults (#76)
+            if not self.lidar:
+                return {"t": "error", "text": "no lidar port configured (start the bridge with --lidar)"}
+            return self.lidar.command(m, who)
         elif t == "plan":      # route planning / explore: goto / home / explore / solve / stop / set
             if self.estop and m.get("action") in ("goto", "explore", "home", "solve"):
                 return {"t": "error", "code": "estop", "text": "E-stop is on: release it first"}
@@ -933,6 +952,8 @@ class Bridge:
         ws.send(self.mapper.places_msg())
         ws.send(self.mapper.scan_msg())                     # stop-and-scan corrections (#71)
         ws.send(self.mapper.zones_msg())
+        if self.lidar:
+            ws.send(self.lidar.msg())                       # LD19 settings + status (#76)
         ws.send(self.planner.msg())
         for item in list(self.logs)[-60:]:
             ws.send(json.dumps(dict(t="log", **{k: v for k, v in item.items() if k != "t"}, ts=item["t"])))
@@ -1113,4 +1134,7 @@ class Bridge:
         await http.start(self.http_host, self.http_port)
         self.say("web UI on http://%s:%d/  (robot link: %s)" % (
             "localhost" if self.http_host in ("0.0.0.0", "") else self.http_host, self.http_port, self.port))
-        await asyncio.gather(self.link_task(), self.tick_task())
+        jobs = [self.link_task(), self.tick_task()]
+        if self.lidar:
+            jobs.append(self.lidar.run())
+        await asyncio.gather(*jobs)

@@ -348,6 +348,80 @@ class Grid:
             self._mark_box(x0, x1, y0, y1)
             self.updates += 1
 
+    def integrate_scan(self, ox, oy, runs, margin_mm=0.0, margin_frac=0.02):
+        """One spinning-lidar revolution (#76), dense. ox, oy: sensor origin; runs: lists of world points (mm) in
+        rotation order, each list a stretch with no angular gap (the points of one run are neighbours, so the
+        space between them is seen too).
+        - free space: each run is the polygon origin -> its points, every point pulled back towards the origin by
+          margin_mm + margin_frac * range (range noise: do not erase the wall cell), filled by scanline: one
+          span per row, `translate` per span, so a 3 m scan costs a few hundred row operations, not 450 rays x 120 cells.
+        - hits: the cell of every point, plus a line between neighbours 2 - 5 cells apart (125 mm: a wall 8 m away has points 112 mm apart) (a wall seen from far
+          away is a line, not dots); each cell counts once per scan however many points land in it.
+        Hits win over free space (applied after it). Returns the number of cells marked occupied."""
+        pts = [p for run in runs for p in run]
+        if not pts:
+            return 0
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        xs.append(ox)
+        ys.append(oy)
+        self._cover(xs, ys)
+        res, W, H, g = self.res, self.W, self.H, self.cells
+        x0, y0 = self.x0, self.y0
+        cox, coy = (ox - x0) / res, (oy - y0) / res
+        floor, ceil, hypot = math.floor, math.ceil, math.hypot
+        lut = self.free_lut
+        hit = set()
+        for run in runs:
+            poly = [(cox, coy)]
+            prev = None
+            for x, y in run:
+                dx, dy = x - ox, y - oy
+                r = hypot(dx, dy)
+                k = 1.0 - (margin_mm + margin_frac * r) / r if r > 1e-6 else 0.0
+                k = k if k > 0.0 else 0.0
+                poly.append(((ox + dx * k - x0) / res, (oy + dy * k - y0) / res))
+                i, j = int(floor((x - x0) / res)), int(floor((y - y0) / res))
+                if 0 <= i < W and 0 <= j < H:
+                    hit.add(j * W + i)
+                    if prev is not None and 2 <= max(abs(i - prev[0]), abs(j - prev[1])) <= 5:
+                        hit.update(self.line_cells(prev[0], prev[1], i, j))
+                    prev = (i, j)
+                else:
+                    prev = None
+            if len(poly) < 3:
+                continue
+            rows = {}
+            poly.append(poly[0])
+            for (xa, ya), (xb, yb) in zip(poly, poly[1:]):
+                if ya == yb:
+                    continue
+                if ya > yb:
+                    xa, ya, xb, yb = xb, yb, xa, ya
+                j0, j1 = max(0, int(ceil(ya - 0.5))), min(H, int(ceil(yb - 0.5)))
+                if j1 <= j0:
+                    continue
+                slope = (xb - xa) / (yb - ya)
+                for j in range(j0, j1):
+                    c = xa + (j + 0.5 - ya) * slope
+                    if j in rows:
+                        rows[j].append(c)
+                    else:
+                        rows[j] = [c]
+            for j, cs in rows.items():
+                cs.sort()
+                b = j * W
+                for k in range(0, len(cs) - 1, 2):
+                    i0, i1 = max(0, int(ceil(cs[k] - 0.5))), min(W, int(ceil(cs[k + 1] - 0.5)))
+                    if i1 > i0:
+                        g[b + i0:b + i1] = g[b + i0:b + i1].translate(lut)
+        hl = self.hit_lut
+        for i in hit:
+            g[i] = hl[g[i]]
+        self._mark_box(min(xs), max(xs), min(ys), max(ys))
+        self.updates += 1
+        return len(hit)
+
     def clear_disc(self, x, y, r):
         """Cells whose centre is within r mm of (x, y) are observed free: the robot's own body stands there
         (a doorway it drove through is open, whatever far cone hits drew into it)."""

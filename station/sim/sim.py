@@ -1608,12 +1608,28 @@ BOOT_TEXT = b"\r\nTeensy 4.1 sim: plain-text boot output before the first frame\
 
 
 class SimServer:
-    def __init__(self, robot, host="127.0.0.1", port=5761, garbage=0.0, quiet=False):
+    def __init__(self, robot, host="127.0.0.1", port=5761, garbage=0.0, quiet=False, lidar=None, lidar_port=0):
         self.robot = robot
         self.host, self.port = host, port
         self.garbage = garbage
         self.quiet = quiet
         self.writer = None
+        self.lidar = lidar                 # lidar_sim.LidarSim: a fake LD19 on its own TCP port (issue #76)
+        self.lidar_port = lidar_port
+        self.lidar_writers = []
+
+    async def _lidar_client(self, reader, writer):
+        """The LD19 only transmits: whoever connects gets packets until it goes away."""
+        self.lidar_writers.append(writer)
+        if not self.quiet:
+            print("[sim] lidar client connected", flush=True)
+        try:
+            while await reader.read(256):
+                pass
+        except (ConnectionError, OSError):
+            pass
+        if writer in self.lidar_writers:
+            self.lidar_writers.remove(writer)
 
     async def _client(self, reader, writer):
         if self.writer:
@@ -1666,10 +1682,23 @@ class SimServer:
                     w.write(data)
                 except Exception:
                     self.writer = None
+            if self.lidar:
+                pk = self.lidar.step(robot, active=bool(self.lidar_writers))
+                if pk:
+                    for lw in list(self.lidar_writers):
+                        try:
+                            lw.write(pk)
+                        except Exception:
+                            self.lidar_writers.remove(lw)
 
     async def run(self):
         srv = await asyncio.start_server(self._client, self.host, self.port)
         if not self.quiet:
             print("[sim] fake Teensy on tcp://%s:%d" % (self.host, self.port), flush=True)
+        lsrv = None
+        if self.lidar:
+            lsrv = await asyncio.start_server(self._lidar_client, self.host, self.lidar_port)
+            if not self.quiet:
+                print("[sim] fake LD19 on tcp://%s:%d" % (self.host, lsrv.sockets[0].getsockname()[1]), flush=True)
         async with srv:
             await self.physics()
