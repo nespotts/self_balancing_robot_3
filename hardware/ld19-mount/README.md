@@ -93,7 +93,7 @@ pin 3 GND → GND · pin 4 5 V → 5 V. 230400 baud, 8N1. ~180 mA.
 | LD19 mounting face | 146.75 mm above the axle = **181.2 mm above the floor** |
 | **Scan plane** | 173.75 mm above the axle = **208.2 mm above the floor** (CAD wheel r = 34.46; 206.8 with the firmware's 33 mm) |
 | LD19 top | 216 mm above the floor (old head: 238) |
-| **Yaw** | LD19 0° (toward the single mounting ear) points **+X** (Teensy side). LD19 angles grow **clockwise** seen from above, so robot angle (CCW) = −LD19 angle |
+| **Yaw** | **Corrected 2026-11-24 from the real unit:** LD19 0° is the **arrow on its top, 90° CCW from the cable** seen from above (not toward the mounting ear). With the cable toward −X (Pi side) as modelled, 0° points to the robot's **right (−Y)**, so the bridge setting is `yaw_deg = -90`. LD19 angles grow **clockwise** seen from above |
 | Scan shadows | **none**: nothing above the deck but the LD19. Self-hits only if the robot pitches > ~18° (deck corner screws) / 31° fore-aft (deck edge) |
 
 ![top](img/top-yaw.png)

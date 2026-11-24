@@ -39,7 +39,8 @@ DEFAULTS = {
     # mount (issue #75): lidar axis relative to the axle centre, robot frame
     "x_mm": 0.0,                  # forward of the axle
     "y_mm": 0.0,                  # left of the axle
-    "yaw_deg": 0.0,               # direction of the LD19's 0 deg (its front, the side away from the cable) from robot forward, CCW +
+    "yaw_deg": 0.0,               # direction of the LD19's 0 deg (the arrow on its top; 90 deg CCW from the cable seen from above,
+                                  # checked on the real unit 2026-11-24) from robot forward, CCW +. Mount #75 (cable toward the Pi): -90
     "flip": False,                # mounted upside down: the angles then run counter-clockwise seen from above
     "height_mm": 200.0,           # scan plane above the floor (floor clip when the robot leans)
     # filters
