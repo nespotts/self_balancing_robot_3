@@ -348,7 +348,7 @@ def _safe(fn):
 class FallRecorder:
     def __init__(self, out_dir, params=None, session=None, say=None, max_files=MAX_FILES, max_mb=MAX_MB,
                  threaded=True, clock=time.monotonic, wall=time.time, pre_s=PRE_S, post_s=POST_S):
-        self.dir = os.path.abspath(os.path.expanduser(out_dir))
+        self.dir = os.path.abspath(os.path.expanduser(out_dir)) if out_dir else None   # None: no robot profile yet (#97)
         self.params_fn = params or (lambda: {})
         self.session_fn = session or (lambda: None)
         self.say = say or (lambda text: None)
@@ -533,7 +533,15 @@ class FallRecorder:
                 self._done.append(meta)
                 self._msgs.append("fall recorded: %s (%s)" % (meta["cause_label"], meta["id"]))
 
+    def set_dir(self, out_dir):
+        """Another robot profile (#97): records go to its folder from now on (writer threads finish first)."""
+        self.flush(2.0)
+        self.dir = os.path.abspath(os.path.expanduser(out_dir)) if out_dir else None
+        self._meta_cache.clear()
+
     def _build_and_save(self, p):
+        if not self.dir:
+            raise RuntimeError("fall not saved: no robot identified yet")
         t0 = p["now"]
         frames = p["frames"] + [fr for fr in p["post"] if fr[0] > t0 or fr[1] is not p["d"]]
         seen, uniq = set(), []
@@ -619,6 +627,8 @@ class FallRecorder:
     # ---------------------------------------------------------------- store
     def _files(self):
         out = []
+        if not self.dir:
+            return out
         try:
             names = os.listdir(self.dir)
         except OSError:
@@ -658,7 +668,7 @@ class FallRecorder:
         return out
 
     def path(self, name):
-        if not NAME_RE.match(name or ""):
+        if not self.dir or not NAME_RE.match(name or ""):
             return None
         p = os.path.join(self.dir, name)
         return p if os.path.isfile(p) else None

@@ -45,6 +45,35 @@ flowchart LR
 alarm, and Health shows **RC remote: off** in grey. If the phone leaves the Wi-Fi or the app is closed, the robot stops
 driving by itself within ~6 s and keeps balancing: [safety](../docs/safety.md).
 
+## Robot profiles: one Pi, several robots
+
+The bridge works out which robot it is plugged into from its HELLO (`sys.platform` param: 1 balancer, 2 shark; the
+simulator reports itself as `sim`; older firmware = `balancer`) and keeps that robot's data apart. The name shows in
+the top bar (wide screens), in the Health heading and on Logs. Move the Pi to another robot and the maps, places,
+zones, lidar and planner settings, presets and falls switch with it; nothing is ever mixed.
+
+<p>
+<img src="docs/screenshots/desktop-robot-name.png" width="62%">
+<img src="docs/screenshots/phone-robot-health.png" width="30%">
+</p>
+<p>The robot name: top bar on a wide screen (here <code>sim</code>), Health heading on the phone</p>
+
+```mermaid
+flowchart LR
+  H["HELLO + sys.platform"] --> N{{"robot name"}}
+  N --> M["~/sbr3-maps/NAME/<br>maps, places, zones,<br>settings, planner, lidar.json"]
+  N --> P["~/sbr3-presets/NAME/"]
+  N --> F["~/sbr3-falls/NAME/"]
+  L["~/sbr3-logs/<br>shared, robot name in each log"] ~~~ N
+```
+
+- **Nothing is written before the robot is known** (the first HELLO and its params, about a second after connecting).
+- **Different robot on a new connection:** the old robot's map is autosaved, then the new one starts empty with its own files.
+- `--robot NAME` (or `SBR3_ROBOT`) pins the profile and skips the detection (a bench robot without the param).
+- **First start after the update:** the old flat files (`~/sbr3-maps/*.json`, `*.png`, presets, falls) move into `balancer/`.
+  Each file is copied, checked (size + SHA-256), renamed into place and only then deleted from the old spot; a crash
+  or a failed check leaves the original untouched, and the next start finishes the job. Nothing is overwritten.
+
 ## Tour
 
 | Tab | |

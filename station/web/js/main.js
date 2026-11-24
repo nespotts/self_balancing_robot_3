@@ -79,8 +79,11 @@ function setPill(p, text, cls) {
   p.querySelector(".txt").textContent = text;
   p.className = "pill " + (cls || "");
 }
+const pRobot = document.getElementById("pill-robot");
 function updateTop() {
   const s = state.status, t = state.tlm;
+  pRobot.hidden = !s?.robot_name;                    // the robot profile in use (#97)
+  if (s?.robot_name) pRobot.querySelector(".txt").textContent = s.robot_name;
   if (!state.connected) setPill(pLink, "OFFLINE", "bad");
   else if (!s || s.link === "waiting") setPill(pLink, "NO ROBOT", "warn");
   else if (s.link === "released") setPill(pLink, "FLASHING", "warn");

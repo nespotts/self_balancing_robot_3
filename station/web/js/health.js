@@ -40,6 +40,7 @@ function render() {
   const pre = h.preflight;
   dot.className = "hl-dot lv-" + PRE[pre.level];
   text.textContent = stale ? "No data (bridge silent)" : pre.text;
+  document.getElementById("hl-robot").textContent = state.status?.robot_name || "";   // robot profile (#97)
   items.replaceChildren(...pre.items.map((i) => el("div", { class: "hl-row" },
     el("span", { class: "hl-dot lv-" + i.level }), i.label, el("span", { class: "hl-why" }, i.why))));
   battCard(h);

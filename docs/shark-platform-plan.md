@@ -529,7 +529,7 @@ Cliff read: per channel, ADC with the emitter **off**, then **on** (200 us), use
 
 ## 10. Station plan
 
-Little changes. The bridge reads `sys.platform` at HELLO and loads a **robot profile**.
+Little changes. The bridge reads `sys.platform` at HELLO and loads a **robot profile**. **Done (#97):** per-robot data folders `~/sbr3-maps/<robot>/`, `~/sbr3-presets/<robot>/`, `~/sbr3-falls/<robot>/`, the old flat files migrated into `balancer/`, `status.robot_name`, the name on Health / Logs / the top bar, `--robot` override, the sim on its own `sim` profile. What a profile still lacks is the Shark-specific *defaults* in the table below (radius, body_free_mm, ...): until then a new robot starts from the shared defaults and keeps whatever you set per folder.
 
 | Area | Balancer | Shark profile |
 |---|---|---|

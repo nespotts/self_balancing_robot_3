@@ -118,6 +118,15 @@ SHOTS = [  # name, device, view, js to run after the view is shown, extra wait s
      "setTimeout(()=>document.getElementById('arm-btn').click(),1800)", 2.5),
 ]
 
+# Robot profile (issue #97): the name in the top bar (wide screens), on Health and on Logs:
+#   python -m station.tools.screenshots --url http://localhost:8090/ robot
+SHOTS_ROBOT = [
+    ("desktop-robot-name", DESKTOP, "map", "", 2),
+    ("desktop-robot-health", DESKTOP, "health", "", 2.5),
+    ("phone-robot-health", PHONE, "health", "", 2.5),
+    ("phone-robot-logs", PHONE, "logs", "", 2),
+]
+
 # Tune page tools (issue #16): python -m station.sim --remote --http-port 8090, then
 #   python -m station.tools.screenshots --url http://localhost:8090/ --prep-tune tune
 SUB = "document.querySelector('#tune-sub [data-v=%s]').click();document.getElementById('view-tune').scrollTop=0;"
@@ -375,7 +384,7 @@ async def shoot(url, browser, names, port=9333):
         await cdp.call("Page.enable")
         os.makedirs(OUT, exist_ok=True)
         current = None
-        for name, (w, h, dpr, mobile), view, js, wait, *action in SHOTS + SHOTS_TUNE + SHOTS_BALPOINT + SHOTS_CALIB + SHOTS_FALLS:
+        for name, (w, h, dpr, mobile), view, js, wait, *action in SHOTS + SHOTS_TUNE + SHOTS_BALPOINT + SHOTS_CALIB + SHOTS_FALLS + SHOTS_ROBOT:
             if names and name not in names:
                 continue
             if current != (w, h, dpr, mobile):
@@ -420,6 +429,8 @@ def main():
     a = ap.parse_args()
     if a.names == ["tune"]:
         a.names = [s[0] for s in SHOTS_TUNE]
+    if a.names == ["robot"]:
+        a.names = [s[0] for s in SHOTS_ROBOT]
     if a.names == ["falls"]:
         a.names = [s[0] for s in SHOTS_FALLS]
     if a.names == ["calib"]:
