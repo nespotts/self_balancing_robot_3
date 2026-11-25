@@ -101,6 +101,8 @@ LOST_CENTRE_MIN_MM = 200.0  # ... when the last lidar fix is this far behind the
 CAND_STALE_S = 3.0         # a candidate pose no match agreed with for this long is dropped
 STRICT = {"score": 0.55, "inliers": 0.6, "margin": 0.15}
 RELAX = {"score": 0.3, "inliers": 0.35, "margin": 0.05}
+# a pose the whole-map search found clearly unique at a lower fit (reloc.UNIQUE, #110) is confirmed at that fit
+CONFIRM_RELAXED = {"score": 0.45, "inliers": 0.45, "margin": 0.15}
 STUCK_MM = 60.0            # lidar stuck: the body moved less than this ...
 STUCK_WHEEL_MM = 150.0     # ... while the wheels turned at least this much, for match_stuck_s
 STUCK_MODES = (lp.MODE_GOTO, lp.MODE_EXPLORE)
@@ -115,7 +117,10 @@ SET_ACCEPT = {"margin": 0.05}       # ... where a runner-up close by is no reaso
 SET_HOLD_S = 60.0          # after a Set position the automatic whole-map search waits this long (the user's word)
 RESET_NEAR_MM, RESET_NEAR_DEG = 500.0, 30.0   # a jump of the odometry to within this of 0, 0, 0: a pose reset / reboot
 
-FIELD_BUDGET_S = 0.02      # field update per turn (#102: Pi time); the tiles left over are done with the next turn
+FIELD_BUDGET_S = 0.01      # field update per turn (#102: Pi time); the tiles left over are done with the next turn
+#                            (#110: 10 ms, the other chains' steps - match, grid parts, link - share its loop round)
+WORKER_DRIVE_SHARE = 0.35  # (#110) the lost / whole-map search's share of a core while the robot drives
+DRIVE_MMS = 40.0           # ... "drives": GOTO / EXPLORE, or the wheels faster than this
 _POOL = []                 # the lost search's worker thread (#102), made on first use
 
 
@@ -199,8 +204,9 @@ class Field:
     def sync(self, grid):
         """Bring the field up to date with the grid (cheap when the walls did not change)."""
         if grid is not self.grid or grid.cells is not self.cells:
-            self._rebuild(grid)
-            return
+            if not (grid is self.grid and self._shift(grid)):
+                self._rebuild(grid)
+                return
         tiles, grid.fdirty = grid.fdirty, set()
         clock = time.perf_counter
         end = clock() + FIELD_BUDGET_S
@@ -212,8 +218,39 @@ class Field:
                 self.carried += 1
                 break
 
+    def _shift(self, grid):
+        """The grid grew (exploring: a tile of new ground at its edge, Grid._reshape): the old cells sit unchanged at
+        an offset in the new array, so the field is the old one moved by that offset (#110: no full rebuild, which
+        was up to ~150 ms on the Pi, every time the map grew). False if that is not what happened (a reset, a load)."""
+        W, H = self.W, self.H
+        dx, dy = getattr(self, "cx0", grid.cx0) - grid.cx0, getattr(self, "cy0", grid.cy0) - grid.cy0
+        W2, H2, new, T = grid.W, grid.H, grid.cells, grid.T
+        if getattr(grid, "gen", None) != getattr(self, "gen", -1) or getattr(grid, "reshapes", 0) == \
+                getattr(self, "reshapes", -1):
+            return False                     # a reset (Grid._start) or the cells swapped some other way
+        if dx < 0 or dy < 0 or dx + W > W2 or dy + H > H2 or dx % T or dy % T:
+            return False
+        # (cells the growing turn changed in the old area are in grid.fdirty: sync() goes over them next)
+        Wp2, Hp2 = W2 + 2 * PAD, H2 + 2 * PAD
+        f, Wp, Hp = self.f, self.Wp, self.Hp
+        f2 = bytearray(Wp2 * Hp2)
+        for j in range(Hp):
+            o = (j + dy) * Wp2 + dx
+            f2[o:o + Wp] = f[j * Wp:(j + 1) * Wp]
+        self.f, self.cells, self.W, self.H, self.Wp, self.Hp = f2, new, W2, H2, Wp2, Hp2
+        self.cx0, self.cy0 = grid.cx0, grid.cy0
+        self.reshapes = grid.reshapes
+        self.kern = [(dj * Wp2 + di, v) for di, dj, v in _KERNEL]
+        dtx, dty = dx // T, dy // T
+        self.masks = {(a + dtx, b + dty): m for (a, b), m in self.masks.items()}
+        self.ver += 1
+        self.shifts = getattr(self, "shifts", 0) + 1
+        return True
+
     def _rebuild(self, grid):
         self.grid, self.cells = grid, grid.cells
+        self.cx0, self.cy0 = grid.cx0, grid.cy0
+        self.gen, self.reshapes = getattr(grid, "gen", None), getattr(grid, "reshapes", 0)
         self.W, self.H = grid.W, grid.H
         self.Wp, self.Hp = grid.W + 2 * PAD, grid.H + 2 * PAD
         self.f = bytearray(self.Wp * self.Hp)
@@ -351,6 +388,10 @@ class Search:
         self.mv.release()
 
 
+def _nothing():
+    pass
+
+
 def _vertex5(y):
     """Peak offset (-1 .. 1 steps) of the least-squares parabola through samples at -2 .. 2 steps."""
     b = (-2 * y[0] - y[1] + y[3] + 2 * y[4]) / 10.0
@@ -358,9 +399,24 @@ def _vertex5(y):
     return 0.0 if a >= 0 else max(-1.0, min(1.0, -b / (2 * a)))
 
 
-def match(field, pts, cx, cy, window_mm=100.0, window_deg=3.0, min_score=0.4, min_inliers=0.5, min_curv=0.05,
-          min_margin=0.05, coarse_stride=1):
+def _drain(gen):
+    """Run a step generator (match_iter, LidarMatch.on_scan_iter) to its end: its return value."""
+    try:
+        while True:
+            next(gen)
+    except StopIteration as e:
+        return e.value
+
+
+def match(*args, **kw):
+    """match_iter() in one go."""
+    return _drain(match_iter(*args, **kw))
+
+
+def match_iter(field, pts, cx, cy, window_mm=100.0, window_deg=3.0, min_score=0.4, min_inliers=0.5, min_curv=0.05,
+               min_margin=0.05, coarse_stride=1, y=None):
     """Match thinned map-frame points (current correction) against the field around the robot at (cx, cy).
+    y: called between steps when the match runs in a worker thread (the lost search: loopprof.Throttle, #110).
     Returns a dict: ok, why, dx, dy (mm), dth (deg; rotate about (cx, cy), then shift), score (0..1), n, known, inliers,
     margin, curv [lambda_max, lambda_min, theta], along (degenerate direction, unit vector, or None), fix ("xy", "x'",
     "th" ...: what is corrected), ms. coarse_stride n: the coarse grid scores every n-th point only (a wide search,
@@ -386,11 +442,14 @@ def match(field, pts, cx, cy, window_mm=100.0, window_deg=3.0, min_score=0.4, mi
     try:
         coarse = []
         csc = sc_c.score
+        y = y or _nothing
         for kc in range(-nth, nth + 1):
             k = kc * COARSE_K
             for a in range(-nxy, nxy + 1):
+                y()
                 for b in range(-nxy, nxy + 1):
                     coarse.append((csc(k, a * COARSE_CELLS, b * COARSE_CELLS), k, a * COARSE_CELLS, b * COARSE_CELLS))
+            yield                                       # (#110) a step: the bridge may let the loop run here
         best = max(coarse)
         if best[0] <= 0:
             return done("no wall in reach")
@@ -400,6 +459,8 @@ def match(field, pts, cx, cy, window_mm=100.0, window_deg=3.0, min_score=0.4, mi
         cur, cur_s = (k, sx, sy), se.score(k, sx, sy)
         span = ((-2, -1, 0, 1, 2), (-1, 0, 1))
         for _ in range(12):
+            y()
+            yield
             nb = cur
             for dk in span[0]:
                 for dx in span[1]:
@@ -453,6 +514,7 @@ def match(field, pts, cx, cy, window_mm=100.0, window_deg=3.0, min_score=0.4, mi
             dth = 0.0
         out["fix"] = ("xy" if xy_ok and along is None else "x'" if xy_ok else "") + (" th" if th_ok else "")
         out.update(dx=round(dx, 1), dy=round(dy, 1), dth=round(dth, 3))
+        yield
         # score + inliers at the peak (only points that land in mapped cells count: new ground is not a mismatch)
         vals = se.values(k, sx, sy)
         cells, W, H = g.cells, g.W, g.H
@@ -527,6 +589,7 @@ class LidarMatch:
         self.history = collections.deque(maxlen=HISTORY_N)     # recent results: (ok, why) for the matched share
         self.stuck_listeners = []    # callables(): lidar stuck (#79), the bridge tells the robot
         self.tlm_mode = None         # robot mode from telemetry (on_tlm)
+        self.tlm_speed = 0.0         # ... and its speed (mm/s): driving -> the searches take less CPU (#110)
         self.reset()
 
     def reset(self):
@@ -593,9 +656,23 @@ class LidarMatch:
 
     def on_tlm(self, d, t):
         self.tlm_mode = d.get("mode")
+        self.tlm_speed = d.get("speed_mms", 0.0)
+
+    def _driving(self):
+        return self.tlm_mode in STUCK_MODES or abs(getattr(self, "tlm_speed", 0.0) or 0.0) > DRIVE_MMS
+
+    def _worker_share(self):
+        """(#110) The lost / whole-map search's share of a core: less while the robot drives (the loop needs the Pi
+        then: obstacles for the navigator, the link); standing still it may take what the loop leaves."""
+        return WORKER_DRIVE_SHARE if self._driving() else 1.0
 
     def on_scan(self, ox, oy, mx, my, mh, runs, pts):
-        """One turn about to be mapped: ox, oy the lidar origin, (mx, my, mh) the robot's map pose at mid-turn, runs /
+        """on_scan_iter() in one go."""
+        return _drain(self.on_scan_iter(ox, oy, mx, my, mh, runs, pts))
+
+    def on_scan_iter(self, ox, oy, mx, my, mh, runs, pts):
+        """(A step generator, #110: the bridge runs its steps in separate loop callbacks, ~20 ms of Pi time each.)
+        One turn about to be mapped: ox, oy the lidar origin, (mx, my, mh) the robot's map pose at mid-turn, runs /
         pts the points (map frame, current correction). Returns them, moved to the corrected pose when a match was
         applied; runs is None when this turn should not go into the map (see _map_now)."""
         S = self.m.settings
@@ -703,7 +780,7 @@ class LidarMatch:
                     res = self._lost_res(match(*args, coarse_stride=2), off, mm, deg)
                 else:
                     sel = thin_runs(runs, max(MIN_POINTS, int(S["match_points"])))
-                    res = match(self.field, sel, mx, my, S["match_window_mm"], S["match_window_deg"],
+                    res = yield from match_iter(self.field, sel, mx, my, S["match_window_mm"], S["match_window_deg"],
                                 S["match_min_score"], S["match_min_inliers"], S["match_min_curv"], S["match_min_margin"])
             except Exception as e:      # a matcher bug must never stop the mapping
                 self.field.invalidate()
@@ -765,11 +842,12 @@ class LidarMatch:
         touched meanwhile: nothing is mapped while lost, and no other search starts before this one is done."""
         gen = self.gen
         prof = getattr(self.m, "prof", loopprof.NULL)
+        share = self._worker_share()
 
         def work():
             with prof.thread("match.lost"):
                 try:
-                    return match(*args, coarse_stride=2)
+                    return match(*args, coarse_stride=2, y=loopprof.Throttle(share))
                 except Exception as e:
                     return {"ok": False, "why": "matcher error: %s: %s" % (type(e).__name__, e), "new": True,
                             "dx": 0.0, "dy": 0.0, "dth": 0.0}
@@ -1177,9 +1255,11 @@ class LidarMatch:
         self.tries += 1
         if res["ok"]:
             target = compose((res["dx"], res["dy"], res["dth"]), m.corr, mx, my)
-            strict = (res["score"] >= max(S["match_min_score"], STRICT["score"]) and
-                      res["inliers"] >= max(S["match_min_inliers"], STRICT["inliers"]) * res["known"] and
-                      res["margin"] >= max(S["match_min_margin"], STRICT["margin"]))
+            rl = self.reloc
+            st = CONFIRM_RELAXED if rl and rl.get("phase") == "confirming" and rl.get("relaxed") else STRICT
+            strict = (res["score"] >= max(S["match_min_score"], st["score"]) and
+                      res["inliers"] >= max(S["match_min_inliers"], st["inliers"]) * res["known"] and
+                      res["margin"] >= max(S["match_min_margin"], st["margin"]))
             c = self.cand
             if c is not None and now - c[4] > CAND_STALE_S:
                 c = None
@@ -1425,8 +1505,10 @@ class LidarMatch:
             self._global_done(res, p, key, gen, req, mx, my, corr0)
             return True
 
+        share = self._worker_share()
+
         def run():
-            return work(reloc.Yielder(cancel=lambda: gen != self.gen))
+            return work(reloc.Yielder(cancel=lambda: gen != self.gen, share=share))
 
         def done(fut):              # (worker thread)
             try:
@@ -1469,12 +1551,13 @@ class LidarMatch:
             self._set_corr(target)
             self._confirm_start(now)
             rl = self.reloc if by == "set" and self.reloc else {}
-            rl.update(info, phase="confirming", by=by, why=req["why"], t=now)
+            rl.update(info, phase="confirming", by=by, why=req["why"], t=now, relaxed=bool(res.get("relaxed")))
             self.reloc = rl
             self.state = "found on the map: confirming"
-            self.m.say("lidar: %s at %d, %d mm (moved %d mm, %+.0f deg; fit %d %%, margin %d %%, %.1f s): confirming"
+            self.m.say("lidar: %s at %d, %d mm (moved %d mm, %+.0f deg; fit %d %%%s, margin %d %%, %.1f s): confirming"
                        % ("pose matched" if by == "set" else "found on the map", round(res["x"]), round(res["y"]),
-                          round(moved), res["dth"], round(100 * res["score"]), round(100 * res["margin"]),
+                          round(moved), res["dth"], round(100 * res["score"]),
+                          " - low but unique" if res.get("relaxed") else "", round(100 * res["margin"]),
                           res["ms"] / 1000.0))
             return
         why = res.get("why") or "no fit"

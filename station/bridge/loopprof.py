@@ -9,6 +9,14 @@ Work in worker threads (planner jobs, autosave) is counted with `thread()`: it i
 GIL, so the stall line names it when it was running.
 The garbage collector's pauses count as the part "gc" (install_gc(); a full collection of a big heap is a stall too).
 Cost: two perf_counter() calls and a few dict operations per part (~1 us on a PC, ~10 us on the Pi Zero 2W).
+
+Worker threads give way to the loop (#110): CPython has one GIL. A worker running pure Python takes it back ~every
+switch interval, so while one runs the loop gets about half the CPU, and every system call the loop makes (a /proc read,
+a socket write) can cost it a whole interval to get the GIL back: on the Pi the Health tick went from ~5 to 40-130 ms
+while the lost search or the planner ran. So the long worker loops call worker_yield() often: while the loop is inside
+a timed part (it has work), the worker sleeps (releases the GIL) instead of competing; it waits at most YIELD_MAX_S in a
+row, so a saturated loop cannot starve it for ever. throttle() caps a worker's share of a core on top (the lost /
+whole-map search while the robot drives).
 """
 import gc
 import threading
@@ -17,6 +25,56 @@ import time
 WINDOW_S = 10.0
 STALL_LOG_S = 0.15         # a tick this late logs the top offenders (Bridge.tick_task)
 TOP_N = 3
+YIELD_SLEEP_S = 0.002      # a worker's nap while the loop is busy (its wake-up costs the loop one GIL hand-over)
+YIELD_MAX_S = 0.25         # ... at most this long in a row
+_ACTIVE = [None]           # the bridge's LoopProf (set_active): worker_yield() looks at its loop
+
+
+def set_active(prof):
+    """The LoopProf whose loop thread the workers give way to (the bridge's), None = off (tests, tools)."""
+    _ACTIVE[0] = prof
+    if prof is not None:
+        prof.main_ident = threading.get_ident()
+
+
+def loop_busy():
+    """True while the loop thread is inside a timed part (it has work to do)."""
+    p = _ACTIVE[0]
+    return p is not None and bool(p._stack)
+
+
+def worker_yield():
+    """Call often from long worker-thread loops (planner, lost / whole-map search): sleeps while the loop is busy.
+    Free when nothing is active (tests) and on the loop's own thread (a planner run synchronously)."""
+    p = _ACTIVE[0]
+    if p is None or not p._stack or threading.get_ident() == p.main_ident:
+        return
+    end = time.perf_counter() + YIELD_MAX_S
+    while p._stack and time.perf_counter() < end:
+        time.sleep(YIELD_SLEEP_S)
+
+
+class Throttle:
+    """A worker's duty cycle: call it often; after `share` x period of work it sleeps the rest of the period (and gives
+    way to the loop, worker_yield). share 1.0 = only worker_yield()."""
+    __slots__ = ("share", "period", "t0", "busy_until")
+
+    def __init__(self, share=1.0, period=0.03):
+        self.share, self.period = share, period
+        self.t0 = time.perf_counter()
+        self.busy_until = self.t0 + share * period
+
+    def __call__(self):
+        worker_yield()
+        if self.share >= 1.0:
+            return
+        now = time.perf_counter()
+        if now >= self.busy_until:
+            rest = self.t0 + self.period - now
+            if rest > 0:
+                time.sleep(rest)
+            self.t0 = time.perf_counter()
+            self.busy_until = self.t0 + self.share * self.period
 
 
 class _Part:
@@ -111,6 +169,7 @@ class LoopProf:
         self._threads = {}              # name -> jobs running now (worker threads)
         self.thread_s = {}              # name -> s of worker-thread time in the current window
         self.thread_ran = set()         # names that ran (or still run) since the last tick
+        self.main_ident = threading.get_ident()
 
     def install_gc(self):
         """Time the garbage collector's pauses on the loop's thread as the part "gc" (taken out of the part it hit)."""

@@ -62,8 +62,10 @@ class TestResetTracker(unittest.TestCase):
         self.assertIn("crash report", text)
 
     def test_power_on_mid_session_vs_flash(self):
-        r = ResetTracker()
+        r = ResetTracker(start=0.0)
         r.on_hello(hello(uptime_ms=60000), 0.0)
+        for t in range(1, 100):
+            r.note_alive(float(t))                                     # linked, telemetry flowing
         lvl, text = r.on_hello(hello(uptime_ms=800), 100.0)            # rebooted, cold, nobody flashed it
         self.assertEqual(lvl, "warn")
         self.assertIn("power was lost", text)
@@ -72,6 +74,41 @@ class TestResetTracker(unittest.TestCase):
         self.assertEqual(lvl, "info")
         r.note_released()
         lvl, _ = r.on_hello(hello(uptime_ms=500), 300.0)               # power-on after a release: expected too
+        self.assertEqual(lvl, "info")
+
+    def test_whole_robot_power_on_is_not_a_reset(self):
+        """#110, real robot 2026-11-25: the Pi and the Teensy power up together. The bridge's first link may see a
+        Teensy boot that the Pi's USB then powers down and up again (a second cold boot seconds later): that is the
+        robot powering up, not 'Teensy reset unexpectedly' (the Resets tile stays green)."""
+        r = ResetTracker(start=0.0)                                    # the bridge started
+        lvl, _ = r.on_hello(hello(uptime_ms=1242), 12.0)               # first link: a cold boot
+        self.assertEqual(lvl, "info")
+        r.note_alive(13.0)
+        r.note_alive(14.0)                                             # ... the link drops, the Teensy boots again
+        lvl, text = r.on_hello(hello(uptime_ms=1100), 17.0)
+        self.assertEqual(lvl, "info", text)
+        self.assertIsNone(r.status(20.0)["last"])
+        tl = H.reset_tile(r.status(20.0), {"fault_flags": 0}, hello())
+        self.assertEqual(tl["level"], "ok")
+        # later on: switched off for a minute and on again (the link was gone all that time): a normal boot too
+        for t in range(18, 400):
+            r.note_alive(float(t))
+        lvl, text = r.on_hello(hello(uptime_ms=1500), 470.0)
+        self.assertEqual(lvl, "info", text)
+        self.assertIn("off ~", text)
+        # ... but power lost while it ran (alive until a second before it booted again): unexpected
+        for t in range(471, 600):
+            r.note_alive(float(t))
+        lvl, text = r.on_hello(hello(uptime_ms=900), 600.5)
+        self.assertEqual(lvl, "warn", text)
+        self.assertEqual(H.reset_tile(r.status(601.0), {"fault_flags": 0}, hello())["level"], "warn")
+
+    def test_power_on_in_the_bridges_first_minute(self):
+        r = ResetTracker(start=100.0)
+        r.on_hello(hello(uptime_ms=30000), 101.0)                      # the Teensy was up before the Pi's bridge
+        for t in range(102, 140):
+            r.note_alive(float(t))
+        lvl, _ = r.on_hello(hello(uptime_ms=700), 140.5)              # the robot is still powering up
         self.assertEqual(lvl, "info")
 
     def test_v8_firmware_ignored(self):

@@ -10,7 +10,8 @@ Per scan (the same packets lidar.py maps, before its every_n / ray_step / mappin
      At least MIN_POINTS usable points.
   2. per point the lidar.py filters: range window, intensity, mask, floor clip; range * cos(elevation) (horizontal).
   3. deskew: each packet's pose (telemetry interpolated) -> the point in the odometry frame -> the robot frame of the
-     NEWEST telemetry pose; age_ms = how old that pose is now (the firmware dead-reckons that last bit).
+     NEWEST telemetry pose; age_ms = how old that pose is now (the firmware dead-reckons that last bit). Steps 1-3 are
+     lidar.Lidar.deskew (scan.turn), done once per turn for the map and the matcher too (#110).
   4. one point per 10 deg sector about the axle -> lp.encode_lidar_obstacles: the nearest point INSIDE the firmware's
      driving corridor (|y| <= its half width, nearest by the front / rear distance the firmware computes from it), else
      the nearest point (#99). Why: the firmware's front_ / rear_ are the minimum over the corridor points it gets, so
@@ -24,11 +25,18 @@ Nothing is sent while the lidar is silent / stopped, tilted or without a pose: 5
 falls back to the sweep, or to its blind rules (EXPLORE pauses, GOTO <= nav.blind_speed). Nor before the robot profile is
 bound (#97: lidar.json, the mount settings, is loaded then), see ready.
 """
+import cmath
 import math
+import operator
 import time
+from itertools import compress, groupby, repeat
 
 from . import link_protocol as lp
-from .lidar import MIN_POINTS, PITCH_ABS_MAX, POSE_STALE_S, TILT_REF_S, interp
+from .lidar import MIN_POINTS, POSE_STALE_S, TILT_REF_S
+
+_mul, _sub, _add, _mod, _le = operator.mul, operator.sub, operator.add, operator.mod, operator.le
+_IM = operator.attrgetter("imag")
+_INF = float("inf")
 
 MAX_SCAN_AGE_S = 0.25         # the scan's last packet is older than this when it gets here: not sent
 # src/navigator.cpp: kAxisFwd, kSensorOut, kHalfWidth (front = x - 38.9 for x >= 26, rear = 13.1 - x)
@@ -103,77 +111,54 @@ class LidarObstacles:
         if now - scan.t1 > MAX_SCAN_AGE_S:
             n["stale"] += 1
             return None
-        hist = L.hist.items()
+        turn = getattr(scan, "turn", False)
+        if turn is False:                               # (a scan that did not come through Lidar.on_scan)
+            turn = scan.turn = L.deskew(scan)
         tco = S["time_offset_ms"] / 1000.0
-        if not hist or hist[-1][0] < scan.t1 + tco - POSE_STALE_S:
+        if turn is None or turn.newest[0] < scan.t1 + tco - POSE_STALE_S:
             n["no_pose"] += 1
             return None
-        t_ref, x1, y1, h1, _p1 = hist[-1]               # newest pose: the frame of the points
+        t_ref, x1, y1, h1 = turn.newest                 # newest pose: the frame of the points
         age_ms = (now - t_ref) * 1000.0
         if age_ms > lp.LINK_LIDAR_MAX_AGE_MS:
             n["no_pose"] += 1
             return None
-        ref = pitch_ref(hist, S)
-        # the "project" gate even in "skip" mode: a balancing robot leans this much to speed up / slow down, and the
-        # map's 2.5 deg would drop a third of the scans while it drives (then the robot goes blind). Tilted beams
-        # still see what is in front of the robot; floor hits are clipped below, ranges are made horizontal.
-        limit = max(S["pitch_limit_deg"], S["pitch_max_deg"])
-        sgn = 1.0 if S["flip"] else -1.0                # the LD19 counts clockwise; flipped over it counts CCW
-        yaw, sx, sy = S["yaw_deg"], S["x_mm"], S["y_mm"]
-        rmin, rmax, qmin = S["min_range_mm"], S["max_range_mm"], S["min_intensity"]
-        clip, height, deskew = S["floor_clip"], S["height_mm"], S["deskew"]
-        mtab = L._mask
-        radians, cos, sin, tan, atan2 = math.radians, math.cos, math.sin, math.tan, math.atan2
-        c1, s1 = cos(radians(h1)), sin(radians(h1))
-        nsec = lp.LINK_LIDAR_SECTORS
-        k_sec = nsec / (2.0 * math.pi)
-        half = corridor_half(self.params() if self.params else {})
-        best = [None] * nsec                            # (key, x, y): in the corridor first (#99), see the docstring
-        used = 0
-        idx = 0
-        if not deskew:
-            _, px, py, ph, pp = interp(hist, 0, scan.t1 + tco)
-        for pk in scan.packets:
-            if deskew:
-                idx, px, py, ph, pp = interp(hist, idx, pk.t + tco)
-            dp = pp - ref
-            if abs(dp) > limit or abs(pp) > PITCH_ABS_MAX:
-                n["tilt"] += 1                          # one tilted packet: the whole scan is not sent
-                return None
-            # the lidar origin of this packet, in the robot frame of the newest pose
-            hp = radians(ph)
-            ch, sh = cos(hp), sin(hp)
-            dx, dy = px + ch * sx - sh * sy - x1, py + sh * sx + ch * sy - y1
-            ox, oy = dx * c1 + dy * s1, -dx * s1 + dy * c1
-            dh = radians(ph - h1)
-            dpr = radians(dp)
-            for a, d, q in pk.pts:
-                if d <= 0 or d < rmin or d > rmax or q < qmin:
-                    continue
-                b = yaw + sgn * a
-                if mtab[int((b % 360.0) * 2.0)]:
-                    continue
-                rb = radians(b)
-                if dpr:
-                    e = dpr * cos(rb)
-                    d = d * cos(e)                      # horizontal range
-                    ae = abs(e)
-                    if clip and ae > 1e-4 and d > 0.9 * height / tan(ae):
-                        continue
-                ang = dh + rb
-                x, y = ox + d * cos(ang), oy + d * sin(ang)
-                used += 1
-                i = int(math.floor(atan2(y, x) * k_sec + 0.5)) % nsec
-                if -half <= y <= half:                  # in the corridor: the firmware's front / rear distance
-                    key = x - FRONT_OFF_MM if x >= AXIS_FWD_MM else REAR_OFF_MM - x
-                else:
-                    key = OUTSIDE_KEY + x * x + y * y
-                cur = best[i]
-                if cur is None or key < cur[0]:
-                    best[i] = (key, x, y)
-        if used < MIN_POINTS:
+        if turn.tilted:
+            n["tilt"] += 1                              # one tilted packet: the whole scan is not sent
+            return None
+        z = turn.z
+        if len(z) < MIN_POINTS:
             n["few"] += 1
             return None
+        nsec = lp.LINK_LIDAR_SECTORS
+        half = corridor_half(self.params() if self.params else {})
+        # the deskewed points (odometry frame) in the robot frame of the newest pose, about the axle (#110: from the
+        # turn the map uses too; per point only C-level map() calls)
+        zr = list(map(_mul, map(_sub, z, repeat(complex(x1, y1))), repeat(cmath.rect(1.0, -math.radians(h1)))))
+        dist = list(map(abs, zr))
+        # sector of each point: floor(angle / 10 deg + 0.5) mod 36 (int() of a positive number is its floor)
+        k_sec = nsec / (2.0 * math.pi)
+        secs = list(map(_mod, map(int, map(_add, map(_mul, map(cmath.phase, zr), repeat(k_sec)), repeat(nsec + 0.5))),
+                        repeat(nsec)))
+        best_d = [_INF] * nsec
+        best_i = [-1] * nsec
+        i = 0
+        get = dist.__getitem__
+        for sec, grp in groupby(secs):                  # the points come round in order: a run per sector, mostly
+            m = len(list(grp))
+            j = min(range(i, i + m), key=get) if m > 1 else i
+            if dist[j] < best_d[sec]:
+                best_d[sec], best_i[sec] = dist[j], j
+            i += m
+        # in the corridor (|y| <= half): nearest by the firmware's front / rear distance, before any outside point
+        ckey = [None] * nsec
+        for j in compress(range(len(zr)), map(_le, map(abs, map(_IM, zr)), repeat(half))):
+            x = zr[j].real
+            key = x - FRONT_OFF_MM if x >= AXIS_FWD_MM else REAR_OFF_MM - x
+            sec = secs[j]
+            if ckey[sec] is None or key < ckey[sec]:
+                ckey[sec], best_i[sec] = key, j
+        best = [None if j < 0 else (0, zr[j].real, zr[j].imag) for j in best_i]
         pts = [None if b is None else (b[1], b[2]) for b in best]
         self.last_pts = pts
         self.last_age_ms = age_ms

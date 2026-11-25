@@ -6,6 +6,9 @@
   python -m station.tools.loop_bench --kidnap 25           carry the robot away after 25 s: the scan matcher goes lost,
                                                            the whole-map search finds it (#105)
   python -m station.tools.loop_bench --reboot 25           the odometry resets to 0, 0, 0 after 25 s (a Teensy reboot)
+  python -m station.tools.loop_bench --explore --emulate --pi-scale 20
+                                                           slow motion: the loop's work takes 20 x as long for real
+                                                           (#110: the 2026-11-25 robot log puts the Pi at ~20 x this PC)
 
 The fake Teensy + LD19 (station/sim) runs in a child process, like the real robot's Teensy: its physics and ray casting
 do not load the bridge's loop. The bridge runs here with its own event loop, a web client connected (so tiles really go
@@ -124,8 +127,8 @@ async def bench(a, sim_port, tmp):
     from station.sim.tour import TOUR, tour
     mapping.AUTOSAVE_S = a.autosave
     if a.pi_budget:
-        from station.bridge import lidarmatch
-        for mod, name in ((mapping, "TILE_BUDGET_S"), (lidarmatch, "FIELD_BUDGET_S")):
+        from station.bridge import lidar, lidarmatch
+        for mod, name in ((mapping, "TILE_BUDGET_S"), (lidarmatch, "FIELD_BUDGET_S"), (lidar, "MATCH_SLICE_S")):
             if hasattr(mod, name):
                 setattr(mod, name, getattr(mod, name) / a.pi_scale)
     http_port = _free_port()
@@ -135,6 +138,21 @@ async def bench(a, sim_port, tmp):
     if a.no_match:
         b.mapper.settings["lidar_match"] = False
     prof = b.prof
+    if a.emulate:
+        # (#110) slow motion: every top-level piece of loop work takes pi-scale times as long (a busy wait holding the
+        # GIL, like real work), so ticks are late as on the Pi and the loop's ordering (callbacks, timers) is the Pi's
+        from station.bridge import loopprof
+        orig_exit = loopprof._Part.__exit__
+        clock = prof.clock
+
+        def slow_exit(part, *exc):
+            st = part.p._stack
+            if len(st) == 1 and part.p is prof:
+                end = clock() + (a.pi_scale - 1.0) * (clock() - st[-1][1])
+                while clock() < end:
+                    pass
+            return orig_exit(part, *exc)
+        loopprof._Part.__exit__ = slow_exit
     windows = []                     # (late s, busy s since the last tick, {part: s})
     orig_tick = prof.tick
 
@@ -270,6 +288,9 @@ def main(argv=None):
     ap.add_argument("--autosave", type=float, default=15.0, help="autosave period, s (the bridge's is 60)")
     ap.add_argument("--pi-scale", type=float, default=9.0, help="Pi Zero 2W / this PC, per core (~8-10)")
     ap.add_argument("--pi-budget", action="store_true", help="time budgets / pi-scale (the Pi's tile throughput)")
+    ap.add_argument("--emulate", action="store_true",
+                    help="slow motion (#110): loop work x pi-scale for real (implies --pi-budget); the times printed "
+                         "are then Pi times: read 'PC late' as the Pi's stalls and 'loop busy (PC)' as the Pi's load")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--kidnap", type=float, default=0.0, metavar="S",
                     help="carry the robot 1 m / 25 deg after S s (odometry does not notice): the matcher goes lost")
@@ -277,6 +298,7 @@ def main(argv=None):
                     help="reset the odometry to 0, 0, 0 after S s where the robot is (a Teensy reboot, #105)")
     ap.add_argument("--png", default=None, help="write the final map here")
     a = ap.parse_args(argv)
+    a.pi_budget = a.pi_budget or a.emulate
     sim_port = _free_port()
     ctx = multiprocessing.get_context("spawn")
     sim = ctx.Process(target=sim_main, args=(sim_port, a.world, a.seed, a.kidnap, a.reboot), daemon=True)

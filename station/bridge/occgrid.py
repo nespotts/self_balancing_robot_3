@@ -75,6 +75,8 @@ class Grid:
     def _start(self):
         """(Re)allocate the initial area, centred on the origin."""
         nx, ny = self.init_n
+        self.gen = getattr(self, "gen", 0) + 1      # (#110) a fresh area: the matcher's field starts over ...
+        self.reshapes = 0                           # ... a grown one (_reshape) moves it instead
         self._set_area(-(nx // 2) * self.T, -(ny // 2) * self.T, nx * self.T, ny * self.T,
                        bytearray([UNKNOWN]) * (nx * self.T * ny * self.T))
         self.dirty = set()        # tiles changed since the last take_dirty() (relative to the corner)
@@ -111,6 +113,7 @@ class Grid:
         self.touched = {(a + dtx, b + dty) for a, b in self.touched}
         self.fdirty = {(a + dtx, b + dty) for a, b in self.fdirty}
         self._set_area(nx0, ny0, nW, nH, new)
+        self.reshapes = getattr(self, "reshapes", 0) + 1
 
     def _grow(self, xmin, xmax, ymin, ymax):
         """Make the grid cover this world box (mm), with a tile of slack on the sides that grow.

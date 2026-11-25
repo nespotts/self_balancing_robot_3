@@ -17,6 +17,7 @@ from . import resets as resets_mod
 from .httpws import HttpServer, Response, check_origin
 from .lidar import Lidar
 from .lidar_obstacles import LidarObstacles
+from . import loopprof
 from .loopprof import STALL_LOG_S, LoopProf
 from .mapping import AUTOSAVE_NAME, Mapper
 from .planner import Planner
@@ -195,7 +196,7 @@ class Bridge:
         self.waypoints = []                                 # what the station last sent (x, y)
         self.range_listeners = []                           # callables(range dict) e.g. mapping (#12)
         self.health = health_mod.Health(self.log.dir)       # Health page: preflight, battery minutes (#51)
-        self.resets = resets_mod.ResetTracker()             # Teensy reset causes from the HELLO (#109)
+        self.resets = resets_mod.ResetTracker(start=_now())  # Teensy reset causes from the HELLO (#109, #110)
         self.health_cache = None                            # last `health` message (JSON text), sent to new clients
         self.last_health = -10.0
         self.tools = TuningTools(self, None)                # Tune page: presets, scored runs, motor test (#16)
@@ -578,6 +579,8 @@ class Bridge:
 
     def _tick(self, now):
         self._check_robot(now)          # first, so nothing below can keep the robot unidentified (#101)
+        if self.link and now - self.tlm_time < 1.0:
+            self.resets.note_alive(now)  # (#110) a power-on counts as unexpected only while the robot was running here
         if self.link:
             if now - self.last_hb >= HEARTBEAT_S - 0.005:
                 self.last_hb = now
@@ -663,8 +666,14 @@ class Bridge:
                 self.log.flush()
         if now - self.last_health >= 1.0:
             self.last_health = now
-            with P("health"):
-                self._push_health(now)
+            try:                        # (#110) its own loop callback: not on top of this tick's tiles / status
+                asyncio.get_running_loop().call_soon(self._health_timed, now)
+            except RuntimeError:        # no loop (unit tests calling _tick directly)
+                self._health_timed(now)
+
+    def _health_timed(self, now):
+        with self.prof.part("health"):
+            self._push_health(now)
 
     def _prune_async(self):
         """Delete old sessions in a worker thread (stat / remove of big files must not stall the loop)."""
@@ -1472,6 +1481,9 @@ class Bridge:
         # worker threads (planner jobs, the lost lidar search, autosave) hand the GIL back after 1 ms, not 5: after each
         # socket write the loop would otherwise wait up to a whole interval to get it back
         sys.setswitchinterval(SWITCH_INTERVAL_S)
+        # ... and their long loops nap while this loop has work (#110: loopprof.worker_yield), so a lost search or a
+        # planner job no longer halves the loop's speed and turns each of its system calls into a GIL wait
+        loopprof.set_active(self.prof)
         self.say("web UI on http://%s:%d/  (robot link: %s)" % (
             "localhost" if self.http_host in ("0.0.0.0", "") else self.http_host, self.http_port, self.port))
         jobs = [self.link_task(), self.tick_task()]
@@ -1481,3 +1493,5 @@ class Bridge:
             await asyncio.gather(*jobs)
         finally:
             self.prof.uninstall_gc()
+            if loopprof._ACTIVE[0] is self.prof:
+                loopprof.set_active(None)

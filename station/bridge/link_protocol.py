@@ -249,42 +249,47 @@ class FrameParser:
         self.bytes_dropped = 0
 
     def feed(self, data):
+        # (#110) walks the buffer with an index and cuts it once at the end: a `del buf[:n]` per frame moves the whole
+        # backlog every time (after a stall: a few hundred frames x kilobytes)
         buf = self.buf
         buf += data
         out = []
         sync = b"\xA5\x5A"
+        pos, end = 0, len(buf)
         while True:
-            i = buf.find(sync)
+            i = buf.find(sync, pos)
             if i < 0:
                 # keep a trailing 0xA5 (could be the first half of a sync)
-                keep = 1 if buf and buf[-1] == LINK_SYNC1 else 0
-                self.bytes_dropped += len(buf) - keep
-                del buf[:len(buf) - keep]
+                keep = 1 if end > pos and buf[end - 1] == LINK_SYNC1 else 0
+                self.bytes_dropped += end - pos - keep
+                pos = end - keep
                 break
-            if i:
-                self.bytes_dropped += i
-                del buf[:i]
-            if len(buf) < 4:
+            if i > pos:
+                self.bytes_dropped += i - pos
+                pos = i
+            if end - pos < 4:
                 break
-            n = buf[3]
+            n = buf[pos + 3]
             if n > LINK_MAX_PAYLOAD:
                 self.crc_errors += 1
                 self.bytes_dropped += 1
-                del buf[:1]
+                pos += 1
                 continue
             total = 4 + n + 2
-            if len(buf) < total:
+            if end - pos < total:
                 break
-            body = bytes(buf[2:4 + n])
-            rx_crc = buf[4 + n] | (buf[5 + n] << 8)
+            body = bytes(buf[pos + 2:pos + 4 + n])
+            rx_crc = buf[pos + 4 + n] | (buf[pos + 5 + n] << 8)
             if crc16(body) != rx_crc:
                 self.crc_errors += 1
                 self.bytes_dropped += 1
-                del buf[:1]
+                pos += 1
                 continue
             out.append((body[0], body[2:]))
             self.frames_ok += 1
-            del buf[:total]
+            pos += total
+        if pos:
+            del buf[:pos]
         return out
 
 

@@ -10,6 +10,8 @@ import math
 import os
 import re
 import shutil
+import threading
+import time
 from collections import deque
 
 from . import link_protocol as lp
@@ -130,15 +132,24 @@ def _read(path):
 
 
 class PiStats:
-    """CPU % (delta of /proc/stat), temperature (/sys/class/thermal), memory, free disk. Cheap: read once a second."""
+    """CPU % (delta of /proc/stat), temperature (/sys/class/thermal), memory, free disk. Cheap (#110: on the Pi the
+    Health tick took 40-130 ms while a worker thread held the GIL - every file read is a GIL hand-over): only the CPU %
+    is read every second; temperature every TEMP_S, memory every MEM_S, the disk every DISK_S, at most one of those per
+    call (spread out), and the thermal zones are listed once."""
+    TEMP_S, MEM_S, DISK_S, ZONES_S = 5.0, 10.0, 30.0, 300.0
 
-    def __init__(self, disk_path=".", proc="/proc", thermal="/sys/class/thermal"):
+    def __init__(self, disk_path=".", proc="/proc", thermal="/sys/class/thermal", clock=time.monotonic):
         self.disk_path, self.proc, self.thermal = disk_path, proc, thermal
+        self.clock = clock
         self._cpu = None
+        self._zones, self._zones_t = None, -1e9
+        self._due = {"temp": -1e9, "mem": -1e9, "disk": -1e9}
+        self._first = True
         self.last = {"cpu_pct": None, "temp_c": None, "mem_pct": None, "disk_free_gb": None, "disk_pct": None}
 
     def read(self):
         out = dict(self.last)
+        now = self.clock()
         s = _read(os.path.join(self.proc, "stat"))
         if s:
             try:
@@ -149,28 +160,48 @@ class PiStats:
                 self._cpu = (total, idle)
             except (ValueError, IndexError):
                 pass
+        due = self._due
+        # the slow ones: the first call reads them all (the page has values at once), later at most one per call
+        for what in ("temp", "mem", "disk"):
+            if now < due[what]:
+                continue
+            if what == "temp":
+                due[what] = now + self.TEMP_S
+                out["temp_c"] = self._temp(now)
+            elif what == "mem":
+                due[what] = now + self.MEM_S
+                m = _read(os.path.join(self.proc, "meminfo"))
+                if m:
+                    mm = dict(re.findall(r"(\w+):\s+(\d+)", m))
+                    if "MemTotal" in mm and "MemAvailable" in mm and int(mm["MemTotal"]) > 0:
+                        out["mem_pct"] = round(100.0 * (1 - int(mm["MemAvailable"]) / int(mm["MemTotal"])), 1)
+            else:
+                due[what] = now + self.DISK_S
+                try:
+                    du = shutil.disk_usage(self.disk_path)
+                    out["disk_free_gb"] = round(du.free / 1e9, 1)
+                    out["disk_pct"] = round(100.0 * du.used / du.total, 1) if du.total else None
+                except OSError:
+                    pass
+            if not self._first:
+                break
+        self._first = False
+        self.last = out
+        return out
+
+    def _temp(self, now):
+        if self._zones is None or now - self._zones_t > self.ZONES_S:
+            self._zones = glob.glob(os.path.join(self.thermal, "thermal_zone*", "temp"))
+            self._zones_t = now
         temps = []
-        for p in glob.glob(os.path.join(self.thermal, "thermal_zone*", "temp")):
+        for p in self._zones:
             v = _read(p)
             try:
                 t = float(v)
                 temps.append(t / 1000.0 if t > 200 else t)
             except (TypeError, ValueError):
                 pass
-        out["temp_c"] = round(max(temps), 1) if temps else None
-        m = _read(os.path.join(self.proc, "meminfo"))
-        if m:
-            mm = dict(re.findall(r"(\w+):\s+(\d+)", m))
-            if "MemTotal" in mm and "MemAvailable" in mm and int(mm["MemTotal"]) > 0:
-                out["mem_pct"] = round(100.0 * (1 - int(mm["MemAvailable"]) / int(mm["MemTotal"])), 1)
-        try:
-            du = shutil.disk_usage(self.disk_path)
-            out["disk_free_gb"] = round(du.free / 1e9, 1)
-            out["disk_pct"] = round(100.0 * du.used / du.total, 1) if du.total else None
-        except OSError:
-            pass
-        self.last = out
-        return out
+        return round(max(temps), 1) if temps else None
 
 
 def dir_bytes(path):
@@ -650,6 +681,7 @@ class Health:
         self._n = 0
         self._log_mb = None
         self._log_mb_t = -1e9
+        self._log_busy = False
 
     def on_tlm(self, d, now):
         ok = bool(d["radio_ok"])
@@ -673,6 +705,21 @@ class Health:
         if e:
             self.enc, self.enc_t = e, now
 
+    def _log_usage(self, now):
+        """The logs' size, every LOG_USAGE_EVERY_S, in a thread (#110: a walk over hundreds of session files stats each
+        one: 100+ ms on the Pi's SD card, every 30 s, was a loop stall)."""
+        if now - self._log_mb_t < LOG_USAGE_EVERY_S or self._log_busy:
+            return
+        self._log_mb_t = now
+        self._log_busy = True
+
+        def work():
+            try:
+                self._log_mb = round(dir_bytes(self.log_dir) / 1e6)
+            finally:
+                self._log_busy = False
+        threading.Thread(target=work, daemon=True, name="sbr3-log-usage").start()
+
     def tick(self, now, ctx):
         """Once a second. ctx: link, robot_alive, tlm, tlm_hz, rng_hz, params {name: value}, hello, estop, robot_estop,
         remote_seen, clients, crc_errors, log_error. Returns the `health` message dict."""
@@ -682,9 +729,7 @@ class Health:
             self._sum_v = self._sum_load = 0.0
             self._n = 0
         pi = dict(self.pi.read())
-        if now - self._log_mb_t >= LOG_USAGE_EVERY_S:
-            self._log_mb_t = now
-            self._log_mb = round(dir_bytes(self.log_dir) / 1e6)
+        self._log_usage(now)
         pi["log_mb"] = self._log_mb
         low = float((ctx.get("params") or {}).get("batt.low_cell", LOW_CELL_DEFAULT))
         bat = self.battery.estimate(now, CELLS, low)

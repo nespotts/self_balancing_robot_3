@@ -28,6 +28,7 @@ import operator
 import time
 
 from . import lidarmatch as lm
+from .loopprof import worker_yield
 
 COARSE_F = 4               # coarse cell = 4 x 4 field cells (100 mm)
 LEVELS = 5                 # top level blocks: 2^5 = 32 coarse cells (3.2 m)
@@ -43,6 +44,7 @@ K_REFINE = 5               # candidates refined on the fine field
 REFINE_MM, REFINE_DEG = 100.0, 2.0
 MAX_NODES = 600000         # node budget (a search that would take longer gives up: "too slow")
 ACCEPT = {"score": 0.55, "inliers": 0.55, "known": 0.5, "margin": 0.15}
+UNIQUE = {"score": 0.45, "inliers": 0.45, "margin": 0.5}   # ... or a lower fit when nothing else comes close (#110)
 CHUNK = 2048               # bytes per max-pooling call (GIL hold)
 SLICE_S, PAUSE_S = 0.003, 0.0015   # worker: after this much work, sleep this long (the loop gets the GIL)
 
@@ -52,17 +54,22 @@ class Cancelled(Exception):
 
 
 class Yielder:
-    """Called often from the worker; every SLICE_S it sleeps PAUSE_S (the event loop takes the GIL) and checks cancel."""
+    """Called often from the worker; every SLICE_S it sleeps PAUSE_S (the event loop takes the GIL) and checks cancel.
+    It also naps while the loop has work (loopprof.worker_yield, #110). share (0..1): the search's share of a core
+    (the pause grows: slice x (1 - share) / share), e.g. while the robot drives."""
 
-    def __init__(self, slice_s=None, pause_s=None, cancel=None):
+    def __init__(self, slice_s=None, pause_s=None, cancel=None, share=None):
         self.slice_s = SLICE_S if slice_s is None else slice_s
         self.pause_s = PAUSE_S if pause_s is None else pause_s
+        if share is not None and 0.0 < share < 1.0:
+            self.pause_s = max(self.pause_s, self.slice_s * (1.0 - share) / share)
         self.cancel = cancel
         self.clock = time.perf_counter
         self.end = self.clock() + self.slice_s
         self.pauses = 0
 
     def __call__(self):
+        worker_yield()
         if self.clock() >= self.end:
             if self.cancel is not None and self.cancel():
                 raise Cancelled()
@@ -380,6 +387,13 @@ def find(fz, pyr, runs, cx, cy, around=None, min_curv=0.05, accept=None, y=_noth
                       for r in sorted(refs, key=lambda r: -r["q"])])
     fit = (best["score"] >= A["score"] and best["inliers"] >= A["inliers"] * max(1, best["known"])
            and best["known"] >= A["known"] * best["n"])
+    if not fit and out["margin"] >= UNIQUE["margin"] and best["score"] >= UNIQUE["score"] and \
+            best["inliers"] >= UNIQUE["inliers"] * max(1, best["known"]) and best["known"] >= A["known"] * best["n"]:
+        # (#110) the real robot's fits on its own maps sat at 40-50 % (a map drawn with lidar gaps / timing errors)
+        # while nothing else came close (margin 100 %): a clearly unique pose is taken at a lower fit; LidarMatch then
+        # confirms it with 2 matches at that fit before it maps again
+        fit = True
+        out["relaxed"] = True
     if not fit:
         return done("no fit")
     if out["margin"] < A["margin"]:

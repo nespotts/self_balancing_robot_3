@@ -233,7 +233,9 @@ class TestTurnInParts(unittest.TestCase):
             for _ in range(10):
                 await asyncio.sleep(0)
         asyncio.run(run())
-        self.assertEqual(calls, [False, False, True])
+        n = len(lidar_mod.split_runs(ring(0, 0, 2000, n=450)))
+        self.assertGreater(n, 2)
+        self.assertEqual(calls, [False] * (n - 1) + [True])
         self.assertEqual(m.n["scans"], 1)
 
 

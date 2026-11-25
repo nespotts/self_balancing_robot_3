@@ -8,6 +8,8 @@ import os
 import threading
 
 PENDING_MAX = 4096               # PosixSerialLink: bytes queued behind a partial write before frames are dropped
+READ_MAX = 2048                  # bytes per read callback (#110: a backlog after a stall is worked off in several loop rounds,
+                                 # ~1 LD19 turn each, so a tick gets in between)
 
 
 class LinkError(Exception):
@@ -24,7 +26,7 @@ class TcpLink:
     async def _run(self):
         try:
             while True:
-                data = await self.reader.read(4096)
+                data = await self.reader.read(READ_MAX)
                 if not data:
                     break
                 self.on_data(data)
@@ -88,7 +90,7 @@ class PosixSerialLink:
 
     def _readable(self):
         try:
-            data = os.read(self.fd, 4096)
+            data = os.read(self.fd, READ_MAX)
         except BlockingIOError:
             return
         except OSError:
