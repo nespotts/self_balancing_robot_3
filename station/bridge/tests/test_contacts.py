@@ -187,5 +187,91 @@ class TestBridge(unittest.TestCase):
         self.assertIsNone(p.replan_at)
 
 
+class TestLoop(unittest.TestCase):
+    """#111: stopped again and again at one spot (BLOCKED / stuck / contact, back off, the same route, again): the planner
+    marks it, gives that explore goal up and plans another way."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.b = b = Bridge("tcp://127.0.0.1:1", WEB, os.path.join(self.tmp, "logs"), map_dir=os.path.join(self.tmp, "maps"),
+                            quiet=True)
+        b.link = FakeLink()
+        b.broadcast = lambda text, droppable=False: None
+        self.now = [100.0]
+        self.p = p = b.planner
+        p.clock = lambda: self.now[0]
+        p.mode, p.goal = "explore", (1500.0, 900.0)
+        self.at(-200.0, 250.0, -130.0)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def at(self, x, y, h):
+        self.b.tlm = {"x_mm": x, "y_mm": y, "heading_deg": h, "mode": lp.MODE_EXPLORE, "status": 0}
+
+    def later(self, s=2.0):
+        self.now[0] += s
+
+    def test_block_then_rear_contact_marks_the_spot(self):
+        p, b = self.p, self.b
+        p.on_log("nav: blocked, obstacle at 70 mm (waypoint 1/5)")       # (the 2026-11-25 loop at -0.2, 0.25 m)
+        p.on_log("nav: obstacle 70 mm ahead, too close for the lidar: backing off")
+        self.assertEqual(b.mapper.zones.bumps(), [])
+        self.assertEqual(p.blacklist, [])
+        self.later(0.8)
+        self.at(-205.0, 256.0, -130.0)                                     # the back-off was blocked: a rear contact
+        b._on_frame(lp.MSG_CONTACT, lp.encode_contact(contact(lp.LINK_CONTACT_STUCK, -170.0, 294.0, 50.0))[4:-2])
+        marks = b.mapper.zones.bumps()
+        self.assertEqual(len(marks), 2)                                    # the contact's own + the loop mark ahead
+        ahead = min(marks, key=lambda m: math.hypot(m["x"] - (-200.0 + 109.0 * math.cos(math.radians(-130.0))),
+                                                    m["y"] - (250.0 + 109.0 * math.sin(math.radians(-130.0)))))
+        self.assertLess(math.hypot(ahead["x"] - (-200.0 - 70.0 - 23.0), ahead["y"] - (250.0 - 83.0 - 27.0)), 60.0)
+        self.assertEqual(p.blacklist, [(1500.0, 900.0)])                   # that goal is given up
+        self.assertEqual(p.boost, 100.0)                                   # more margin
+        self.assertIsNotNone(p.replan_at)
+        self.assertIn("same spot", p.status)
+        self.assertEqual(p.loop_marks, 1)
+
+    def test_three_blocks_and_what_does_not_count(self):
+        p, b = self.p, self.b
+        for k in range(2):
+            p.on_log("nav: blocked, obstacle at 96 mm (waypoint 1/5)")
+            self.later()
+        self.assertEqual(p.loop_marks, 0)                                  # 2 blocks: not yet
+        self.at(-200.0, 450.0, -130.0)                                     # 200 mm away: another spot
+        p.on_log("nav: blocked, obstacle at 96 mm (waypoint 1/5)")
+        self.later()
+        self.assertEqual(p.loop_marks, 0)
+        self.at(-190.0, 260.0, -125.0)                                     # back at the first one: the 3rd there
+        p.on_log("nav: blocked, obstacle at 44 mm (waypoint 1/5)")
+        self.assertEqual(p.loop_marks, 1)
+        self.assertEqual(len(b.mapper.zones.bumps()), 1)
+        self.later(40.0)                                                   # long after: they have expired
+        for k in range(2):
+            p.on_log("nav: blocked, obstacle at 96 mm (waypoint 1/5)")
+            self.later()
+        self.assertEqual(p.loop_marks, 1)
+        p.on_log("nav: stuck, no progress driving for 2.5 s (waypoint 1/5)")   # 2 blocks + a stuck: 3
+        self.assertEqual(p.loop_marks, 2)
+
+    def test_one_stuck_contact_is_one_stop(self):
+        p = self.p
+        p.on_log("nav: stuck, no progress driving for 2.5 s (waypoint 1/5)")
+        self.b._on_frame(lp.MSG_CONTACT, lp.encode_contact(contact(lp.LINK_CONTACT_STUCK, -140.0, 300.0, -125.0))[4:-2])
+        self.assertEqual(p.loop_marks, 0)                                  # one stop, reported twice
+        self.assertEqual(len(p.spots), 1)
+
+    def test_idle_or_no_pose(self):
+        p = self.p
+        p.mode = "idle"
+        for _ in range(4):
+            p.on_log("nav: blocked, obstacle at 96 mm (waypoint 1/5)")
+            self.later()
+        self.assertEqual(p.spots, [])
+        p.mode, self.b.tlm = "goto", None
+        p.on_log("nav: blocked, obstacle at 96 mm (waypoint 1/5)")
+        self.assertEqual(p.spots, [])
+
+
 if __name__ == "__main__":
     unittest.main()

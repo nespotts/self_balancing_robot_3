@@ -122,6 +122,7 @@ static NavIn navIn(uint32_t now_ms) {
   n.pitch_rate = imu.sample().pitch_rate_dps;
   n.cmd_speed = o.speed_sp;
   n.vel_out = o.vel_out;
+  n.held = o.held;  // #111: the velocity loop held at its anti-windup limit
   return n;
 }
 
@@ -559,6 +560,7 @@ static void controlStep() {
   }
   // navigation: its command is used by modes.update() from the next step on (2.5 ms later)
   nav.update(navIn(now_ms));
+  if (nav.takeUnwind()) ctl.contactReset();  // #111: a contact - stand up, don't lean on it
   modes.setAutoCmd(nav.speed(), nav.turn(), now_ms);
   float target_speed = modes.targetSpeed();
   if (!Navigator::navMode(modes.mode())) {

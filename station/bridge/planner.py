@@ -17,6 +17,7 @@ import heapq
 import json
 import math
 import os
+import re
 import time
 
 from . import link_protocol as lp
@@ -90,6 +91,18 @@ ZONE_MAX_STOPS = 10       # watchdog stops in one job before it gives up anyway 
 BACK_SPEED_MMS = 80.0     # escape straight back (the edge is ahead): STATION cmd_vel at this speed ...
 BACK_MAX_S = 6.0          # ... for at most this long
 BACK_MODE_WAIT_S = 1.0    # the robot did not switch to STATION: the escape point goes as a waypoint instead
+# #111: stopped again and again at one spot (BLOCKED -> back-off -> the same route -> BLOCKED ...): blocks, stucks and
+# contacts within LOOP_R_MM of each other in LOOP_WINDOW_S, weighted (a contact 2, a block / stuck 1), reaching LOOP_COUNT
+# (2 contacts, a contact and a block, or 3 blocks) -> a bump mark where it was blocked, more margin (the stuck boost),
+# explore gives that frontier goal up, and it plans another way
+LOOP_R_MM = 150.0
+LOOP_WINDOW_S = 30.0
+LOOP_WEIGHT = {"block": 1, "stuck": 1, "contact": 2}
+LOOP_COUNT = 3
+LOOP_AHEAD_MM = 39.0      # a block's obstacle: its distance (from the sensor head, front_) + this from the axle
+LOOP_REPLAN_S = 1.0
+LOOP_SAME_S = 0.3         # reports this close in time (and 50 mm) are one stop (a stuck that is also a contact)
+BLOCKED_RE = re.compile(r"nav: blocked, obstacle at (\d+) mm")
 
 
 def clean_settings(s, base):
@@ -916,6 +929,9 @@ class Planner:
         self.no_station = False       # this job: the robot did not take STATION for an escape - escape by waypoint
         self.backing = None           # zone escape straight back (#114): {"x0", "y0", "h0" (odometry), "dist", "t0", ...}
         self._esc_now = None          # (set by the worker with each plan: its zone escape, #114)
+        self.spots = []               # #111: recent stops: (time, map x, y, weight, what stopped it (odometry x, y,
+                                      # heading) or None: a contact, marked by the bridge already)
+        self.loop_marks = 0           # ... loops marked in this job
 
     # ---------------------------------------------------------- frames
     def robot_map_pose(self):
@@ -1103,13 +1119,21 @@ class Planner:
 
     # ---------------------------------------------------------- robot log (#62)
     def on_log(self, text):
-        """A robot log line. "nav: stuck ...": replan with a larger margin once it has backed off."""
-        if not text.startswith("nav: stuck") or self.mode == "idle":
+        """A robot log line. "nav: stuck ...": replan with a larger margin once it has backed off.
+        "nav: blocked ..." / "nav: stuck ...": a stop at this spot (#111, see _spot)."""
+        if self.mode == "idle":
+            return
+        m = BLOCKED_RE.match(text)
+        if m:
+            self._spot("block", float(m.group(1)) + LOOP_AHEAD_MM)
+            return
+        if not text.startswith("nav: stuck"):
             return
         self.boost = min(STUCK_BOOST_MAX, self.boost + STUCK_BOOST_MM)
         self.squeeze = False
         self.replan_at = self.clock() + 5.0       # its back-off ends within 5 s
         self._set_status("robot stuck: backing off, replanning with +%d mm margin" % self.boost)
+        self._spot("stuck", LOOP_AHEAD_MM + 11.0)
 
     def on_contact(self, mark):
         """The robot touched something the lidar can't see (#104): the bridge put a bump mark there (a wall for the
@@ -1121,6 +1145,48 @@ class Planner:
         self.replan_at = self.clock() + CONTACT_REPLAN_S
         self.last_check = self.clock()
         self._set_status("robot touched something the lidar can't see: bump mark %s, replanning" % mark["id"])
+        self._spot("contact", None)
+
+    def _spot(self, kind, ahead_mm):
+        """#111: the robot stopped here (a block, a stuck, a contact). Again and again at one spot (LOOP_*): the route
+        keeps leading into something the map does not keep it off (an obstacle inside the lidar's dead zone, under its
+        scan plane, a blocked back-off): mark it (a bump mark ahead_mm in front of the robot; a contact's own mark is
+        there already), plan with the stuck boost, explore gives that goal up, and plan another way."""
+        t = self.b.tlm
+        if not t:
+            return
+        now = self.clock()
+        x, y, h = t["x_mm"], t["y_mm"], t["heading_deg"]       # odometry frame
+        mx, my, _ = self.b.mapper.map_pose(x, y, h)
+        a = math.radians(h)
+        obst = (x + ahead_mm * math.cos(a), y + ahead_mm * math.sin(a), h) if ahead_mm is not None else None
+        self.spots = [s for s in self.spots if now - s[0] <= LOOP_WINDOW_S]
+        w = LOOP_WEIGHT[kind]
+        same = [s for s in self.spots if now - s[0] < LOOP_SAME_S and math.hypot(s[1] - mx, s[2] - my) < 50.0]
+        if same:                                      # one stop, two reports (a stuck that is also a contact)
+            self.spots.remove(same[-1])
+            w = max(w, same[-1][3])
+            obst = obst or same[-1][4]
+        self.spots.append((now, mx, my, w, obst))
+        near = [s for s in self.spots if math.hypot(s[1] - mx, s[2] - my) <= LOOP_R_MM]
+        n = len(near)
+        if sum(s[3] for s in near) < LOOP_COUNT:
+            return
+        self.spots = [s for s in self.spots if s not in near]  # (each stop counts once)
+        mark = None
+        for s in near:                                # what stopped it there (a contact is marked already)
+            if s[4] is not None and hasattr(self.b.mapper, "add_contact"):
+                mark, _merged = self.b.mapper.add_contact({"x_mm": s[4][0], "y_mm": s[4][1], "heading_deg": s[4][2],
+                                                            "name": "stuck"})
+        if self.mode == "explore" and self.goal is not None:
+            self.blacklist.append(self.goal)                     # that frontier: not through here again
+        self.loop_marks += 1
+        self.boost = min(STUCK_BOOST_MAX, self.boost + STUCK_BOOST_MM)
+        self.squeeze = False
+        self.replan_at = now + LOOP_REPLAN_S
+        self.last_check = now
+        self._set_status("stopped %d times at the same spot (%.2f, %.2f m)%s: planning another way (+%d mm margin)" % (
+            n, mx / 1000.0, my / 1000.0, " - bump mark %s" % mark["id"] if mark else "", self.boost))
 
     def _success(self):
         """A goal reached: the stuck boost decays."""
@@ -1215,6 +1281,7 @@ class Planner:
             self.holding, self.sent_goal, self.scan_wait = False, None, None
             self.blocked_plans = 0
             self.solve, self.zone_hits = None, 0
+            self.spots, self.loop_marks = [], 0
             self._set_status("exploring")
             if self.b.tlm["mode"] != lp.MODE_EXPLORE:     # arm now (no remote): the sweep runs while armed
                 self.b.handle_command({"t": "set_mode", "mode": lp.MODE_EXPLORE, "arm": bool(m.get("arm"))},
@@ -1232,6 +1299,7 @@ class Planner:
         self._back_end(send_stop=True)
         self.dest = dest
         self.solve, self.solve_t0, self.zone_hits = solve, self.clock(), 0
+        self.spots, self.loop_marks = [], 0
         self.arm = arm
         self.started_at = self.clock()
         self.blocked_plans = 0

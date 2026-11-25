@@ -92,7 +92,10 @@ struct Bot {
   bool upright = true;
   float low_x = 1e9f;
   float low_y0 = -1e9f, low_y1 = 1e9f;  // ... from y low_y0 to low_y1
+  float low_rx = -1e9f;                 // one behind (#111): the body's rear (45 mm behind the axle) stops there
   float vt_ramp = 0, speed_meas = 0, vel_i = 0, vel_out = 0, pitch_rate = 0, noise_dps = 0;
+  float free_i = 0;                     // vel_i while following the command (Controller::contactReset, #111)
+  int unwinds = 0;
   uint32_t spike_until = 0, impact_ms = 0;
   float spike = 0;
   bool stalled = false;
@@ -182,6 +185,11 @@ struct Bot {
       if (sweep_on && ms % 80 == 0) sweep();
       if (lidar_on && ms % 100 == 0) lidar();
       nav.update(in());
+      if (nav.takeUnwind()) {  // #111: Controller::contactReset (main.cpp)
+        unwinds++;
+        vt_ramp = 0;
+        vel_i = free_i;
+      }
       // ModeManager clamp + controller ramps (drv.accel 1500, turn 1000) + lag of the balancing loops
       float vt = mode == MODE_STATION ? nav.limitSpeed(station_v, 450, true) : nav.speed(), wt = nav.turn();
       if (fabsf(wt) < P(P_DRV_TURN_DB)) wt = 0;
@@ -192,7 +200,8 @@ struct Bot {
       float moved = 0;
       if (!jam) {
         const float nx = x + v * cosf(h * 0.0174533f) * dt;
-        if (dyn && v >= 0 && nx + 45.0f >= low_x && y >= low_y0 && y <= low_y1) {  // the body's front at it: the wheels stop
+        const bool rear = dyn && v < 0 && nx - 45.0f <= low_rx && y >= low_y0 && y <= low_y1;  // (#111) backing into it
+        if (rear || (dyn && v >= 0 && nx + 45.0f >= low_x && y >= low_y0 && y <= low_y1)) {  // the body's front at it: the wheels stop
           if (!stalled && v > 0) {
             spike = 0.45f * v;
             spike_until = ms + 30;
@@ -212,6 +221,7 @@ struct Bot {
         vt_ramp += fmaxf(-1500 * dt, fminf(1500 * dt, vt - vt_ramp));
         speed_meas += (moved - speed_meas) * dt / 0.04f;
         const float e = vt_ramp - speed_meas;
+        if (fabsf(vt_ramp) < 30 || fabsf(speed_meas) >= 0.5f * fabsf(vt_ramp)) free_i = vel_i;
         vel_i = fmaxf(-20, fminf(20, vel_i + P(P_VEL_KI) * e * dt));
         vel_out = fmaxf(-20, fminf(20, P(P_VEL_KP) * e + vel_i));
         pitch_rate = noise_dps * noise() + (ms < spike_until ? spike : 0.0f);
@@ -983,6 +993,117 @@ static void testContactStuck() {
   printf("  lidar-confirmed %u ms after the impact\n", (unsigned)(l.ms - l.impact_ms));
 }
 
+// #111: slow pushes (the old rules need >= 100 mm/s) and blocked back-offs
+static void testContactSlow() {
+  printf("goto: pushes into it slowly (40 / 60 / 80 mm/s) -> contact stuck (60, 80: stall ~0.8 s; 40: the 2.5 s stuck "
+         "check), back off (#111)\n");
+  const float speeds[] = {40, 60, 80};
+  for (float sp : speeds) {
+    reset();
+    g_param[P_NAV_SLOW_MM] = 0;  // (no range sweep slow-down: the command stays at sp)
+    Bot b;
+    contactStart(b, sp);
+    uint32_t stall_ms = 0;
+    for (int i = 0; i < 8000 && !g_contacts; i++) {
+      runC(b, 0.005f);
+      if (b.stalled && !stall_ms) stall_ms = b.ms;
+    }
+    printf("  %.0f mm/s: stalled %.3f s, detected %.3f s (+%u ms), %s, contact at %.0f, %.0f, unwinds %d\n", sp,
+           stall_ms / 1000.0, b.ms / 1000.0, (unsigned)(b.ms - stall_ms), b.nav.contact() ? "contact" : "-", g_last.x_mm,
+           g_last.y_mm, b.unwinds);
+    CHECK(g_contacts == 1);
+    CHECK(g_last.kind == LINK_CONTACT_STUCK);
+    // driving below 100 mm/s: kStallDriveMs (a free balancing robot can stand in its dead band a while there); below
+    // 60 mm/s the nav stuck check (nav.stuck_ms 2.5 s) reports it
+    if (sp >= ContactDetector::kStallDriveMinCmd)
+      CHECK(stall_ms && b.ms - stall_ms >= 600 && b.ms - stall_ms <= 1300);
+    else
+      CHECK(stall_ms && b.ms - stall_ms >= 1500 && b.ms - stall_ms <= 3000);
+    CHECK(fabsf(g_last.x_mm - 1200) < 25 && fabsf(g_last.heading_deg) < 2);  // the front edge
+    CHECK(b.unwinds == 1);         // the controller stood it up
+    CHECK(fabsf(b.vt_ramp) < 10);  // (its command zeroed: the back-off ramps from 0)
+    runC(b, 0.6f);
+    CHECK(b.v < 0);                // backing off
+  }
+}
+
+static void testContactBackoffBlocked() {
+  printf("goto: contact, then the back-off is blocked too (something behind) -> rear contact, hold, no pushing (#111)\n");
+  reset();
+  Bot b;
+  contactStart(b, 250);
+  b.low_rx = 1200 - 45 - 40;  // 40 mm behind where it stops: the back-off (100 mm) hits it
+  for (int i = 0; i < 3000 && !g_contacts; i++) runC(b, 0.005f);
+  CHECK(g_contacts == 1 && g_last.kind == LINK_CONTACT_BUMP);
+  for (int i = 0; i < 1000 && g_contacts < 2; i++) runC(b, 0.005f);
+  CHECK(g_contacts == 2);
+  CHECK(g_last.kind == LINK_CONTACT_STUCK);
+  printf("  rear contact at %.0f, %.0f heading %.0f, robot at %.0f\n", g_last.x_mm, g_last.y_mm, g_last.heading_deg, b.x);
+  CHECK(fabsf(fabsf(g_last.heading_deg) - 180) < 2);   // behind it
+  CHECK(g_last.x_mm < b.x - 40);
+  CHECK(b.unwinds == 2);
+  const float x0 = b.x;
+  runC(b, 3.0f);  // holding: no push either way
+  CHECK(b.nav.state() == NAV_BLOCKED);
+  CHECK(b.nav.contact());
+  CHECK(fabsf(b.nav.speed()) < 1);
+  CHECK(fabsf(b.x - x0) < 5);
+  CHECK(g_contacts == 2);  // (and no new contact while it holds)
+  printf("  EXPLORE: waits for a new list, holding\n");
+  reset();
+  Bot e;
+  e.mode = MODE_EXPLORE;
+  contactStart(e, 120);
+  e.low_rx = 1200 - 45 - 30;
+  runC(e, 12);
+  CHECK(g_contacts == 2);
+  CHECK(e.nav.state() == NAV_BLOCKED && fabsf(e.nav.speed()) < 1);
+
+  printf("  a dead-zone / lidar BLOCKED back-off (40 mm/s) into something behind -> rear contact, hold\n");
+  reset();
+  Bot l;
+  lidarOnly(l);
+  l.dyn = true;
+  float px = 900;
+  l.world.post(px, 0, 20);
+  l.run(0.3);
+  l.nav.add(2500, 0);
+  l.nav.listChanged(true);
+  l.nav.onModeChange(l.in());
+  g_contacts = 0;
+  runC(l, 15);
+  CHECK(l.nav.state() == NAV_BLOCKED);
+  l.low_rx = l.x - 45 - 30;  // a low box 30 mm behind it ...
+  approachPost(l, px, 100);  // ... and a post coming into the dead zone: it backs off at 40 mm/s, into the box
+  takeContact(l);
+  runC(l, 3);
+  printf("  %d contacts, last kind %d heading %.0f, x %.0f\n", g_contacts, g_last.kind, g_last.heading_deg, l.x);
+  CHECK(g_contacts == 1);
+  CHECK(g_last.kind == LINK_CONTACT_STUCK && fabsf(fabsf(g_last.heading_deg) - 180) < 2);
+  CHECK(l.nav.state() == NAV_BLOCKED && fabsf(l.nav.speed()) < 1);
+}
+
+static void testContactSlowNone() {
+  printf("goto: the 3-waypoint route at 50 / 80 mm/s, 40 dps noise -> no contact (#111)\n");
+  const float speeds[] = {50, 80};
+  for (float sp : speeds) {
+    reset();
+    g_param[P_NAV_MAX_SPEED] = sp;
+    Bot b;
+    b.dyn = true;
+    b.noise_dps = 40;
+    b.nav.add(800, 0);
+    b.nav.add(800, 500);
+    b.nav.add(0, 500);
+    b.nav.listChanged(true);
+    b.nav.onModeChange(b.in());
+    g_contacts = 0;
+    runC(b, 120);
+    CHECK(b.nav.state() == NAV_ARRIVED);
+    CHECK(g_contacts == 0);
+  }
+}
+
 static void testContactFell() {
   printf("goto: a hard bump throws it over before the hold time -> contact bump (fell)\n");
   reset();
@@ -1166,6 +1287,9 @@ int main() {
   testLidarStuckEvent();
   testContactBump();
   testContactStuck();
+  testContactSlow();
+  testContactBackoffBlocked();
+  testContactSlowNone();
   testContactFell();
   testContactNone();
   testContactStation();
