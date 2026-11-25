@@ -237,7 +237,8 @@ def _tile(id, label, level, value, why=""):
     return {"id": id, "label": label, "level": level, "value": value, "why": why}
 
 
-LIDAR_RPM_OK = (570.0, 630.0)    # LD19: 10 Hz = 600 rpm, +-0.1 Hz once settled (~3 s after power-up)
+PROFILE_WARN_S = 5.0             # link up this long without a robot profile -> the Profile tile warns (#101)
+LIDAR_RPM_OK = (570.0, 630.0)   # LD19: 10 Hz = 600 rpm, +-0.1 Hz once settled (~3 s after power-up)
 LIDAR_CRC_WARN = 0.02            # share of packets with a bad CRC
 
 
@@ -389,6 +390,15 @@ def evaluate(c):
     if c.get("lidar"):
         tiles["lidar"] = lidar_tile(c["lidar"])
 
+    # ---- robot profile (#101): link up but nobody knows which robot this is -> lidar on defaults, nothing saved
+    wait = c.get("robot_wait_s") or 0.0
+    if link == "connected" and wait > PROFILE_WARN_S:
+        tiles["profile"] = _tile("profile", "Profile", WARN, "unidentified" if not c.get("robot_name") else "identifying",
+                                 "%s for %d s (%s): lidar on default settings, settings not saved, obstacle frames "
+                                 "held" % ("robot not identified" if not c.get("robot_name") else
+                                           "reconnected robot not identified yet", round(wait),
+                                           c.get("robot_wait_why") or "waiting"))
+
     # ---- E-stop
     latched = bool(c.get("estop") or c.get("robot_estop"))
     tiles["estop"] = _tile("estop", "E-stop", BAD if latched else OK, "LATCHED" if latched else "released",
@@ -480,6 +490,8 @@ def evaluate(c):
             add_pre("rng", "Range sensors", worst([tiles["rngf"]["level"], tiles["rngr"]["level"]]),
                     "both sensors reading" if worst([tiles["rngf"]["level"], tiles["rngr"]["level"]]) == OK else
                     "front: %s, rear: %s" % (tiles["rngf"]["why"], tiles["rngr"]["why"]))
+    if "profile" in tiles:
+        add_pre("profile", "Robot profile", WARN, tiles["profile"]["why"])
     add_pre("estop", "E-stop released", tiles["estop"]["level"], tiles["estop"]["why"])
     lv = worst([i["level"] for i in pre])
     nbad = sum(1 for i in pre if i["level"] == BAD)
@@ -494,7 +506,7 @@ def evaluate(c):
     else:
         head = "Ready to arm"
     order = ["link", "loop", "imu", "encl", "encr", "rngf", "rngr"] + (["lidar"] if "lidar" in tiles else []) + \
-            ["radio", "pi", "disk", "batt", "fw", "estop"]
+            ["radio", "pi", "disk", "batt", "fw"] + (["profile"] if "profile" in tiles else []) + ["estop"]
     return {"tiles": [tiles[k] for k in order],
             "preflight": {"level": {OK: "green", WARN: "amber", BAD: "red", NA: "red"}[lv], "text": head, "items": pre}}
 
