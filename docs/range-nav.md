@@ -54,19 +54,38 @@ GOTO and EXPLORE follow the list the same way; HOLD holds the spot it started at
 ```
            new list / mode GOTO, EXPLORE
                      │
-                     v          |err| < align              dist < arrive_mm
- ┌────────────> TURNING ─────────────────> DRIVING ─────────────────────> (stop) ──┐
- │  next point   (turn in place)  <───────  speed = kp·dist                        │ stopped
- │                               |err| > 3·align  │  ▲                              │ dwell_ms
- │                                       obstacle │  │ GOTO: clear again            │
- │                              < rng.obstacle_mm v  │ EXPLORE: new MSG_GOTO list   v
- │                                             BLOCKED (+ backoff_mm)          more points?
- └──────────────────────────────────────────────────────────────── yes ───────────┤
-                                                                                 no│
-                          end_heading_deg ≥ 0: TURNING to it ──> ARRIVED <─────────┘
+                     v          |err| < align                     last point: dist < arrive_mm
+ ┌────────────> TURNING ─────────────────> DRIVING ──────────────────────────> (stop) ──┐
+ │ corner > 75°  (turn in place)  <───────  pure pursuit, slows for corners             │ stopped
+ │                    |err| > max(3·align, 75°) │  ▲   other points: passed, no stop     │ dwell_ms
+ │                                     obstacle │  │ GOTO: clear again                    v
+ │                            < rng.obstacle_mm v  │ EXPLORE: new MSG_GOTO list        ARRIVED
+ │                                           BLOCKED (+ backoff_mm)            (end_heading_deg ≥ 0:
+ └───────────── passed a corner > 75° ─── DRIVING                               TURNING to it first)
 
  HOLD:  HOLDING  speed = hold_kp × forward error (deadband hold_db_mm), BLOCKED if an obstacle is in the way
 ```
+
+Pass-through waypoints (#103): only the last point of a list stops (the planner's stop-and-scan points are the
+last of their list).
+
+```
+   ●━━━━━━━━━━━━━━━━━━━━━━━━━━◉━━━━━━━━━━━━━━━━● i          ◉ robot, L = max(arrive_mm, 1 s × speed)
+   leg start                   ╲ steers at ✕     ┃          ✕ aim: the route point L from the robot
+                                 ╲               ✕            (L >= 3 × its distance to the route),
+                                    ╲            ┃            up to the next corner > 75° or the last point
+                                                 ● i+1      i done: closer than L, or past it along its leg
+```
+
+| Corner | speed there (defaults) | next waypoint |
+|---|---|---|
+| 0° | `nav.max_speed` | at L |
+| 30° / 45° / 60° / 75° | 228 / 151 / 112 / 88 mm/s (the aim cuts it by ~30 mm), ≥ `nav.min_speed` | at L |
+| > 75° | slows as for a stop (`speed_kp` × dist) | within `arrive_mm`, then turns in place (`align_deg`) |
+
+Speed = (corner speed + `nav.speed_kp` × distance to go) × cos(error), each corner ahead counted; it rises at most
+`speed_kp` × max speed per s (150 mm/s² at 0.6 / 250): no steps at a corner, a start or after an obstacle.
+No new params.
 
 | | |
 |---|---|
@@ -75,7 +94,7 @@ GOTO and EXPLORE follow the list the same way; HOLD holds the spot it started at
 | Slow-down | `nav.slow_mm` → `rng.obstacle_mm`: speed limit falls linearly (≥ `nav.min_speed`) |
 | Side walls (#62) | points beside the body (body rear … 300 mm ahead) give left / right gaps from the body side. Gap < `nav.side_min_mm`: steer away (`nav.side_kp`), slow down (linear to `nav.min_speed` at 0). The corridor is then at most body width + 20 mm: a wall alongside or a door jamb steers, it does not stop. GOTO blocked with a wall alongside: turns away from it in place (≤ 30°) |
 | Turning in place | corners sweep r 88 mm. Something ahead / behind within 105 mm → first step straight away (≤ `nav.stuck_backoff_mm`). Target behind and a wall close at one side → turn the nose away from that wall |
-| Stuck (#62) | driving (not in the last 3 × `arrive_mm`) or turning, but < `nav.stuck_mm` / 15° progress for `nav.stuck_ms` → BLOCKED, back off `nav.stuck_backoff_mm` (at 2 × `nav.min_speed`, ≤ 5 s). GOTO then goes on; EXPLORE waits for the planner (it replans 5 s later with +100 mm margin). With the LD19 the bridge also reports spinning wheels (`EVT_LINK_STUCK`, #79: the odometry moves, the lidar does not): same reaction. The back-off counts travel backwards along the blocked heading only |
+| Stuck (#62) | driving (not in the last 3 × `arrive_mm` to a waypoint) or turning, but < `nav.stuck_mm` / 15° progress for `nav.stuck_ms` → BLOCKED, back off `nav.stuck_backoff_mm` (at 2 × `nav.min_speed`, ≤ 5 s). GOTO then goes on; EXPLORE waits for the planner (it replans 5 s later with +100 mm margin). With the LD19 the bridge also reports spinning wheels (`EVT_LINK_STUCK`, #79: the odometry moves, the lidar does not): same reaction. The back-off counts travel backwards along the blocked heading only |
 | Applies to | GOTO, EXPLORE, HOLD, STATION. MANUAL: `TLM_OBSTACLE` only |
 | LD19 lidar (#77) | a `MSG_LIDAR_OBSTACLES` frame in the last 0.5 s: its 36 points (per 10° sector the nearest in the corridor, else the nearest) count together with the sweep's points for everything above (#99; log `nav: lidar obstacles on` / `… lost`). [ld19.md](ld19.md#obstacles-for-the-robot-issue-77) |
 | GOTO clear again (#99) | only after `nav.obst_age_ms` of **fresh** data (lidar frame or sweep reading < 0.5 s old) with nothing inside `rng.obstacle_mm` + `nav.clear_mm` (+ backoff). No data / blind is never clear; without fresh data a new list or mode keeps the latch |
@@ -84,7 +103,7 @@ GOTO and EXPLORE follow the list the same way; HOLD holds the spot it started at
 | Pose reset | clears the list, points and hold point (ghosts move into the new frame) |
 | GO_HOME | list = [first waypoint, or the origin], mode GOTO (never arms) |
 | NavStatusFrame | at once on a change of state / index / count, else 2 Hz in GOTO/EXPLORE/HOLD; `obstacle_mm` = blocking range |
-| Log | `nav: blocked, obstacle at 287 mm (waypoint 2/2)`, `nav: clear …`, `nav: reached 1/3, 12 mm off`, `nav: arrived`, `nav: stuck, no progress driving for 2.5 s (waypoint 1/2)`, `nav: stuck, wheels turn but the lidar sees no motion (waypoint 1/2)`, `nav: too close to turn (92 mm), stepping back` |
+| Log | `nav: blocked, obstacle at 287 mm (waypoint 2/2)`, `nav: clear …`, `nav: passed 1/3, 118 mm off` (#103), `nav: reached 3/3, 12 mm off` (the last one), `nav: arrived`, `nav: stuck, no progress driving for 2.5 s (waypoint 1/2)`, `nav: stuck, wheels turn but the lidar sees no motion (waypoint 1/2)`, `nav: too close to turn (92 mm), stepping back` |
 
 Simulator: `station/sim/sim.py` `Navigator` is a line-by-line port (same params, states, logs);
 tests `station/sim/tests/test_nav.py`.

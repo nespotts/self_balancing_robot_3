@@ -74,6 +74,15 @@ struct Bot {
   World lworld;
   uint8_t lseq = 0;
   uint32_t lidar_frames = 0;
+  // pass-through stats (#103)
+  uint8_t last_idx = 0;
+  float pass_v[WAYPOINT_MAX] = {};  // measured speed when the index moved on from waypoint i
+  uint32_t pass_ms[WAYPOINT_MAX] = {};
+  float max_turn_cmd = 0;           // |turn| commanded
+  float max_rise = 0, max_drop = 0; // speed command steps per 5 ms (driving, not blocked)
+  float prev_cmd = 0;
+  uint32_t spin_ms = 0;             // turning in place: TURNING, |w| > 20 deg/s, |v| < 60 mm/s
+  float path_len = 0;
 
   NavIn in() const {
     NavIn n;
@@ -159,7 +168,20 @@ struct Bot {
       if (!jam) {
         x += v * cosf(h * 0.0174533f) * dt;
         y += v * sinf(h * 0.0174533f) * dt;
+        path_len += fabsf(v) * dt;
       }
+      if (nav.index() != last_idx && nav.index() > last_idx && last_idx < WAYPOINT_MAX) {
+        pass_v[last_idx] = v;
+        pass_ms[last_idx] = ms;
+      }
+      last_idx = nav.index();
+      max_turn_cmd = fmaxf(max_turn_cmd, fabsf(nav.turn()));
+      if (nav.state() == NAV_DRIVING && prev_cmd > 0 && nav.speed() > 0 && nav.index() + 1 < nav.count()) {
+        max_rise = fmaxf(max_rise, nav.speed() - prev_cmd);
+        max_drop = fmaxf(max_drop, prev_cmd - nav.speed());
+      }
+      prev_cmd = nav.speed();
+      if (nav.state() == NAV_TURNING && fabsf(w) > 20 && fabsf(v) < 60) spin_ms += 5;
       if (fabsf(y - wall_y) < min_wall_y) min_wall_y = fabsf(y - wall_y);
       while (const char* l = nav.peekLog()) {
         printf("  %6.2f s  %s\n", ms / 1000.0, l);
@@ -690,7 +712,138 @@ static void testLidarStuckEvent() {
   CHECK(d.nav.state() == NAV_DRIVING);
 }
 
-int main() {  testThreeWaypoints();
+// ---- pass-through waypoints (#103)
+
+// the robot's live values (2026-11-24)
+static void liveParams() {
+  g_param[P_NAV_ARRIVE_MM] = 120;
+  g_param[P_NAV_DWELL_MS] = 100;
+  g_param[P_NAV_STOP_SPEED] = 90;
+  g_param[P_NAV_STOP_TURN] = 45;
+  g_param[P_NAV_ALIGN_DEG] = 20;
+  g_param[P_NAV_MAX_SPEED] = 250;
+  g_param[P_NAV_MIN_SPEED] = 40;
+  g_param[P_RNG_OBSTACLE_MM] = 160;
+  g_param[P_NAV_SLOW_MM] = 450;
+}
+
+// 5 points from (0,0) heading 0: corners 30, 45, 60 deg, then 110 deg (sharp), legs 1000 / 800 / 800 / 800 / 800
+static const float kRoute[5][2] = {{1000, 0}, {1692.8f, 400}, {1899.9f, 1172.7f}, {1334.2f, 1738.4f}, {996.1f, 1013.4f}};
+
+static void addRoute(Bot& b) {
+  for (auto& p : kRoute) b.nav.add(p[0], p[1]);
+  b.nav.listChanged(true);
+  b.nav.onModeChange(b.in());
+}
+
+static void testPassThrough(bool live) {
+  printf("goto: 5-point route, corners 30 / 45 / 60 / 110 deg, %s params (#103)\n", live ? "live" : "default");
+  reset();
+  if (live) liveParams();
+  Bot b;
+  addRoute(b);
+  float min_v = 1e9, max_off = 0;  // slowest between passing 1 and passing 3; farthest from the route
+  uint32_t spin_early = 0, t_done = 0;
+  for (int i = 0; i < 12000 && !t_done; i++) {
+    const uint32_t spin0 = b.spin_ms;
+    b.run(0.005f);
+    const uint8_t k = b.nav.index();
+    if (k >= 1 && k <= 2) min_v = fminf(min_v, b.v);
+    if (k < 3) spin_early += b.spin_ms - spin0;
+    if (k >= 1 && k <= 3) {  // distance from the route start .. 4 (corner cutting at 1, 2, 3)
+      float best = 1e9;
+      for (int s = 0; s < 4; s++) {
+        const float ax = s ? kRoute[s - 1][0] : 0, ay = s ? kRoute[s - 1][1] : 0;
+        const float dx = kRoute[s][0] - ax, dy = kRoute[s][1] - ay;
+        float t = ((b.x - ax) * dx + (b.y - ay) * dy) / (dx * dx + dy * dy);
+        t = fminf(1, fmaxf(0, t));
+        best = fminf(best, hypotf(b.x - ax - t * dx, b.y - ay - t * dy));
+      }
+      max_off = fmaxf(max_off, best);
+    }
+    if (b.nav.state() == NAV_ARRIVED) t_done = b.ms;
+  }
+  b.run(1);
+  const float off = hypotf(b.x - kRoute[4][0], b.y - kRoute[4][1]);
+  printf("  done in %.1f s, path %.0f mm; speed passing 1-4: %.0f %.0f %.0f %.0f mm/s, slowest 1..3 %.0f mm/s\n",
+         t_done / 1000.0, b.path_len, b.pass_v[0], b.pass_v[1], b.pass_v[2], b.pass_v[3], min_v);
+  printf("  off the route <= %.0f mm, turned in place %.1f s (before the sharp corner %.1f s), max turn %.0f deg/s,\n"
+         "  speed command steps (driving, intermediate) +%.2f / -%.2f mm/s per 5 ms, end %.0f mm off, v %.1f\n",
+         max_off, b.spin_ms / 1000.0, spin_early / 1000.0, b.max_turn_cmd, b.max_rise, b.max_drop, off, b.v);
+  CHECK(t_done > 0);
+  CHECK(b.nav.state() == NAV_ARRIVED && b.nav.index() == 5);
+  CHECK(off < P(P_NAV_ARRIVE_MM));
+  CHECK(fabsf(b.v) < 5);
+  for (int i = 0; i < 3; i++) CHECK(b.pass_v[i] > 1.5f * P(P_NAV_MIN_SPEED));  // never stopped at 1..3
+  CHECK(min_v > P(P_NAV_MIN_SPEED));
+  CHECK(spin_early == 0);              // no turning in place at the 30 / 45 / 60 deg corners
+  CHECK(b.spin_ms > 300);              // ... but at the 110 deg one
+  CHECK(b.pass_v[3] < 100);            // slowed down for it
+  CHECK(b.max_turn_cmd <= P(P_NAV_MAX_TURN) + 0.01f);
+  CHECK(b.max_rise <= P(P_NAV_SPEED_KP) * P(P_NAV_MAX_SPEED) * 0.005f + 0.01f);  // no speed steps
+  CHECK(b.max_drop < 5);
+  CHECK(max_off < 60);                 // corners cut by less than this
+}
+
+static void testPassThroughObstacle() {
+  printf("goto: 5-point route, a wall across leg 3 (#103: obstacle stop mid-route)\n");
+  reset();
+  liveParams();
+  Bot b;
+  // across the leg 2 -> 3 (75 deg) at its middle
+  const float mx = 0.5f * (kRoute[1][0] + kRoute[2][0]), my = 0.5f * (kRoute[1][1] + kRoute[2][1]);
+  const float c = cosf(165 * 0.0174533f), s = sinf(165 * 0.0174533f);
+  b.world.add(mx - 400 * c, my - 400 * s, mx + 400 * c, my + 400 * s);
+  addRoute(b);
+  b.run(30);
+  CHECK(b.nav.state() == NAV_BLOCKED);
+  CHECK(b.nav.obstacle());
+  CHECK(b.nav.index() == 2);
+  CHECK(fabsf(b.v) < 5);
+  const float gap = b.nav.frontMm();
+  printf("  blocked at %.0f, %.0f before waypoint 3, front %.0f mm\n", b.x, b.y, gap);
+  CHECK(gap > P(P_RNG_OBSTACLE_MM) - 60 && gap < P(P_RNG_OBSTACLE_MM) + 10);
+  b.world.n = 0;  // gone: goes on to the end
+  b.run(40);
+  CHECK(b.nav.state() == NAV_ARRIVED && b.nav.index() == 5);
+  CHECK(hypotf(b.x - kRoute[4][0], b.y - kRoute[4][1]) < P(P_NAV_ARRIVE_MM));
+}
+
+// A new route while under way (the planner resends the rest): no stop, no turning in place (#103)
+static void testPassThroughResend() {
+  printf("goto: route resent while driving (#103)\n");
+  reset();
+  liveParams();
+  Bot b, c;  // c: the same without the resend
+  addRoute(b);
+  addRoute(c);
+  b.run(6);
+  c.run(6);
+  CHECK(b.nav.state() == NAV_DRIVING);
+  const int k = b.nav.index();
+  b.nav.clearList();
+  for (int i = k; i < 5; i++) b.nav.add(kRoute[i][0], kRoute[i][1]);  // the rest, as the bridge sends it
+  b.nav.listChanged(true);
+  float dv = 0, dturn = 0;
+  for (int i = 0; i < 400; i++) {
+    b.run(0.005f);
+    c.run(0.005f);
+    dv = fmaxf(dv, fabsf(b.v - c.v));
+    dturn = fmaxf(dturn, fabsf(b.nav.turn() - c.nav.turn()));
+    CHECK(b.nav.state() == NAV_DRIVING);
+  }
+  printf("  at %.0f mm/s: speed differs by <= %.1f mm/s, turn by <= %.1f deg/s from the run without it\n", c.v, dv,
+         dturn);
+  CHECK(dv < 25);     // (the new leg starts at the pose: a slightly different line and corner)
+  CHECK(dturn < 15);
+}
+
+int main() {
+  testPassThrough(false);
+  testPassThrough(true);
+  testPassThroughObstacle();
+  testPassThroughResend();
+  testThreeWaypoints();
   testEndHeading();
   testObstacle(MODE_GOTO);
   testObstacle(MODE_EXPLORE);

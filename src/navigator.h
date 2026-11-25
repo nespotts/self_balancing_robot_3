@@ -4,11 +4,21 @@
 //
 // GOTO / EXPLORE, per waypoint (list from EVT_MARK_WAYPOINT or MSG_GOTO, pose frame):
 //   TURNING  turn in place (nav.turn_kp x bearing error) until |error| < nav.align_deg
-//   DRIVING  speed = nav.speed_kp x distance (>= nav.min_speed, <= nav.max_speed), steer on the bearing;
-//            back to TURNING if |error| > 3 x nav.align_deg
-//            within nav.arrive_mm: speed 0; stopped (|speed| < nav.stop_speed, |yaw| < nav.stop_turn_dps)
-//            for nav.dwell_ms -> next waypoint (pushed out past 2 x arrive_mm -> seek again)
-//   last point: nav.end_heading_deg >= 0 -> TURNING to it (nav.heading_tol_deg), then ARRIVED
+//   DRIVING  steer (nav.turn_kp x bearing error) on a pure-pursuit point: the point of the route (the leg before
+//            after a pass, leg start -> waypoints ahead, up to the next sharp corner or the last point) L from the
+//            robot, furthest along; L = max(nav.arrive_mm, 1 s x speed, 3 x the distance to the route, up to half
+//            the distance to the waypoint (growing no faster than it drives)) (none: the waypoint itself). Back to TURNING if |error| > max(3 x nav.align_deg, 75 deg).
+//            Speed = (corner cap + nav.speed_kp x distance to go) x cos(error), >= nav.min_speed,
+//            <= nav.max_speed, rising at most nav.speed_kp x max speed per s (no steps).
+//   Intermediate waypoints are passed, not stopped at (#103): next one when closer than L (sharp corner:
+//            nav.arrive_mm) or past the waypoint along its leg. Corner cap: the speed at which the pursuit cuts
+//            the corner by ~30 mm (30 / tan(turn / 4) mm/s: 228 at 30 deg, 112 at 60, 88 at 75, >= nav.min_speed),
+//            each corner ahead reached with at most nav.speed_kp x the distance to spare; distance to go = to
+//            the pass radius L. Sharper than 75 deg: cap 0 (slow down as for a stop), turn in place there.
+//   Last point (the only stop; the planner's stop-and-scan points are the last of their list): within
+//            nav.arrive_mm speed 0; stopped (|speed| < nav.stop_speed, |yaw| < nav.stop_turn_dps) for
+//            nav.dwell_ms -> ARRIVED (pushed out past 2 x arrive_mm -> seek again); within 2 x arrive_mm no
+//            steering. nav.end_heading_deg >= 0 -> TURNING to it (nav.heading_tol_deg) first.
 //   BLOCKED  obstacle < rng.obstacle_mm in the direction of travel: stop (and back off nav.backoff_mm).
 //            GOTO resumes after nav.obst_age_ms of FRESH data (a lidar frame < 0.5 s old, or sweep readings
 //            < 0.5 s old) with nothing closer than rng.obstacle_mm + nav.clear_mm (+ nav.backoff_mm) in the
@@ -130,6 +140,12 @@ class Navigator {
   bool fresh(uint32_t now_ms) const;  // fresh obstacle data: a lidar frame or a RangeFrame within 500 ms (#99)
   void logBlind(uint8_t mode);
   void setTarget(const NavIn& in, float x, float y);
+  // pass-through waypoints (#103)
+  void legStart(uint8_t i, float* x, float* y) const;  // where the leg to waypoint i starts
+  float cornerDeg(uint8_t i, float heading) const;     // turn at waypoint i (i + 1 < n_), 0..180 deg
+  float cornerCap(float heading, float vmax) const;    // speed cap at the current waypoint
+  bool pursuit(const NavIn& in, float L, uint8_t last, float* ax, float* ay) const;
+  float routeOff(const NavIn& in) const;               // distance to this leg (and the one before, q_set_)
   void log(const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 
   float wx_[WAYPOINT_MAX] = {}, wy_[WAYPOINT_MAX] = {};
@@ -137,6 +153,13 @@ class Navigator {
   uint8_t mode_ = 0;
   Phase phase_ = SEEK;
   bool driving_ = false;              // SEEK: driving (else turning in place)
+  float sx_ = 0, sy_ = 0;             // start of the leg to the current waypoint (#103)
+  bool leg_set_ = false;              // false: the next update starts it at the pose
+  float qx_ = 0, qy_ = 0;             // start of the leg before it, after a pass-through (pursuit, no jump)
+  bool q_set_ = false;
+  float last_v_ = 0;                  // speed command of the last update (rise limit)
+  float look_far_ = 0;                // pursuit lookahead, long-leg part (grows as the robot drives)
+  uint32_t last_ms_ = 0;
   bool blocked_ = false, latched_ = false;
   bool backing_ = false;
   float back_x_ = 0, back_y_ = 0;
