@@ -1,4 +1,4 @@
-"""Link protocol v8 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
+"""Link protocol v9 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
 
 Frame: 0xA5 0x5A | type u8 | len u8 | payload[len] | crc16 u16 LE
 crc16 = CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over type, len and payload.
@@ -8,7 +8,7 @@ Pure Python, 3.8+.
 import binascii
 import struct
 
-LINK_PROTOCOL_VERSION = 8
+LINK_PROTOCOL_VERSION = 9
 LINK_SYNC1 = 0xA5
 LINK_SYNC2 = 0x5A
 LINK_MAX_PAYLOAD = 200
@@ -84,6 +84,33 @@ LINK_CONTACT_FELL = 0x02        # flags: the robot fell over right after
 LINK_CONTACT_REPORT = 0x04      # flags: STATION, reported only (the motion was not changed)
 CONTACT_KIND_NAMES = {LINK_CONTACT_BUMP: "bump", LINK_CONTACT_STUCK: "stuck"}
 
+# HelloFrame.reset_cause (v9, #109): why the Teensy last reset (src/reset_cause.h)
+LINK_RESET_UNKNOWN = 0
+LINK_RESET_POWER_ON = 1      # cold start: power was off
+LINK_RESET_POWER_DIP = 2     # power-on reset with the SNVS domain kept, off < LINK_RESET_DIP_S: brownout likely
+LINK_RESET_WATCHDOG = 3      # the hardware watchdog fired: the main loop hung / starved the link
+LINK_RESET_LOCKUP = 4        # CPU lockup or a software reset the firmware did not ask for
+LINK_RESET_FAULT = 5         # crash: the core's fault handler rebooted (CrashReport logged)
+LINK_RESET_REQUESTED = 6     # the firmware asked for it (reboot button)
+LINK_RESET_FLASHED = 7       # another firmware build than the previous run
+LINK_RESET_TEMP = 8          # chip over-temperature
+LINK_RESET_OTHER = 9         # WDOG1/2, JTAG, security monitor
+LINK_RESET_DIP_S = 3
+RESET_CAUSE_NAMES = ["unknown", "power-on", "power dip (brownout?)", "watchdog", "lockup / software reset",
+                     "crash (fault handler)", "requested", "flashed", "over-temperature", "other"]
+RESET_UNEXPECTED = {LINK_RESET_POWER_DIP, LINK_RESET_WATCHDOG, LINK_RESET_LOCKUP, LINK_RESET_FAULT,
+                    LINK_RESET_TEMP, LINK_RESET_OTHER}
+LINK_RESETF_CRASH = 0x01     # a CrashReport was saved before this boot
+LINK_RESETF_SNVS = 0x02      # the SNVS domain kept its contents: prev_uptime_s / off_s known
+LINK_RESETF_WDT = 0x04       # the hardware watchdog runs this boot
+
+# TelemetryFrame.fault_flags (v9, #109; was reserved2)
+LINK_FAULT_ENC_L = 0x01      # left encoder fault latched (error_code 3)
+LINK_FAULT_ENC_R = 0x02      # right encoder fault latched (error_code 4)
+LINK_FAULT_ENC_L_ERR = 0x04  # left encoder I2C errors / rejected jumps / recoveries in the last second
+LINK_FAULT_ENC_R_ERR = 0x08
+LINK_FAULT_WDT_OFF = 0x10    # the hardware watchdog is not running
+
 # TelemetryFrame.remote_flags (v3)
 LINK_RF_ESTOP = 0x01      # E-stop latched (from the remote)
 LINK_RF_ARM_WAIT = 0x02   # arming needs the remote's ARMED switch off -> on
@@ -99,8 +126,11 @@ NAV_STATE_COUNT = 6
 NAV_STATE_NAMES = ["idle", "turning", "driving", "blocked", "arrived", "holding"]
 
 # ---- struct layouts: (format, field names in C order) ------------------------------------
-HELLO_FMT = "<BBH24s"
-HELLO_FIELDS = ("link_version", "radio_version", "param_count", "firmware")
+HELLO_FMT = "<BBH24sBBHIII"
+HELLO_FIELDS = ("link_version", "radio_version", "param_count", "firmware",
+                # v9 (#109): why the Teensy last reset
+                "reset_cause", "reset_flags", "srsr", "prev_uptime_s", "off_s", "uptime_ms")
+HELLO_V8_SIZE = 28       # v8 and older: no reset cause (decoded as 0 = unknown)
 
 TELEMETRY_FMT = "<IBBBB23fIBBBB"
 TELEMETRY_FIELDS = (
@@ -112,7 +142,7 @@ TELEMETRY_FIELDS = (
     # v2: balance tuning data
     "bal_p", "bal_i", "bal_d", "steer_out", "vel_out_deg", "step",
     # v3: remote E-stop / arm-wait flags, nav state
-    "remote_flags", "nav_state", "nav_index", "reserved2",
+    "remote_flags", "nav_state", "nav_index", "fault_flags",   # v9: fault_flags (was reserved2)
 )
 TELEMETRY_V1_SIZE = 80   # older frames are still decoded; the missing fields read as 0
 TELEMETRY_V2_SIZE = 104
@@ -168,7 +198,7 @@ _S = {name: struct.Struct(fmt) for name, (fmt, _f) in STRUCTS.items()}
 TELEMETRY_SIZE = _S["TelemetryFrame"].size      # 108
 RANGE_SIZE = _S["RangeFrame"].size              # 28
 PARAM_INFO_SIZE = _S["ParamInfoFrame"].size     # 38
-HELLO_SIZE = _S["HelloFrame"].size              # 28
+HELLO_SIZE = _S["HelloFrame"].size              # 44 (v9)
 NAV_STATUS_SIZE = _S["NavStatusFrame"].size     # 20
 LIDAR_OBST_SIZE = _S["LidarObstacleFrame"].size  # 148
 CONTACT_SIZE = _S["ContactFrame"].size          # 20
@@ -271,7 +301,9 @@ def _unpack(name, payload):
 
 
 def decode_hello(p):
-    d = _unpack("HelloFrame", p)
+    d = _unpack("HelloFrame", _pad(p, (HELLO_V8_SIZE,), HELLO_SIZE))   # v8 firmware: no reset fields (0)
+    if len(p) < HELLO_SIZE:
+        d["off_s"] = 0xFFFFFFFF
     d["firmware"] = _cstr(d["firmware"])
     return d
 
@@ -454,13 +486,14 @@ def encode_lidar_obstacles(seq, age_ms, pts):
 
 # Teensy -> Pi encoders (used by the simulator and tests)
 def encode_hello(link_version=LINK_PROTOCOL_VERSION, radio_version=RADIO_PROTOCOL_VERSION,
-                 param_count=0, firmware=""):
+                 param_count=0, firmware="", reset_cause=0, reset_flags=0, srsr=0, prev_uptime_s=0,
+                 off_s=0xFFFFFFFF, uptime_ms=0):
     return encode_frame(MSG_HELLO, _pack("HelloFrame", locals()))
 
 
 def encode_telemetry(d):
     d = dict(d)
-    for k in ("remote_flags", "nav_state", "nav_index", "reserved2"):   # v3 fields
+    for k in ("remote_flags", "nav_state", "nav_index", "fault_flags"):   # v3 fields (+ v9 fault_flags)
         d.setdefault(k, 0)
     return encode_frame(MSG_TELEMETRY, _pack("TelemetryFrame", d))
 

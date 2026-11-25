@@ -11,7 +11,8 @@ flowchart LR
   L[LD19 lidar<br>Serial7] -- raw bytes --> P
 ```
 
-`loop()`: new IMU sample, balance step, encoders (if due), range slice (at most 1/4 step). Nothing blocks the balance step.
+`loop()`: watchdog feed (if healthy), new IMU sample, balance step, encoders (if due, bounded I2C), range slice (at
+most 1/4 step). Nothing blocks the balance step.
 
 ## Rates
 
@@ -27,7 +28,7 @@ flowchart LR
 
 | Page | What |
 |---|---|
-| [safety.md](safety.md) | STOP latch, arming, falls |
+| [safety.md](safety.md) | STOP latch, arming, falls, encoder faults, hardware watchdog, reset causes, L298N pull-downs |
 | [modes.md](modes.md) | IDLE / BALANCE / MANUAL / STATION / GOTO / EXPLORE / HOLD |
 | [params.md](params.md) | every live param, with defaults |
 | [range-nav.md](range-nav.md) | range sweep, head alignment, navigation |

@@ -24,7 +24,15 @@ void ModeManager::onRadioPacket(const ControlPacket& p, uint32_t now_ms) {
     estop_ = false;
     const bool a = (p.flags & CTRL_FLAG_ARMED) != 0;
     if (!a && !estop_link_) need_arm_edge_ = false;
-    armed_ = a && !need_arm_edge_ && !estop_link_;
+    const bool arm = a && !need_arm_edge_ && !estop_link_;
+    if (arm && !armed_ && enc_fault_) {
+      // encoder fault (#109): no arming; and not later by itself when it clears - ARMED off -> on again
+      need_arm_edge_ = true;
+      armed_ = false;
+      encNote(ENC_NOTE_ARM_REFUSED, MODE_IDLE);
+    } else {
+      armed_ = arm;
+    }
   }
 
   // Mode requests act only on change, so a Pi SET_MODE is not overwritten by the remote's
@@ -35,7 +43,8 @@ void ModeManager::onRadioPacket(const ControlPacket& p, uint32_t now_ms) {
   // motors in whatever mode the remote still shows (issue #21; the remote shows robot>requested).
   // While the link E-stop is latched a selection change is ignored (learned only).
   if (!first_link && !estop_link_ && p.requested_mode != last_req_ && p.requested_mode < MODE_COUNT) {
-    requested_ = (RobotMode)p.requested_mode;
+    if (enc_fault_ && encBlocked(p.requested_mode)) encNote(ENC_NOTE_MODE_REFUSED, p.requested_mode);
+    else requested_ = (RobotMode)p.requested_mode;
   }
   last_req_ = p.requested_mode;
 
@@ -57,6 +66,7 @@ void ModeManager::onPiHeartbeat(uint32_t now_ms, uint8_t clients) {
 SetModeResult ModeManager::onPiSetMode(uint8_t m, uint32_t now_ms) {
   if (m >= MODE_COUNT) return SETMODE_BAD;
   if (estop_link_) return SETMODE_ESTOP;  // latched: no request is stored either
+  if (enc_fault_ && encBlocked(m)) return SETMODE_ENC_FAULT;
   const bool arm_req = arm_req_ && now_ms - arm_req_ms_ <= LINK_ARM_WINDOW_MS;
   arm_req_ = false;  // one-shot
   if (!radioPresent(now_ms)) {
@@ -66,6 +76,7 @@ SetModeResult ModeManager::onPiSetMode(uint8_t m, uint32_t now_ms) {
       armed_ = false;
     } else if (!armed_) {
       if (!arm_req || estop_) return SETMODE_NOT_ARMED;
+      if (enc_fault_) return SETMODE_ENC_FAULT;  // #109: never arm on a faulted encoder
       armed_ = true;
       need_arm_edge_ = false;
     }
@@ -122,7 +133,35 @@ void ModeManager::setAutoCmd(float speed_mms, float turn_dps, uint32_t now_ms) {
 }
 
 void ModeManager::requestMode(uint8_t m) {
-  if (m < MODE_COUNT && !estop_link_) requested_ = (RobotMode)m;
+  if (m >= MODE_COUNT || estop_link_) return;
+  if (enc_fault_ && encBlocked(m)) encNote(ENC_NOTE_MODE_REFUSED, m);
+  else requested_ = (RobotMode)m;
+}
+
+void ModeManager::setEncoderFault(bool fault) {
+  enc_fault_ = fault;
+  if (fault && encBlocked(requested_)) {
+    // drive modes stop: balance in place (armed stays armed: disarming would drop it). Resuming needs a fresh request.
+    if (mode_ == requested_) encNote(ENC_NOTE_STOPPED, requested_);
+    requested_ = MODE_BALANCE;
+  }
+}
+
+void ModeManager::encNote(uint8_t note, uint8_t mode) {
+  if (enc_n_ >= sizeof(enc_q_) / 2) return;  // full: drop
+  const uint8_t i = (uint8_t)((enc_head_ + enc_n_) % (sizeof(enc_q_) / 2));
+  enc_q_[2 * i] = note;
+  enc_q_[2 * i + 1] = mode;
+  enc_n_++;
+}
+
+bool ModeManager::takeEncNotice(uint8_t& note, uint8_t& mode) {
+  if (!enc_n_) return false;
+  note = enc_q_[2 * enc_head_];
+  mode = enc_q_[2 * enc_head_ + 1];
+  enc_head_ = (uint8_t)((enc_head_ + 1) % (sizeof(enc_q_) / 2));
+  enc_n_--;
+  return true;
 }
 
 float ModeManager::speedScale(uint32_t now_ms) const {
@@ -131,6 +170,7 @@ float ModeManager::speedScale(uint32_t now_ms) const {
 }
 
 void ModeManager::update(uint32_t now_ms, bool imu_ok, const ModeLimits& lim) {
+  if (enc_fault_ && encBlocked(requested_)) setEncoderFault(true);  // belt and braces: never drive on a fault
   const RobotMode eff = (estop_ || estop_link_ || !armed_ || !imu_ok) ? MODE_IDLE : requested_;
   if (eff != mode_) {
     mode_ = eff;

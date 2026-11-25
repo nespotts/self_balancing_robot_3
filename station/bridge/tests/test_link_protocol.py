@@ -147,7 +147,8 @@ class TestSizes(unittest.TestCase):
         self.assertEqual(lp.TELEMETRY_SIZE, 108)
         self.assertEqual(lp.RANGE_SIZE, 28)
         self.assertEqual(lp.PARAM_INFO_SIZE, 38)
-        self.assertEqual(lp.HELLO_SIZE, 28)
+        self.assertEqual(lp.HELLO_SIZE, 44)
+        self.assertEqual(lp.HELLO_V8_SIZE, 28)
         self.assertEqual(lp.NAV_STATUS_SIZE, 20)
         for name, (fmt, fields) in lp.STRUCTS.items():
             self.assertLessEqual(struct.calcsize(fmt), lp.LINK_MAX_PAYLOAD)
@@ -170,7 +171,7 @@ class TestCrc(unittest.TestCase):
 
 def sample_tlm(**kw):
     d = {f: 0.0 for f in lp.TELEMETRY_FIELDS}
-    d.update(remote_flags=lp.LINK_RF_ESTOP | lp.LINK_RF_PRESENT, nav_state=lp.NAV_BLOCKED, nav_index=2, reserved2=0)
+    d.update(remote_flags=lp.LINK_RF_ESTOP | lp.LINK_RF_PRESENT, nav_state=lp.NAV_BLOCKED, nav_index=2, fault_flags=0)
     d.update(t_us=123456, mode=3, status=lp.TLM_ARMED | lp.TLM_UPRIGHT, error_code=0, radio_ok=1)
     d.update(pitch_deg=1.5, heading_deg=-370.25, x_mm=1000.0, battery_v=12.25, loop_hz=1000.0)
     d.update(bal_p=-812.5, bal_i=40.25, bal_d=3.5, step=4000000000)
@@ -198,7 +199,19 @@ class TestRoundTrip(unittest.TestCase):
 
     def test_hello_param_nav_log(self):
         h = self.parse_one(lp.encode_hello(param_count=11, firmware="v4 test"))
-        self.assertEqual(h, {"link_version": lp.LINK_PROTOCOL_VERSION, "radio_version": 2, "param_count": 11, "firmware": "v4 test"})
+        self.assertEqual(h, {"link_version": lp.LINK_PROTOCOL_VERSION, "radio_version": 2, "param_count": 11, "firmware": "v4 test",
+                             "reset_cause": 0, "reset_flags": 0, "srsr": 0, "prev_uptime_s": 0, "off_s": 0xFFFFFFFF,
+                             "uptime_ms": 0})
+        # v9 reset cause (#109) round trip, and a v8 HELLO (28 bytes) still decodes with an unknown cause
+        h = self.parse_one(lp.encode_hello(param_count=3, firmware="v4", reset_cause=lp.LINK_RESET_WATCHDOG,
+                                           reset_flags=lp.LINK_RESETF_SNVS | lp.LINK_RESETF_CRASH, srsr=0x80,
+                                           prev_uptime_s=264, off_s=0, uptime_ms=1234))
+        self.assertEqual((h["reset_cause"], h["srsr"], h["prev_uptime_s"], h["off_s"], h["uptime_ms"]),
+                         (lp.LINK_RESET_WATCHDOG, 0x80, 264, 0, 1234))
+        v8 = lp.encode_frame(lp.MSG_HELLO, struct.pack("<BBH24s", 8, 2, 5, b"v4 old"))
+        h = self.parse_one(v8)
+        self.assertEqual((h["link_version"], h["firmware"], h["reset_cause"], h["off_s"]), (8, "v4 old", 0, 0xFFFFFFFF))
+        self.assertEqual(len(lp.RESET_CAUSE_NAMES), lp.LINK_RESET_OTHER + 1)
         p = self.parse_one(lp.encode_param_info(3, 4.63, 0.0, 20.0, "bal.kd"))
         self.assertEqual(p["name"], "bal.kd")
         self.assertAlmostEqual(p["value"], 4.63, places=5)

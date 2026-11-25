@@ -6,13 +6,13 @@ Two-wheel balancing robot: a Teensy 4.1 keeps it upright, an Orange Pi serves a 
 
 ```mermaid
 flowchart LR
-  T["Teensy 4.1<br>firmware v4"] -- "USB<br>link v8" --> P["Orange Pi<br>bridge :8080"]
+  T["Teensy 4.1<br>firmware v4"] -- "USB<br>link v9" --> P["Orange Pi<br>bridge :8080"]
   P -- "Wi-Fi" --> W["phone / PC<br>browser or Balance Bot app"]
   R["RC remote<br>nRF24"] -. "radio" .-> T
   S["simulator<br>python -m station.sim"] -. "same protocol" .-> P
 ```
 
-`HELLO link v8 radio v2 params 112`
+`HELLO link v9 radio v2 params 112`
 
 ## Quick start (30 s)
 

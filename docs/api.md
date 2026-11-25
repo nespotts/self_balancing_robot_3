@@ -207,7 +207,25 @@ blocked for more than 0.2 s the Logs tab says so.
 ## Link messages to the robot
 
 The bridge <-> Teensy link itself (framed binary, CRC16) is defined in
-[include/protocol/link_protocol.h](../include/protocol/link_protocol.h) (link v8), mirrored in `station/bridge/link_protocol.py`.
+[include/protocol/link_protocol.h](../include/protocol/link_protocol.h) (link v9), mirrored in `station/bridge/link_protocol.py`.
+
+New in v9 (issue #109, [safety.md](safety.md#runaway-motor-2026-11-25-109)): **`HelloFrame`** grew to 44 bytes, the
+reset cause of this boot (the same in every HELLO of one boot):
+
+| Byte | Field | |
+|---|---|---|
+| 28 | `reset_cause` u8 | `LINK_RESET_*`: 1 power-on, 2 power dip (brownout?), 3 watchdog, 4 lockup, 5 crash, 6 requested, 7 flashed, 8 over-temperature, 9 other |
+| 29 | `reset_flags` u8 | 0x01 `CRASH` (CrashReport logged), 0x02 `SNVS` (previous run / off time known), 0x04 `WDT` (watchdog running) |
+| 30 | `srsr` u16 | `SRC_SRSR` at boot (raw) |
+| 32 | `prev_uptime_s` u32 | how long the previous run lasted |
+| 36 | `off_s` u32 | previous run's last second -> this boot (0xFFFFFFFF unknown) |
+| 40 | `uptime_ms` u32 | `millis()` when sent: smaller than before = rebooted |
+
+`TelemetryFrame.reserved2` is now **`fault_flags`**: 0x01 / 0x02 left / right encoder fault latched, 0x04 / 0x08 I2C
+trouble in the last second, 0x10 watchdog off. A v8 bridge reads the first 28 HELLO bytes and ignores `fault_flags`; a v9
+bridge pads a v8 HELLO (cause unknown, no Resets tile). New rule: an encoder fault refuses arming and GOTO / EXPLORE /
+HOLD / STATION (`SET_MODE … ignored: … encoder fault …`). Bridge -> browsers: `{"t":"teensy_reset","level":"warn"|"info","text":…}`
+once per Teensy boot. No params.
 
 New in v8: **`MSG_CONTACT`** (0x08, **Teensy -> Pi**, issue #104): the navigator touched something the lidar can't see
 ([range-nav.md](range-nav.md#contacts-obstacles-below-the-lidar-issue-104)). One frame per contact, 20 bytes:

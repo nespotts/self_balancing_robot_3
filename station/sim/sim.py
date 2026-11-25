@@ -120,6 +120,7 @@ BLIND_MS = 3000           # Navigator::kBlindMs
 NAV_IDLE, NAV_TURNING, NAV_DRIVING, NAV_BLOCKED, NAV_ARRIVED, NAV_HOLDING = (
     lp.NAV_IDLE, lp.NAV_TURNING, lp.NAV_DRIVING, lp.NAV_BLOCKED, lp.NAV_ARRIVED, lp.NAV_HOLDING)
 NAV_MODES = (lp.MODE_GOTO, lp.MODE_EXPLORE, lp.MODE_HOLD)
+ENC_BLOCKED = NAV_MODES + (lp.MODE_STATION,)   # refused while an encoder fault is latched (#109, ModeManager::encBlocked)
 SENSOR_HEIGHT_MM = 189.0  # range sensors above the axle
 # Navigator footprint constants (src/navigator.cpp, #62)
 HALF_WIDTH_MM = 76.0      # body side from the centre line
@@ -1353,6 +1354,8 @@ class SimRobot:
         self.drain = 0.00002          # V/s at no load (x11 at full duty); --drain speeds it up for demos
         self.bench = False            # sim-only: no balance lead, the battery taps read ~0 V (Health page: "bench supply")
         self.fault = 0                # sim-only: telemetry error_code (1 IMU init, 2 IMU stale, 3 / 4 encoder)
+        self.reset_cause = lp.LINK_RESET_POWER_ON   # sim-only: what the HELLO says about the last reset (#109)
+        self._enc_side_was = None     # encoder fault side last logged (#109)
         self.radio_log_at = 10.0      # the firmware prints its radio stats line every 10 s while packets arrive
         self.push = 0.0               # sim-only disturbance (rad/s^2), see push()
         self.mtest = SimMotorTest(self.log)   # wheels-up motor test (mot.test)
@@ -1419,7 +1422,10 @@ class SimRobot:
         self.out.append(lp.encode_log(text))
 
     def hello(self):
-        return lp.encode_hello(param_count=len(self.params), firmware="sim v4 2026-11-20")
+        return lp.encode_hello(param_count=len(self.params), firmware="sim v4 2026-11-20",
+                               reset_cause=self.reset_cause, reset_flags=lp.LINK_RESETF_WDT,
+                               srsr=0x80 if self.reset_cause == lp.LINK_RESET_WATCHDOG else 0x01,
+                               uptime_ms=int(self.t * 1000.0) & 0xFFFFFFFF)
 
     def param_frames(self, ids=None):
         return [lp.encode_param_info(i, p[1], p[2], p[3], p[0])
@@ -1489,6 +1495,9 @@ class SimRobot:
                 self.log("SET_MODE %u ignored: station E-stop latched (release it first)" % d["mode"])
             elif r == "not_armed":
                 self.log("SET_MODE %u ignored: not armed (arm first)" % d["mode"])
+            elif r == "enc_fault":
+                self.log("SET_MODE %u ignored: %s encoder fault: no arming, no GOTO / EXPLORE / HOLD / STATION until it "
+                         "reads clean for 2 s" % (d["mode"], self._enc_side()))
         elif t == lp.MSG_SET_PARAM:
             self.set_param(d["id"], d["value"])
         elif t == lp.MSG_GET_PARAMS:
@@ -1580,6 +1589,8 @@ class SimRobot:
             self.arm_req = self.now()
         if self.link_estop:
             return "estop"
+        if self.enc_fault() and mode in ENC_BLOCKED:     # #109: never drive on a faulted encoder
+            return "enc_fault"
         arm_req = self.arm_req is not None and self.now() - self.arm_req <= lp.LINK_ARM_WINDOW_MS / 1000.0
         self.arm_req = None
         if not self.radio_live():
@@ -1588,11 +1599,38 @@ class SimRobot:
             elif not self.armed:
                 if not arm_req:
                     return "not_armed"
+                if self.enc_fault():
+                    return "enc_fault"
                 self.armed = True
         self.requested = mode
         return "ok"
 
+    # ---------------------------------------------------------------- encoder fault (#109, ModeManager::setEncoderFault)
+    def enc_fault(self):
+        """Sim-only fault codes 3 / 4 = the left / right encoder fault latched (the other wheel + gyro give the speed)."""
+        return self.fault in (3, 4)
+
+    def _enc_side(self):
+        return "left" if self.fault == 3 else "right"
+
+    def _fault_flags(self):
+        """TelemetryFrame.fault_flags (link v9)."""
+        return {3: lp.LINK_FAULT_ENC_L, 4: lp.LINK_FAULT_ENC_R}.get(self.fault, 0)
+
     def _update_mode(self):
+        if self.enc_fault() and self.requested in ENC_BLOCKED:
+            self.log("enc fault (%s): %s %s" % (self._enc_side(), lp.MODE_NAMES[self.requested],
+                                                "stopped -> BALANCE, balancing in place" if self.mode == self.requested
+                                                else "refused"))
+            self.requested = lp.MODE_BALANCE
+        side = {3: "L", 4: "R"}.get(self.fault)
+        if side != self._enc_side_was:
+            if self._enc_side_was:
+                self.log("enc %s: ok again (2 s of clean reads)" % self._enc_side_was)
+            if side:
+                self.log("enc %s: FAULT (last nack; 10 errors, 0 rejected, 1 bus recoveries): speed from the other "
+                         "wheel + gyro, balancing in place; drive modes stopped, no arming" % side)
+            self._enc_side_was = side
         eff = self.requested if self.armed and not self.link_estop else lp.MODE_IDLE
         if eff == self.mode:
             return
@@ -1953,7 +1991,7 @@ class SimRobot:
             "vel_out_deg": o["vel_out"], "step": self.step_n & 0xFFFFFFFF,
             "remote_flags": (lp.LINK_RF_PRESENT if self.radio_live() else 0) |
                             (lp.LINK_RF_LINK_ESTOP if self.link_estop else 0),
-            "nav_state": self.nav.state, "nav_index": min(255, self.nav.idx), "reserved2": 0,
+            "nav_state": self.nav.state, "nav_index": min(255, self.nav.idx), "fault_flags": self._fault_flags(),
         })
 
     # ---------------------------------------------------------------- range sweep (src/range_sweep.cpp)

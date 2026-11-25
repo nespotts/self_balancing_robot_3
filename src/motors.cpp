@@ -237,7 +237,46 @@ static void applyConfig(float hz, uint8_t mode) {
   }
 }
 
+// ---- motor pins low as early and as hard as possible (issue #109) ----
+// One pin straight to GPIO low output with the core's constant register macros (CORE_PINn_*): plain stores to fixed
+// addresses, no RAM tables (digital_pin_to_info_PGM lives in DTCM, not yet copied at reset) and no call into ITCM code,
+// so it also works in startup_early_hook (before RAM / ITCM are initialised) and in the watchdog interrupt.
+#define PIN_LOW_RAW(n)                                  \
+  do {                                                  \
+    CORE_PIN##n##_PORTCLEAR = CORE_PIN##n##_BITMASK;    \
+    CORE_PIN##n##_DDRREG |= CORE_PIN##n##_BITMASK;      \
+    CORE_PIN##n##_PADCONFIG = IOMUXC_PAD_DSE(7);        \
+    CORE_PIN##n##_CONFIG = 5 | 0x10; /* GPIO (off a PWM timer too) */ \
+  } while (0)
+static_assert(pins::MOT_L_EN == 4 && pins::MOT_L_D1 == 5 && pins::MOT_L_D2 == 6 && pins::MOT_R_EN == 7 &&
+                  pins::MOT_R_D1 == 8 && pins::MOT_R_D2 == 9,
+              "MOTOR_PINS_LOW() names the motor pins D4..D9 literally: update it with config.h");
+// EN pins first: the bridge lets go at once
+#define MOTOR_PINS_LOW() \
+  do {                   \
+    PIN_LOW_RAW(4);      \
+    PIN_LOW_RAW(7);      \
+    PIN_LOW_RAW(5);      \
+    PIN_LOW_RAW(6);      \
+    PIN_LOW_RAW(8);      \
+    PIN_LOW_RAW(9);      \
+  } while (0)
+
+// Teensy core hook (cores/teensy4/startup.c): runs a few instructions after reset, ~300 ms before setup() (the core
+// waits for USB). Without it the L298N inputs float (or the pad keepers hold their last level) all that time.
+// The core selects the fast GPIOs (GPR26..29) a little later; done here first so the levels set now stay.
+extern "C" FLASHMEM void startup_early_hook(void) {
+  IOMUXC_GPR_GPR26 = 0xFFFFFFFF;
+  IOMUXC_GPR_GPR27 = 0xFFFFFFFF;
+  IOMUXC_GPR_GPR28 = 0xFFFFFFFF;
+  IOMUXC_GPR_GPR29 = 0xFFFFFFFF;
+  MOTOR_PINS_LOW();
+}
+
+void motors_emergency_off() { MOTOR_PINS_LOW(); }
+
 void motors_begin() {
+  MOTOR_PINS_LOW();  // again (the hook should have), before anything else
   analogWriteResolution(12);
   g_left.begin();
   g_right.begin();

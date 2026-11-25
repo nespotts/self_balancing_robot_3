@@ -282,7 +282,7 @@ class TestHealthWithSim(unittest.TestCase):
             ws = await rig.ws()
             h = await wait_for(ws, lambda m: m["t"] == "health" and m["tiles"] and m["preflight"]["level"] != "red", 8)     # range rates need a first second
             ids = [t["id"] for t in h["tiles"]]
-            self.assertEqual(ids, ["link", "loop", "imu", "encl", "encr", "rngf", "rngr", "radio", "pi", "disk", "batt", "fw", "estop"])
+            self.assertEqual(ids, ["link", "loop", "imu", "encl", "encr", "rngf", "rngr", "radio", "pi", "disk", "batt", "fw", "reset", "estop"])
             self.assertIn(h["preflight"]["level"], ("green", "amber"), h["preflight"])
             self.assertEqual(tile(h, "estop")["level"], "ok")
             self.assertEqual(tile(h, "radio")["level"], "na")                    # sim without a remote
@@ -295,7 +295,7 @@ class TestHealthWithSim(unittest.TestCase):
             self.assertEqual(st["health"]["t"], "health")
             api = json.loads(await asyncio.get_running_loop().run_in_executor(None, lambda: urllib.request.urlopen(
                 "http://127.0.0.1:%d/api/health" % rig.port, timeout=5).read()))
-            self.assertEqual(len(api["tiles"]), 13)
+            self.assertEqual(len(api["tiles"]), 14)
             # the battery model learns the sim's discharge and gives minutes
             h = await wait_for(ws, lambda m: m["t"] == "health" and m["battery"]["minutes"] is not None, 40)
             self.assertEqual(h["battery"]["state"], "ok")

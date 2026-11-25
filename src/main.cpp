@@ -12,6 +12,7 @@
 #include "battery.h"
 #include "config.h"
 #include "controller.h"
+#include "encoder_io.h"
 #include "imu.h"
 #include "lidar_fwd.h"
 #include "mode_manager.h"
@@ -26,9 +27,14 @@
 #include "range_sweep.h"
 #include "reboot_button.h"
 #include "remote_radio.h"
+#include "reset_cause.h"
+#include "watchdog.h"
 
 static Imu imu;
 static RangeSweep sweep;
+// AS5600s on bounded I2C reads (issue #109): left on Wire (LPI2C1, D18 / D19), right on Wire1 (LPI2C3, D17 / D16)
+static As5600Io enc_left(Wire, IMXRT_LPI2C1_ADDRESS, I2C_LEFT_SDA, I2C_LEFT_SCL, I2C_LEFT_HZ, pins::ENC_L_DIR, false);
+static As5600Io enc_right(Wire1, IMXRT_LPI2C3_ADDRESS, I2C_RIGHT_SDA, I2C_RIGHT_SCL, I2C_RIGHT_HZ, pins::ENC_R_DIR, true);
 static Odometry odom;
 static Controller ctl;
 static ModeManager modes;
@@ -55,6 +61,8 @@ static uint32_t last_tlm_us = 0;
 static bool hello_pending = true;
 static uint16_t param_stream = P_COUNT;  // next ParamInfo to send (P_COUNT = idle)
 static bool save_wait_logged = false, defaults_wait_logged = false;
+static bool reset_log_pending = true;    // the reset-cause lines: at boot and whenever the host (re)connects
+static uint32_t bg_poll_us = 0;          // last background pass that polled the Pi link (watchdog health)
 
 // ------------------------------------------------------------------ helpers
 
@@ -187,6 +195,7 @@ static void buildTelemetry(uint32_t t_us) {
                    (modes.linkEstop() ? LINK_RF_LINK_ESTOP : 0) | (modes.handoverWait() ? LINK_RF_NAV_HANDOVER : 0);
   f.nav_state = nav.state();
   f.nav_index = nav.index();
+  f.fault_flags = odom.faultFlags(micros()) | (wdt_running() ? 0 : LINK_FAULT_WDT_OFF);
   tlm_fresh = true;
 }
 
@@ -235,7 +244,30 @@ static bool sendHello() {
   h.radio_version = RADIO_PROTOCOL_VERSION;
   h.param_count = P_COUNT;
   snprintf(h.firmware, sizeof(h.firmware), "%s", FIRMWARE_ID);
+  const ResetInfo& r = reset_info();  // v9 (#109)
+  h.reset_cause = r.cause;
+  h.reset_flags = r.flags;
+  h.srsr = (uint16_t)r.srsr;
+  h.prev_uptime_s = r.prev_uptime_s;
+  h.off_s = r.off_s;
+  h.uptime_ms = millis();
   return link.send(MSG_HELLO, &h, sizeof(h));
+}
+
+// "reset: ..." (+ the CrashReport summary): at boot and on every host connect, so the bridge always gets it.
+static bool sendResetLog() {
+  const ResetInfo& r = reset_info();
+  char off[24] = "?";
+  if (r.flags & LINK_RESETF_SNVS) snprintf(off, sizeof(off), "%lu s", (unsigned long)r.off_s);
+  if (!link.log("reset: %s (SRSR 0x%03lx), previous run %lu s, off %s, watchdog %s", reset_cause_name(r.cause),
+                (unsigned long)r.srsr, (unsigned long)r.prev_uptime_s, (r.flags & LINK_RESETF_SNVS) ? off : "unknown",
+                wdt_running() ? "on" : "OFF"))
+    return false;
+  if (r.crash[0]) {
+    link.log("reset: crash report: %.150s", r.crash);
+    if (strlen(r.crash) > 150) link.log("reset: crash report (2): %.150s", r.crash + 150);
+  }
+  return true;
 }
 
 static bool sendNavStatus() {
@@ -340,6 +372,73 @@ static void handleEvent(uint8_t ev) {
   }
 }
 
+// ------------------------------------------------------------------ encoder faults (issue #109)
+
+static const char* encFaultWhich() {
+  return odom.leftOk() ? (odom.rightOk() ? "no" : "right") : (odom.rightOk() ? "left" : "left + right");
+}
+
+// Fault set / cleared, what the fault stopped or refused, and the counters (every 10 s while anything happens, else
+// every 60 s). The bridge's Health page reads the "enc:" line (station/bridge/health.py ENC_RE).
+static void encoderLog(uint32_t now_us, uint32_t now_ms) {
+  static bool pend[2] = {false, false};
+  static uint8_t note_pend = 0, note_mode = 0;
+  static uint32_t stats_ms = 0;
+  static uint32_t last_sum = 0;
+  for (int i = 0; i < 2; i++) {
+    WheelEncoder& w = odom.wheel(i == 1);
+    if (w.takeFaultChanged()) pend[i] = true;
+    if (!pend[i]) continue;
+    const char side = i ? 'R' : 'L';
+    bool sent;
+    if (w.faulted()) {
+      const EncoderStats& s = w.stats();
+      sent = link.log("enc %c: FAULT (last %s; %lu errors, %lu rejected, %lu bus recoveries): %s; drive modes stopped, "
+                      "no arming", side, i2c_status_name(w.lastError()), (unsigned long)s.errors, (unsigned long)s.rejects,
+                      (unsigned long)s.recoveries,
+                      odom.speedOk() ? "speed from the other wheel + gyro, balancing in place"
+                                     : "no wheel speed: velocity loop off (balance + heading only)");
+    } else {
+      sent = link.log("enc %c: ok again (%lu s of clean reads)", side, (unsigned long)(ENC_CLEAR_MS / 1000));
+    }
+    if (sent) pend[i] = false;
+  }
+  static const char* const kModes[] = {"IDLE", "BALANCE", "MANUAL", "STATION", "GOTO", "EXPLORE", "HOLD"};
+  if (!note_pend) modes.takeEncNotice(note_pend, note_mode);
+  if (note_pend) {
+    const char* m = note_mode < MODE_COUNT ? kModes[note_mode] : "?";
+    bool sent = true;
+    if (note_pend == ENC_NOTE_STOPPED)
+      sent = link.log("enc fault (%s): %s stopped -> BALANCE, balancing in place", encFaultWhich(), m);
+    else if (note_pend == ENC_NOTE_ARM_REFUSED)
+      sent = link.log("enc fault (%s): arming refused (ARMED off -> on again once it clears)", encFaultWhich());
+    else if (note_pend == ENC_NOTE_MODE_REFUSED)
+      sent = link.log("enc fault (%s): %s refused", encFaultWhich(), m);
+    if (sent) note_pend = 0;
+  }
+  const EncoderStats& a = odom.wheel(false).stats();
+  const EncoderStats& b = odom.wheel(true).stats();
+  const uint32_t sum = a.errors + a.rejects + a.recoveries + b.errors + b.rejects + b.recoveries;
+  const uint32_t every = (sum != last_sum || !odom.ok()) ? 10000u : 60000u;
+  if (now_ms - stats_ms >= every && now_ms > 5000) {
+    uint32_t ma, xa, mb, xb;
+    odom.wheel(false).takeTiming(ma, xa);
+    odom.wheel(true).takeTiming(mb, xb);
+    if (link.log("enc: L %s err %lu rej %lu rec %lu resync %lu read %lu/%lu us last %s | R %s err %lu rej %lu rec %lu "
+                 "resync %lu read %lu/%lu us last %s",
+                 odom.leftOk() ? "ok" : "FAULT", (unsigned long)a.errors, (unsigned long)a.rejects,
+                 (unsigned long)a.recoveries, (unsigned long)a.resyncs, (unsigned long)ma, (unsigned long)xa,
+                 i2c_status_name(odom.wheel(false).lastError()), odom.rightOk() ? "ok" : "FAULT",
+                 (unsigned long)b.errors, (unsigned long)b.rejects, (unsigned long)b.recoveries,
+                 (unsigned long)b.resyncs, (unsigned long)mb, (unsigned long)xb,
+                 i2c_status_name(odom.wheel(true).lastError()))) {
+      stats_ms = now_ms;
+      last_sum = sum;
+    }
+  }
+  (void)now_us;
+}
+
 // ------------------------------------------------------------------ Pi link input
 
 static void onLinkFrame(uint8_t type, const uint8_t* p, uint8_t len) {
@@ -364,6 +463,9 @@ static void onLinkFrame(uint8_t type, const uint8_t* p, uint8_t len) {
         const SetModeResult r = modes.onPiSetMode(p[0], now_ms);
         if (r == SETMODE_ESTOP) link.log("SET_MODE %u ignored: station E-stop latched (release it first)", (unsigned)p[0]);
         else if (r == SETMODE_NOT_ARMED) link.log("SET_MODE %u ignored: not armed (arm first)", (unsigned)p[0]);
+        else if (r == SETMODE_ENC_FAULT)
+          link.log("SET_MODE %u ignored: %s encoder fault: no arming, no GOTO / EXPLORE / HOLD / STATION until it reads "
+                   "clean for %lu s", (unsigned)p[0], encFaultWhich(), (unsigned long)(ENC_CLEAR_MS / 1000));
       }
       break;
     case MSG_SET_PARAM:
@@ -441,6 +543,7 @@ static void controlStep() {
   have_step = true;
   last_step_us = s.t_us;
 
+  modes.setEncoderFault(!odom.ok());  // #109: no arming / drive modes on a faulted encoder
   modes.update(now_ms, true, limits());
   if (modes.takeModeChanged()) {
     ctl.onModeChange();
@@ -469,7 +572,7 @@ static void controlStep() {
   in.heading = imu.heading();
   in.yaw_rate = s.yaw_rate_dps;
   in.speed_mms = odom.speed_mms;
-  in.speed_ok = odom.ok();
+  in.speed_ok = odom.speedOk();  // one wheel faulted: the other wheel + gyro (odometry.h)
   in.target_speed = target_speed;
   in.target_turn = modes.targetTurn();
   in.trim_deg = trim_deg;
@@ -484,11 +587,12 @@ static void controlStep() {
   const uint32_t t = micros();
   if (t - enc_last_us >= ENCODER_PERIOD_US) {
     enc_last_us = t;
-    odom.update(t, imu.heading());
+    odom.update(t, imu.heading(), s.yaw_rate_dps);
     if (odom.ok()) motors_speed_feedback(odom.leftCounts(), odom.rightCounts(), t);
   }
-  // range sweep: a bounded slice of I2C work (a quarter of the step period), long before the next sample
-  if (sweep.started())
+  // range sweep: a bounded slice of I2C work (a quarter of the step period), long before the next sample. Not while
+  // the left encoder's bus (also the sweep's) is failing / recovering: Wire's own waits could stall the loop (#109).
+  if (sweep.started() && !odom.leftBusSuspect(micros()))
     sweep.service(micros(), (uint32_t)(250000.0f / P(P_CTL_RATE_HZ)), rangePose(), modes.motorsAllowed());
   for (RangeFrame rf; sweep.takeNavReading(rf);) nav.addRange(rf, now_ms);
   buildTelemetry(s.t_us);
@@ -607,6 +711,7 @@ static void background() {
     trim_deg = ((float)pkt.knob_left - 127.5f) / 127.5f * P(P_BAL_KNOB_TRIM);
     radio.setAck(buildRadioTelemetry(pkt.seq));
   }
+  modes.setEncoderFault(!odom.ok());
   modes.update(now_ms, imu.healthy(now_us), limits());
   if (!modes.motorsAllowed() && motors_active) {  // E-stop / disarm / IMU fault: don't wait for the next step
     motors_stop();
@@ -629,11 +734,19 @@ static void background() {
     cfg_log = false;
 
   if (imu.dataReady()) return;
+  bg_poll_us = micros();  // the watchdog's "comms healthy" (watchdog.h)
   link.poll(onLinkFrame, 256);
   if (imu.dataReady()) return;
 
-  if (link.hostConnected()) hello_pending = true;
+  if (link.hostConnected()) hello_pending = reset_log_pending = true;
   sendOutput(now_us);
+  if (reset_log_pending && !hello_pending && sendResetLog()) reset_log_pending = false;
+  encoderLog(now_us, now_ms);
+  static uint32_t snvs_ms = 0;
+  if (now_ms - snvs_ms >= 1000) {  // the reset-cause marker: RTC seconds + uptime (reset_cause.h)
+    snvs_ms = now_ms;
+    reset_cause_tick(now_ms);
+  }
 
   batt.update(now_ms);
   motors_set_vbatt(batt.packV(), now_ms);
@@ -643,12 +756,12 @@ static void background() {
   if (now_us - last_step_us > 20000) {
     if (now_us - enc_last_us >= 10000) {
       enc_last_us = now_us;
-      odom.update(now_us, imu.heading());
+      odom.update(now_us, imu.heading(), imu.sample().yaw_rate_dps);
       if (odom.ok()) motors_speed_feedback(odom.leftCounts(), odom.rightCounts(), now_us);
     }
     if (now_us - last_tlm_us >= 100000 && !tlm_fresh) buildTelemetry(now_us);
     static uint32_t sweep_us = 0;
-    if (sweep.started() && now_us - sweep_us >= 2500) {
+    if (sweep.started() && now_us - sweep_us >= 2500 && !odom.leftBusSuspect(now_us)) {
       sweep_us = now_us;
       sweep.service(now_us, 600, rangePose(), modes.motorsAllowed());
       for (RangeFrame rf; sweep.takeNavReading(rf);) nav.addRange(rf, now_ms);
@@ -671,9 +784,9 @@ static void background() {
     rate_steps0 = step_count;
   }
 
-  // things that may block for a few ms: only with the motors off
+  // things that may block for a few ms: only with the motors off, and the watchdog on its long (idle) timeout
   if (imu.dataReady()) return;
-  const bool motors_off = !motors_active && !mtest.driving();
+  const bool motors_off = !motors_active && !mtest.driving() && wdt_can_block();
   imu.service(now_ms, motors_off);
   radio.service(now_ms, motors_off);
   // rng.enable 1 while the lidar runs: the sweep is about to start (motors off) and drive D28 / D29 (its sensor 1's
@@ -711,7 +824,9 @@ static void background() {
 // ------------------------------------------------------------------ setup / loop
 
 void setup() {
-  motors_begin();  // H-bridge pins driven low first
+  // H-bridge pins driven low first (they already are: startup_early_hook in motors.cpp, a few us after reset)
+  motors_begin();
+  reset_cause_capture(FIRMWARE_ID);  // SRC_SRSR + SNVS marker + CrashReport, before anything can reset again (#109)
   // Deselect every SPI chip before anything talks on the bus (a floating IMU CS breaks the nRF24 init).
   pinMode(pins::IMU_CS, OUTPUT);
   digitalWriteFast(pins::IMU_CS, HIGH);
@@ -727,9 +842,10 @@ void setup() {
   // VL53L0X + servo: only with rng.enable = 1 (or later, when it is set with the motors off).
   // Their init re-begins Wire, so the clocks are set after it.
   if (P(P_RNG_ENABLE) >= 0.5f) sweep.begin();
-  Wire.setClock(I2C_CLOCK_HZ);
-  Wire1.setClock(I2C_CLOCK_HZ);
-  odom.begin();
+  // the encoders' buses: Wire.begin() again + each bus's clock (I2C_LEFT_HZ / I2C_RIGHT_HZ, config.h)
+  enc_left.begin();
+  enc_right.begin();
+  odom.begin(&enc_left, &enc_right);
   while (millis() < 150) {}  // nRF24 needs ~100 ms after power-up before it takes its config
   radio.begin();
   imu.begin();
@@ -746,10 +862,28 @@ void setup() {
   } else {
     link.log("lidar: Serial7 off (rng.enable 1: D28 / D29 are the sweep's sensor 1 pins)");
   }
+  // hardware watchdog last: setup() itself may block (IMU / radio init) with the motors off
+  const bool wdt = wdt_begin();
+  reset_cause_set_wdt(wdt);
+  if (wdt)
+    link.log("watchdog: RTWDOG on, %lu ms while the motors may run, %lu ms idle", (unsigned long)WDT_RUN_MS,
+             (unsigned long)WDT_IDLE_MS);
+  else
+    link.log("watchdog: FAILED to start (RTWDOG locked): no hang protection this boot");
+  bg_poll_us = micros();  // (the "reset: ..." line follows the first HELLO: reset_log_pending)
   rate_t0_ms = millis();
 }
 
 void loop() {
+  // Hardware watchdog (#109): fed here once per pass while background() runs and, with the motors possibly driven, the
+  // balance steps come. Short timeout whenever the motors may run (armed in a mode, or the motor test).
+  WdtIn w;
+  w.now_us = micros();
+  w.bg_us = bg_poll_us;
+  w.step_us = last_step_us;
+  w.motors_active = motors_active || mtest.driving() || modes.motorsAllowed();
+  if (w.motors_active && !have_step) w.step_us = w.now_us;  // armed before the first step: background stops it
+  wdt_service(w);
   if (imu.poll()) {
     controlStep();
     return;

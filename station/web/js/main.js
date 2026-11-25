@@ -74,7 +74,11 @@ on("error", (m) => {
 // ---------- top bar ----------
 const pLink = document.getElementById("pill-link"), pMode = document.getElementById("pill-mode");
 const pArmed = document.getElementById("pill-armed"), pBatt = document.getElementById("pill-batt");
-let rcLost = false, navHandover = false;
+let rcLost = false, navHandover = false, encFault = "";
+const pFault = document.getElementById("pill-fault");
+pFault.onclick = () => show("health");
+// The Teensy rebooted on its own (#109: watchdog, crash, power dip): the bridge says why, once per boot.
+on("teensy_reset", (m) => { if (m.level === "warn") toast(m.text, 8000); });
 function setPill(p, text, cls) {
   p.querySelector(".txt").textContent = text;
   p.className = "pill " + (cls || "");
@@ -105,6 +109,17 @@ function updateTop() {
   disarmBtn.hidden = !(armedNow && !rcIdle);
   document.body.classList.toggle("is-armed", armedNow);   // narrow screens: the Disarm button says armed
   // GOTO / EXPLORE / HOLD paused because the RC remote was lost: needs it back, or a mode from here (link v4: 0x10)
+  // Encoder fault (#109, link v9 fault_flags 0x01 / 0x02; error_code 3 / 4 on older firmware): the robot refuses
+  // arming and GOTO / EXPLORE / STATION, and balances in place on the other wheel + gyro. Loud: pill + toast.
+  const ff = t && alive ? (t.fault_flags || 0) : 0;
+  const encL = !!(ff & 1) || (t && alive && t.error_code === 3), encR = !!(ff & 2) || (t && alive && t.error_code === 4);
+  const enc = encL && encR ? "L+R" : encL ? "L" : encR ? "R" : "";
+  pFault.hidden = !enc;
+  if (enc) pFault.querySelector(".txt").textContent = "ENC " + enc + " FAULT";
+  if (enc && enc !== encFault) toast((enc === "L+R" ? "Both encoders" : (enc === "L" ? "Left" : "Right") + " encoder") +
+    " FAULT: driving stopped, no arming - balancing in place. Check the encoder cable (Health)", 6000);
+  else if (!enc && encFault) toast("Encoders OK again: pick a mode to drive", 3500);
+  encFault = enc;
   const handover = !!(t && alive && (t.remote_flags & 0x10));
   if (handover && !navHandover) toast("Remote lost: the robot stopped and waits. Pick the mode here to take over.", 5000);
   navHandover = handover;

@@ -35,7 +35,7 @@ class TestFrame(unittest.TestCase):
         self.assertAlmostEqual(d["x_mm"], 1234.5, places=3)
         self.assertAlmostEqual(d["heading_deg"], 90.0, places=3)
         self.assertEqual(lp.CONTACT_SIZE, 20)
-        self.assertEqual(lp.LINK_PROTOCOL_VERSION, 8)
+        self.assertGreaterEqual(lp.LINK_PROTOCOL_VERSION, 8)   # MSG_CONTACT since v8 (v9: #109 reset cause)
 
 
 class TestMarks(unittest.TestCase):

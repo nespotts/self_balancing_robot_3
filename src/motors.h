@@ -75,7 +75,10 @@ class Motor {
   float sl_target_ = 0;
 };
 
-void motors_begin();
+void motors_begin();  // first thing in setup(): pins low (also done at reset by startup_early_hook, motors.cpp)
+// All six H-bridge pins GPIO low at once, register writes only (watchdog interrupt, issue #109). The Motor objects
+// are not told: only for "the chip resets next".
+void motors_emergency_off();
 void motors_set(float left, float right);
 void motors_set_raw(float left_duty, float right_duty);
 // Motor test: wheels 0 both, 1 left only, 2 right only; an unselected wheel, or duty 0, is off()

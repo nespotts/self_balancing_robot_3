@@ -30,7 +30,11 @@
 // v8: MSG_CONTACT (Teensy -> Pi, issue #104): the navigator felt a contact the lidar can't see (a bump, or pushing but
 //     not moving) and tells where. A v7 bridge ignores it (unknown type: no bump marks, the "nav: contact" log line still
 //     shows); v7 firmware never sends it. No other change.
-#define LINK_PROTOCOL_VERSION 8
+// v9 (#109, safety): HelloFrame gained the reset cause (reset_cause .. uptime_ms, 44 bytes; a v8 bridge reads the first
+//     28 bytes as before, a v9 bridge pads a v8 HELLO with 0 = unknown). TelemetryFrame.reserved2 is now fault_flags
+//     (LINK_FAULT_* bits, same layout: a v8 bridge ignores it). New rules: a latched encoder fault refuses arming and the
+//     GOTO / EXPLORE / HOLD / STATION modes (SET_MODE logs "ignored: encoder fault").
+#define LINK_PROTOCOL_VERSION 9
 #define LINK_SYNC1 0xA5
 #define LINK_SYNC2 0x5A
 #define LINK_MAX_PAYLOAD 200
@@ -93,7 +97,39 @@ struct __attribute__((packed)) HelloFrame {
   uint8_t radio_version;  // RADIO_PROTOCOL_VERSION
   uint16_t param_count;
   char firmware[24];      // build id, e.g. "v4 2026-11-20 abc1234", zero padded
+  // v9 (#109): why the Teensy last reset, read once at boot (src/reset_cause.h); the same in every HELLO of one boot
+  uint8_t reset_cause;    // LinkResetCause
+  uint8_t reset_flags;    // LINK_RESETF_* bits
+  uint16_t srsr;          // SRC_SRSR at boot (raw reset-source bits, cleared after reading)
+  uint32_t prev_uptime_s; // how long the previous run lasted, s (0 = unknown)
+  uint32_t off_s;         // s from the previous run's last second to this boot (0xFFFFFFFF = unknown)
+  uint32_t uptime_ms;     // millis() when this HELLO was sent: a smaller value than before = the Teensy rebooted
+};  // 44 bytes
+
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(HelloFrame) == 44, "HelloFrame size changed - bump LINK_PROTOCOL_VERSION");
+#endif
+
+// HelloFrame.reset_cause (v9). The i.MX RT1062 has no brownout flag: a power dip shows as a power-on reset; it is told
+// from a real power cycle by the SNVS domain (its RTC and 4 general-purpose registers) surviving the dip.
+enum LinkResetCause : uint8_t {
+  LINK_RESET_UNKNOWN = 0,
+  LINK_RESET_POWER_ON = 1,    // cold start: power was off (SNVS lost, or off for >= LINK_RESET_DIP_S)
+  LINK_RESET_POWER_DIP = 2,   // power-on / reset-pin reset with SNVS kept and off < LINK_RESET_DIP_S: brownout likely
+  LINK_RESET_WATCHDOG = 3,    // the hardware watchdog (RTWDOG) fired: the main loop hung or starved the link
+  LINK_RESET_LOCKUP = 4,      // CPU lockup or a software reset the firmware did not ask for
+  LINK_RESET_FAULT = 5,       // the Teensy core's fault handler rebooted after a crash (CrashReport saved)
+  LINK_RESET_REQUESTED = 6,   // the firmware asked for it (reboot button)
+  LINK_RESET_FLASHED = 7,     // a different firmware build than the previous run (flashed)
+  LINK_RESET_TEMP = 8,        // chip over-temperature
+  LINK_RESET_OTHER = 9,       // WDOG1/2, JTAG, security monitor
+  LINK_RESET_CAUSE_COUNT
 };
+#define LINK_RESET_DIP_S 3
+// HelloFrame.reset_flags (v9)
+#define LINK_RESETF_CRASH 0x01    // a CrashReport (fault address, CFSR) was saved before this boot: logged at boot
+#define LINK_RESETF_SNVS 0x02     // the SNVS domain kept its contents: prev_uptime_s / off_s are known
+#define LINK_RESETF_WDT 0x04      // the hardware watchdog runs this boot
 
 // Everything below is a snapshot of ONE balance step (t_us = that step's IMU sample time).
 struct __attribute__((packed)) TelemetryFrame {
@@ -126,8 +162,15 @@ struct __attribute__((packed)) TelemetryFrame {
   uint8_t remote_flags;     // LINK_RF_* bits (the radio TLM_* status byte is full)
   uint8_t nav_state;        // NavState
   uint8_t nav_index;        // waypoint being driven to (= NavStatusFrame.nav_index)
-  uint8_t reserved2;
+  uint8_t fault_flags;      // v9 (was reserved2): LINK_FAULT_* bits
 };  // 108 bytes
+
+// TelemetryFrame.fault_flags (v9, #109). error_code shows only the first fault; these show every encoder fault.
+#define LINK_FAULT_ENC_L 0x01      // left encoder fault latched (error_code 3): clears after 2 s of clean reads
+#define LINK_FAULT_ENC_R 0x02      // right encoder fault latched (error_code 4)
+#define LINK_FAULT_ENC_L_ERR 0x04  // left encoder I2C errors / rejected jumps / bus recoveries in the last second
+#define LINK_FAULT_ENC_R_ERR 0x08  // right encoder, the same
+#define LINK_FAULT_WDT_OFF 0x10    // the hardware watchdog is not running (failed to start)
 
 // TelemetryFrame.remote_flags
 #define LINK_RF_ESTOP 0x01     // E-stop latched (from the remote); clears with a packet without it

@@ -4,6 +4,7 @@
 
 #include "config.h"
 #include "motors.h"
+#include "reset_cause.h"
 
 void RebootButton::begin() {
   b_.attach(pins::REBOOT_BTN, INPUT);
@@ -17,6 +18,7 @@ void RebootButton::update() {
 
 void RebootButton::reboot() {
   motors_stop();
+  reset_cause_mark_planned();  // the next boot says "requested", not "lockup / software reset" (#109)
   USB1_USBCMD = 0;         // disconnect USB so the host notices
   delay(50);
   SCB_AIRCR = 0x05FA0004;  // restart

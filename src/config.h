@@ -34,9 +34,35 @@ constexpr uint32_t IMU_SPI_HZ = 1000000;
 constexpr uint32_t IMU_STALE_US = 25000;      // no sample this long -> motors off
 
 // Encoders / odometry
-constexpr uint32_t I2C_CLOCK_HZ = 400000;     // AS5600 + VL53L0X both support 400 kHz
+// I2C clocks (compile time, issue #109). Supported: 100000, 200000, 400000 (src/i2c_bounded.cpp). The left bus (Wire,
+// D18 / D19, shared with the VL53L0X sweep) has dropped out twice with the motors running: 100 kHz gives it the LPI2C's
+// widest glitch filter (~0.4 us) and 4x the rise-time margin. One AS5600 angle read (5 bytes on the wire) takes
+// ~0.12 ms at 400 kHz, ~0.25 ms at 200 kHz, ~0.5 ms at 100 kHz; the "enc:" log line reports the measured mean / max.
+constexpr uint32_t I2C_LEFT_HZ = 100000;      // Wire  (left AS5600 + range sweep)
+constexpr uint32_t I2C_RIGHT_HZ = 400000;     // Wire1 (right AS5600): never failed
+constexpr uint32_t I2C_CLOCK_HZ = I2C_LEFT_HZ;  // Wire users other than the encoders (range sweep)
+static_assert(I2C_LEFT_HZ == 100000 || I2C_LEFT_HZ == 200000 || I2C_LEFT_HZ == 400000, "I2C_LEFT_HZ: 100k / 200k / 400k");
+static_assert(I2C_RIGHT_HZ == 100000 || I2C_RIGHT_HZ == 200000 || I2C_RIGHT_HZ == 400000, "I2C_RIGHT_HZ: 100k / 200k / 400k");
 constexpr uint32_t ENCODER_PERIOD_US = 4000;  // read encoders after a balance step once 4 ms passed (200 Hz at 400 Hz)
 constexpr uint8_t ENCODER_WINDOW = 16;        // speed = position change over 16 reads (80 ms)
+// Encoder health (src/wheel_encoder.h, issue #109)
+constexpr uint8_t ENC_FAULT_BAD = 10;         // this many bad reads in a row (errors / rejected jumps) -> fault latched
+constexpr uint32_t ENC_STALE_US = 50000;      // no good read for this long -> fault latched (and a resync on the next)
+constexpr uint32_t ENC_CLEAR_MS = 2000;       // a latched fault clears after this long with only good reads
+constexpr uint8_t ENC_RECOVER_AFTER = 3;      // NACKs in a row before a bus recovery (busy / timeout / pin low: at once)
+constexpr uint32_t ENC_BACKOFF_MIN_MS = 20;   // after a recovery: next read attempt this much later, doubling ...
+constexpr uint32_t ENC_BACKOFF_MAX_MS = 1000; // ... up to this, while the reads keep failing
+constexpr float ENC_MAX_MMS = 3000.0f;        // a read implying a faster wheel is a corrupted read (TT top speed ~2500)
+constexpr float ENC_JUMP_MMS = 1500.0f;       // ... or a speed change this big from one read to the next (375 m/s^2)
+constexpr uint8_t ENC_RESYNC_REJECTS = 3;     // rejected in a row: take the new angle as the reference (no distance)
+constexpr uint8_t AS5600_ADDR = 0x36, AS5600_REG_ANGLE = 0x0E;
+// I2C pins (Teensy 4.1 Wire / Wire1 defaults), for the bus recovery's bit-banged clocks
+constexpr uint8_t I2C_LEFT_SDA = 18, I2C_LEFT_SCL = 19, I2C_RIGHT_SDA = 17, I2C_RIGHT_SCL = 16;
+
+// Hardware watchdog (src/watchdog.h, issue #109): RTWDOG, fed once per loop pass while the loop is healthy.
+constexpr uint32_t WDT_RUN_MS = 100;          // timeout while the motors run (balance / motor test)
+constexpr uint32_t WDT_IDLE_MS = 2000;        // timeout with the motors off (EEPROM saves, sensor re-inits block)
+constexpr uint32_t WDT_BG_MAX_US = 50000;     // no background pass (link poll, radio, failsafes) this long = unhealthy
 // wheel diameter / track width / left-right ratio are params now: odo.wheel_d_mm, odo.track_mm, odo.lr_ratio (issue #14)
 
 
@@ -53,8 +79,8 @@ enum ErrorCode : uint8_t {
   ERR_OK = 0,
   ERR_IMU_INIT = 1,      // BNO08x did not answer at boot (retried every 5 s while motors off)
   ERR_IMU_STALE = 2,     // no IMU sample for IMU_STALE_US -> motors off
-  ERR_ENC_LEFT = 3,      // left AS5600 not answering -> velocity loop off
-  ERR_ENC_RIGHT = 4,     // right AS5600 not answering -> velocity loop off
+  ERR_ENC_LEFT = 3,      // left AS5600 fault latched -> speed from the right wheel + gyro; no arming / drive modes
+  ERR_ENC_RIGHT = 4,     // right AS5600 fault latched -> speed from the left wheel + gyro; no arming / drive modes
   ERR_RADIO_CHIP = 5,    // nRF24 not found / lost its config
   ERR_RADIO_VERSION = 6, // packets with the wrong RADIO_PROTOCOL_VERSION in the last second
 };
