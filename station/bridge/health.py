@@ -20,6 +20,10 @@ _RANK = {NA: 0, OK: 1, WARN: 2, BAD: 3}
 # firmware: "radio: 50.0 pkt/s, gaps>100ms 0 (max 32 ms), bad 0, multi 0, ack fail 0, poll max 61 us"
 RADIO_RE = re.compile(r"^radio: ([\d.]+) pkt/s, gaps>100ms (\d+) \(max (\d+) ms\), bad (\d+), multi (\d+), ack fail (\d+)")
 RADIO_NOMINAL_PKT_S = 50.0
+# firmware (#109): "enc: L ok err 12 rej 3 rec 1 resync 0 read 480/510 us last nack | R ok err 0 ... last ok"
+_ENC_SIDE = r"(ok|FAULT) err (\d+) rej (\d+) rec (\d+) resync (\d+) read (\d+)/(\d+) us last (\w+)"
+ENC_RE = re.compile(r"^enc: L " + _ENC_SIDE + r" \| R " + _ENC_SIDE)
+ENC_FRESH_S = 120.0           # the firmware prints every 10 s while anything happens, else every 60 s
 RADIO_FRESH_S = 30.0          # the firmware prints every 10 s while packets arrive
 
 CELLS = 3
@@ -46,6 +50,66 @@ def parse_radio(text):
         return None
     return {"pkt_s": float(m.group(1)), "gaps": int(m.group(2)), "max_gap_ms": int(m.group(3)),
             "bad": int(m.group(4)), "multi": int(m.group(5)), "ack_fail": int(m.group(6))}
+
+
+def parse_enc(text):
+    """The firmware's periodic encoder line -> [left, right] dicts, or None."""
+    m = ENC_RE.match(text)
+    if not m:
+        return None
+    g = m.groups()
+    out = []
+    for i in (0, 8):
+        out.append({"ok": g[i] == "ok", "errors": int(g[i + 1]), "rejects": int(g[i + 2]), "recoveries": int(g[i + 3]),
+                    "resyncs": int(g[i + 4]), "read_us": int(g[i + 5]), "read_max_us": int(g[i + 6]), "last": g[i + 7]})
+    return out
+
+
+def enc_tiles(t, enc, hello):
+    """Enc L / Enc R tiles (#109): the latched fault (fault_flags, or error_code on v8 firmware), recent I2C trouble,
+    and the counters of the last "enc:" line."""
+    err = int(t.get("error_code", 0))
+    v9 = (hello or {}).get("link_version", 0) >= 9
+    ff = int(t.get("fault_flags", 0)) if v9 else 0
+    latched = [bool(ff & lp.LINK_FAULT_ENC_L) or err == 3, bool(ff & lp.LINK_FAULT_ENC_R) or err == 4]
+    trouble = [bool(ff & lp.LINK_FAULT_ENC_L_ERR), bool(ff & lp.LINK_FAULT_ENC_R_ERR)]
+    tiles = {}
+    for i, (id, lab) in enumerate((("encl", "Enc L"), ("encr", "Enc R"))):
+        s = enc[i] if enc else None
+        counts = ("%d I2C errors, %d rejected reads, %d bus recoveries since boot" % (
+            s["errors"], s["rejects"], s["recoveries"])) if s else ""
+        if latched[i]:
+            other_ok = not latched[1 - i]
+            why = ("FAULT: speed from the other wheel + gyro, balancing in place; no arming, no GOTO / EXPLORE / STATION"
+                   if other_ok else "FAULT on both wheels: velocity loop off (balance + heading only); no arming, no drive modes")
+            tiles[id] = _tile(id, lab, BAD, "FAULT", why + ("; " + counts if counts else "") +
+                              "; clears after 2 s of clean reads. Check the encoder cable")
+        elif trouble[i]:
+            tiles[id] = _tile(id, lab, WARN, "errors", "I2C errors / rejected reads in the last second" +
+                              ("; " + counts if counts else ""))
+        elif s and (s["errors"] or s["rejects"] or s["recoveries"]):
+            tiles[id] = _tile(id, lab, OK, "OK", counts + (", read %d us" % s["read_us"] if s["read_us"] else ""))
+        else:
+            tiles[id] = _tile(id, lab, OK, "OK", "no fault flagged" + (
+                ", read %d us (max %d)" % (s["read_us"], s["read_max_us"]) if s and s["read_us"] else ""))
+    return tiles
+
+
+def reset_tile(r, t, hello):
+    """Teensy resets (#109): the last unexpected reset this bridge run, the current boot's cause, the watchdog."""
+    wdt_off = bool(t and int(t.get("fault_flags", 0)) & lp.LINK_FAULT_WDT_OFF)
+    last = r.get("last")
+    boot = r.get("boot") or {}
+    if last:
+        ago = last.get("ago_s", 0)
+        when = "%d s ago" % ago if ago < 120 else "%d min ago" % round(ago / 60.0)
+        n = r.get("count", 1)
+        return _tile("reset", "Resets", WARN, last["name"].split(" (")[0],
+                     "%s, %s%s%s" % (last["text"], when, ", %d this session" % n if n > 1 else "",
+                                     "; hardware watchdog NOT running" if wdt_off else ""))
+    if wdt_off:
+        return _tile("reset", "Resets", WARN, "no watchdog", "the hardware watchdog did not start this boot")
+    return _tile("reset", "Resets", OK, "none", "no unexpected reset this session; last boot: %s" % boot.get("name", "?"))
 
 
 def cell_pct(cell_v):
@@ -375,10 +439,7 @@ def evaluate(c):
         # ---- IMU, encoders (the firmware's own fault code)
         tiles["imu"] = _tile("imu", "IMU", BAD if err in (1, 2) else OK, "FAULT" if err in (1, 2) else "OK",
                              {1: "IMU did not initialise", 2: "IMU samples stale"}.get(err, "samples arriving"))
-        for i, (id, lab) in enumerate((("encl", "Enc L"), ("encr", "Enc R"))):
-            bad = err == 3 + i
-            tiles[id] = _tile(id, lab, BAD if bad else OK, "FAULT" if bad else "OK",
-                              "encoder fault: velocity loop off" if bad else "no fault flagged")
+        tiles.update(enc_tiles(t, c.get("enc"), c.get("hello")))
         # ---- range sensors
         if float(p.get("rng.enable", 0.0)) < 0.5:
             for id, lab in (("rngf", "Range F"), ("rngr", "Range R")):
@@ -426,6 +487,10 @@ def evaluate(c):
         for id, lab in (("loop", "Loop"), ("imu", "IMU"), ("encl", "Enc L"), ("encr", "Enc R"), ("rngf", "Range F"),
                         ("rngr", "Range R"), ("radio", "RC remote"), ("fw", "Firmware")):
             tiles[id] = na(id, lab)
+
+    # ---- Teensy resets (#109): once a v9 HELLO came; also without live telemetry (the robot may have just reset)
+    if c.get("resets"):
+        tiles["reset"] = reset_tile(c["resets"], t if alive else None, c.get("hello"))
 
     # ---- lidar (#76): only when the bridge has a lidar port configured
     if c.get("lidar"):
@@ -561,7 +626,8 @@ def evaluate(c):
     else:
         head = "Ready to arm"
     order = ["link", "loop", "imu", "encl", "encr", "rngf", "rngr"] + (["lidar"] if "lidar" in tiles else []) + \
-            ["radio", "pi", "disk", "batt", "fw"] + (["ros"] if "ros" in tiles else []) + \
+            ["radio", "pi", "disk", "batt", "fw"] + (["reset"] if "reset" in tiles else []) + \
+            (["ros"] if "ros" in tiles else []) + \
         (["profile"] if "profile" in tiles else []) + ["estop"]
     return {"tiles": [tiles[k] for k in order],
             "preflight": {"level": {OK: "green", WARN: "amber", BAD: "red", NA: "red"}[lv], "text": head, "items": pre}}
@@ -576,6 +642,8 @@ class Health:
         self.battery = BatteryModel()
         self.radio = None
         self.radio_t = -1e9
+        self.enc = None                         # the firmware's last "enc:" counters line (#109)
+        self.enc_t = -1e9
         self.failsafes = 0
         self._prev_radio_ok = None
         self._sum_v = self._sum_load = 0.0
@@ -601,6 +669,9 @@ class Health:
         r = parse_radio(text)
         if r:
             self.radio, self.radio_t = r, now
+        e = parse_enc(text) if text.startswith("enc: ") else None
+        if e:
+            self.enc, self.enc_t = e, now
 
     def tick(self, now, ctx):
         """Once a second. ctx: link, robot_alive, tlm, tlm_hz, rng_hz, params {name: value}, hello, estop, robot_estop,
@@ -619,7 +690,8 @@ class Health:
         bat = self.battery.estimate(now, CELLS, low)
         c = dict(ctx)
         c.update(pi=pi, battery=bat, failsafes=self.failsafes,
-                 radio=self.radio if now - self.radio_t < RADIO_FRESH_S else None)
+                 radio=self.radio if now - self.radio_t < RADIO_FRESH_S else None,
+                 enc=self.enc if now - self.enc_t < ENC_FRESH_S else None)
         out = evaluate(c)
         out.update({"t": "health", "battery": bat, "pi": pi, "failsafes": self.failsafes,
                     "armed": bool(ctx.get("tlm") and ctx["tlm"].get("status", 0) & lp.TLM_ARMED)})

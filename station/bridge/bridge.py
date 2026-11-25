@@ -13,6 +13,7 @@ import time
 from . import link_protocol as lp
 from . import falls as falls_mod
 from . import health as health_mod
+from . import resets as resets_mod
 from .httpws import HttpServer, Response, check_origin
 from .lidar import Lidar
 from .lidar_obstacles import LidarObstacles
@@ -195,6 +196,7 @@ class Bridge:
         self.waypoints = []                                 # what the station last sent (x, y)
         self.range_listeners = []                           # callables(range dict) e.g. mapping (#12)
         self.health = health_mod.Health(self.log.dir)       # Health page: preflight, battery minutes (#51)
+        self.resets = resets_mod.ResetTracker()             # Teensy reset causes from the HELLO (#109)
         self.health_cache = None                            # last `health` message (JSON text), sent to new clients
         self.last_health = -10.0
         self.tools = TuningTools(self, None)                # Tune page: presets, scored runs, motor test (#16)
@@ -349,6 +351,8 @@ class Bridge:
         return False
 
     def _set_link_state(self, s):
+        if s == "released":
+            self.resets.note_released()      # flashing: the next boot is expected (#109)
         if s != self.link_state:
             self.link_state = s
             self.push_status()
@@ -483,6 +487,12 @@ class Bridge:
                     self.say("WARNING: robot link protocol v%d, bridge speaks v%d" % (
                         d["link_version"], lp.LINK_PROTOCOL_VERSION))
             self.broadcast(json.dumps({"t": "robot", "robot": d}))
+            boot = self.resets.on_hello(d, _now())       # a new Teensy boot: why it reset (#109)
+            if boot:
+                level, text = boot
+                self.say(("WARNING: " if level == "warn" else "") + text)
+                self.log.record("teensy_reset", {"level": level, "text": text, **(self.resets.boot or {})})
+                self.broadcast(json.dumps({"t": "teensy_reset", "level": level, "text": text}))
             # HELLO comes at boot (ask for params) and in reply to GET_PARAMS (don't loop)
             if _now() - self.last_get_params > 2.0:
                 self.send(lp.encode_get_params())
@@ -936,7 +946,7 @@ class Bridge:
                 "estop": self.estop, "robot_estop": self.robot_estop, "remote_seen": self.remote_seen,
                 "clients": self.client_count(), "log_error": self.log.error,
                 "lidar": self.lidar.status() if self.lidar else None, "robot_name": self.robot,
-                "loop": self.prof.status(), "ros": self.roslink.health()}
+                "loop": self.prof.status(), "ros": self.roslink.health(), "resets": self.resets.status(_now())}
 
     def _push_health(self, now):
         """Once a second: the Health page + battery minutes (a few hundred bytes; reads /proc and /sys only)."""

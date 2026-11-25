@@ -30,6 +30,9 @@ The ack payload is reloaded after every poll that read anything (also invalid pa
 
 0 ok · 1 IMU init · 2 IMU stale · 3 left encoder · 4 right encoder · 5 radio chip · 6 radio version
 
+Only the first one shows. Link v9 `fault_flags` shows every encoder fault (+ recent I2C trouble, watchdog off): see
+[safety.md](safety.md#encoder-fault).
+
 ## Tuning: try first
 
 1. `bal.d_src 0` (default): v3 maths, now on a fresh 400 Hz sample every step.

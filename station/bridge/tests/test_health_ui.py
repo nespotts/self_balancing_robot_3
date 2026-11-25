@@ -81,7 +81,7 @@ class TestHealthUi(unittest.TestCase):
             rig.robot.remote_armed = False
             await self.cdp.call("Page.navigate", url="http://127.0.0.1:%d/#health" % rig.port)
             await self.until("!!(window.sbr3 && sbr3.state.health && sbr3.state.health.battery.minutes != null)", 60, "minutes learned")
-            await self.until("document.querySelectorAll('.hl-tile').length === 13", 5, "13 tiles")
+            await self.until("document.querySelectorAll('.hl-tile').length === 14", 5, "14 tiles")
             await self.until("sbr3.state.health.preflight.level !== 'red'", 8, "preflight not red")
             self.assertEqual(await self.ev("document.body.dataset.view"), "health")
             self.assertEqual(await self.ev("document.getElementById('hl-dot').className.includes('lv-ok')"), True)

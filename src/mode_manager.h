@@ -15,6 +15,10 @@
 //            nobody supervises (see supervised())
 //   BALANCE: zero motion
 //   any change of the effective mode -> commanded motion zeroed, stored cmd_vel dropped
+//   encoder fault latched (issue #109, setEncoderFault): arming refused (remote: needs ARMED off -> on after it
+//            clears; station: SETMODE_ENC_FAULT); GOTO / EXPLORE / HOLD / STATION refused, and a robot in one of
+//            them goes to BALANCE (balancing in place, zero motion; the speed comes from the good wheel + gyro).
+//            An armed robot is never disarmed for it (that would drop it). MANUAL (the RC remote) still works.
 //   mode requests act on change only; after boot the remote's current selection is just learned,
 //   so the robot stays IDLE until that selection changes (or the Pi sends SET_MODE)
 #pragma once
@@ -33,6 +37,14 @@ enum SetModeResult : uint8_t {
   SETMODE_BAD,          // mode out of range
   SETMODE_ESTOP,        // ignored: link E-stop latched
   SETMODE_NOT_ARMED,    // ignored: no remote, not armed, no fresh arm request
+  SETMODE_ENC_FAULT,    // ignored: encoder fault latched (no arming, no GOTO / EXPLORE / HOLD / STATION)
+};
+
+// What the encoder fault stopped or refused (ModeManager::takeEncNotice, for a log line in main.cpp).
+enum EncNotice : uint8_t {
+  ENC_NOTE_STOPPED = 1,       // mode -> BALANCE
+  ENC_NOTE_ARM_REFUSED,       // the remote's ARMED switch / a station arm
+  ENC_NOTE_MODE_REFUSED,      // a mode request (remote selector, SET_MODE, GO_HOME)
 };
 
 class ModeManager {
@@ -52,6 +64,13 @@ class ModeManager {
   // Mode request from an event (EVT_GO_HOME): like a remote selection change, never arms.
   void requestMode(uint8_t mode);
   void update(uint32_t now_ms, bool imu_ok, const ModeLimits& lim);
+  // Encoder fault latched (odometry, issue #109): set every control step and background pass.
+  void setEncoderFault(bool fault);
+  bool encoderFault() const { return enc_fault_; }
+  // Modes that drive by themselves or from the station: refused while an encoder is faulted.
+  static bool encBlocked(uint8_t m) { return m == MODE_GOTO || m == MODE_EXPLORE || m == MODE_HOLD || m == MODE_STATION; }
+  // One-shot notices of what the encoder fault did (EncNotice + the mode concerned).
+  bool takeEncNotice(uint8_t& note, uint8_t& mode);
 
   RobotMode mode() const { return mode_; }
   RobotMode requested() const { return requested_; }
@@ -90,6 +109,10 @@ class ModeManager {
 
  private:
   void pushEvent(uint8_t ev);
+  void encNote(uint8_t note, uint8_t mode);
+  bool enc_fault_ = false;
+  uint8_t enc_q_[8] = {};  // (note, mode) pairs
+  uint8_t enc_head_ = 0, enc_n_ = 0;
   ControlPacket pkt_ = {};
   bool have_radio_ = false, have_pi_ = false;
   uint32_t radio_ms_ = 0, pi_ms_ = 0;

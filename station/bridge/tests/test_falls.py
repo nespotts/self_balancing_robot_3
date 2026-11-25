@@ -21,7 +21,7 @@ def frame(t, pitch=-3.1, **kw):
              speed_mms=0.0, turn_rate_dps=0.0, cmd_speed_mms=0.0, cmd_turn_dps=0.0, wheel_left_mms=0.0,
              wheel_right_mms=0.0, balance_target_deg=-3.1, motor_left=0.05, motor_right=0.05, battery_v=12.0,
              loop_hz=400.0, bal_p=0.0, bal_i=0.0, bal_d=0.0, steer_out=0.0, vel_out_deg=0.0, step=int(t * 400),
-             remote_flags=0, nav_state=0, reserved2=0)
+             remote_flags=0, nav_state=0, fault_flags=0)
     d.update(kw)
     return d
 

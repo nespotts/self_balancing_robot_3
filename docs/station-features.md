@@ -23,7 +23,8 @@ The bridge sends one `health` message a second (it reads `/proc` and `/sys/class
 | Part | Green | Amber | Red |
 |---|---|---|---|
 | Loop | ≥ 90 % of `ctl.rate_hz` | ≥ 70 % | below |
-| IMU, encoders | no fault in telemetry `error_code` | | fault code 1-4 |
+| IMU, encoders | no fault in telemetry `error_code` / `fault_flags` | encoder I2C errors in the last second | fault code 1-4, encoder fault latched |
+| Resets | no unexpected Teensy reset this session | an unexpected reset (watchdog, crash, power dip, power lost), or the watchdog is off | |
 | Range sensors (if `rng.enable`) | ≥ 4 readings/s | some | none |
 | Radio (once a remote was seen) | answering, no gaps | gaps > 100 ms, or < 90 % of 50 pkt/s (from the firmware's `radio:` line) | lost: failsafe |
 | Battery | above `batt.low_cell` + 0.15 V per cell, ≥ 5 min | nearly empty | `low_batt` or below the limit |
