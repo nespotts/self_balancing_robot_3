@@ -34,14 +34,17 @@ Every match_every_n-th LD19 turn (lidar.py, after deskew and the filters, before
      the body stays put while the robot drives is "stuck" (the bridge tells the navigator). See LidarMatch.
 Not here (next version): loop closure, relocalisation (a kidnapped pose beyond the widest window stays lost).
 """
+import asyncio
 import bisect
 import collections
+import concurrent.futures
 import itertools
 import math
 import operator
 import time
 
 from . import link_protocol as lp
+from . import loopprof
 
 OCC_BYTE = 150             # grid byte above which a cell is a wall for the field (log-odds +1.1: two net hits)
 SIGMA_CELLS = 1.25
@@ -96,6 +99,16 @@ RELAX = {"score": 0.3, "inliers": 0.35, "margin": 0.05}
 STUCK_MM = 60.0            # lidar stuck: the body moved less than this ...
 STUCK_WHEEL_MM = 150.0     # ... while the wheels turned at least this much, for match_stuck_s
 STUCK_MODES = (lp.MODE_GOTO, lp.MODE_EXPLORE)
+
+FIELD_BUDGET_S = 0.02      # field update per turn (#102: Pi time); the tiles left over are done with the next turn
+_POOL = []                 # the lost search's worker thread (#102), made on first use
+
+
+def _pool():
+    if not _POOL:
+        _POOL.append(concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="lidar-lost"))
+    return _POOL[0]
+
 
 OCC_LUT = bytes(1 if v > OCC_BYTE else 0 for v in range(256))
 _KERNEL = [(di, dj, int(round(255 * math.exp(-(di * di + dj * dj) / (2 * SIGMA_CELLS ** 2)))))
@@ -162,6 +175,7 @@ class Field:
         self.f = None
         self.walls = 0
         self.rebuilds = 0
+        self.carried = 0           # syncs that ran out of FIELD_BUDGET_S
 
     def invalidate(self):
         self.grid = None
@@ -172,8 +186,15 @@ class Field:
             self._rebuild(grid)
             return
         tiles, grid.fdirty = grid.fdirty, set()
-        for t in tiles:
+        clock = time.perf_counter
+        end = clock() + FIELD_BUDGET_S
+        it = iter(tiles)
+        for t in it:
             self._tile(t)
+            if clock() > end:                 # a wall moved in many tiles (#102): the rest with the next turn
+                grid.fdirty.update(it)
+                self.carried += 1
+                break
 
     def _rebuild(self, grid):
         self.grid, self.cells = grid, grid.cells
@@ -492,6 +513,8 @@ class LidarMatch:
 
     def reset(self):
         self.field.invalidate()
+        self.gen = getattr(self, "gen", 0) + 1      # a lost search still running in its thread is dropped (#102)
+        self.job = None
         self.turns = 0
         self.k = 0
         self.n = {"matched": 0, "rejected": 0, "jumps": 0, "slips": 0, "lost": 0, "found": 0, "stuck": 0, "checks": 0}
@@ -535,6 +558,13 @@ class LidarMatch:
         self.lost_k = 0              # self.k when it got lost
 
     # ------------------------------------------------------------ inputs
+    def prepare(self):
+        """The field up to date with the grid: the bridge runs this as its own loop callback before on_scan (#102), whose
+        own sync then has little left to do."""
+        if self.m.settings.get("lidar_match") and self.job is None:
+            with getattr(self.m, "prof", loopprof.NULL).part("match.field"):
+                self.field.sync(self.m.grid)
+
     def on_tlm(self, d, t):
         self.tlm_mode = d.get("mode")
 
@@ -603,11 +633,15 @@ class LidarMatch:
             if lost or (recover and self.mode == "slip"):
                 return ox, oy, mx, my, None, pts
             return ox, oy, mx, my, (runs if self._map_now(mx, my, mh, None, S) else None), pts
+        if lost and self.job is not None:
+            return ox, oy, mx, my, None, pts              # the last lost search is still running in its thread
         t0 = time.perf_counter()
         step = None
         try:
             try:
-                self.field.sync(self.m.grid)
+                P = getattr(self.m, "prof", loopprof.NULL).part
+                with P("match.field"):
+                    self.field.sync(self.m.grid)
                 if self.field.walls < MIN_WALL_CELLS:
                     res = {"ok": False, "why": "map too small (%d wall cells)" % self.field.walls, "new": True}
                 elif lost:
@@ -618,11 +652,15 @@ class LidarMatch:
                     sel = thin_runs(runs, WIDE_POINTS)
                     if off != (0.0, 0.0):
                         sel = [(x + off[0], y + off[1]) for x, y in sel]
-                    res = match(self.field, sel, mx + off[0], my + off[1], mm, deg, RELAX["score"], RELAX["inliers"],
-                                S["match_min_curv"], RELAX["margin"], coarse_stride=2)
-                    res["dx"], res["dy"] = res["dx"] + off[0], res["dy"] + off[1]   # from the prediction
-                    res["window"] = [round(mm), round(deg, 1)]
-                    res["off"] = [round(off[0]), round(off[1])]
+                    args = (self.field, sel, mx + off[0], my + off[1], mm, deg, RELAX["score"], RELAX["inliers"],
+                            S["match_min_curv"], RELAX["margin"])
+                    loop = self._loop()
+                    if loop is not None:
+                        # the wide search (~150-600 ms on the Pi) in a worker thread (#102): nothing is mapped while
+                        # lost, so its turn waits for nothing; the result goes through _recover() when it is in
+                        self._lost_job(loop, args, off, mm, deg, odo, mx, my, now)
+                        return ox, oy, mx, my, None, pts
+                    res = self._lost_res(match(*args, coarse_stride=2), off, mm, deg)
                 else:
                     sel = thin_runs(runs, max(MIN_POINTS, int(S["match_points"])))
                     res = match(self.field, sel, mx, my, S["match_window_mm"], S["match_window_deg"],
@@ -630,17 +668,7 @@ class LidarMatch:
             except Exception as e:      # a matcher bug must never stop the mapping
                 self.field.invalidate()
                 res = {"ok": False, "why": "matcher error: %s: %s" % (type(e).__name__, e), "new": True}
-            if recover:
-                step = self._recover(res, odo, mx, my, now, S)
-            elif res["ok"]:
-                step = self._accept(res, mx, my, S)
-            else:
-                self.jump = None
-            self.n["matched" if step else "rejected"] += 1
-            self.history.append(step is not None)
-            res["applied"] = [round(v, 2) for v in step] if step else None
-            self.last = res
-            self.state = self._state_text(step, res)
+            step = self._result(res, recover, odo, mx, my, now, S)
         finally:
             self.cost_ms = (time.perf_counter() - t0) * 1000.0
             self.cost_avg_ms = self.cost_ms if not self.cost_avg_ms else 0.9 * self.cost_avg_ms + 0.1 * self.cost_ms
@@ -659,6 +687,76 @@ class LidarMatch:
         trust = step is not None or res.get("new") or res["why"].startswith(("too few points (", "mostly new ground",
                                                                                "no wall", "no structure"))
         return ox, oy, mx, my, (runs if self._map_now(mx, my, mh, trust, S) else None), pts
+
+    def _result(self, res, recover, odo, mx, my, now, S):
+        """A match result -> the correction step applied (or None); counters, history, state."""
+        if recover:
+            step = self._recover(res, odo, mx, my, now, S)
+        elif res["ok"]:
+            step = self._accept(res, mx, my, S)
+        else:
+            step = None
+            self.jump = None
+        self.n["matched" if step else "rejected"] += 1
+        self.history.append(step is not None)
+        res["applied"] = [round(v, 2) for v in step] if step else None
+        self.last = res
+        self.state = self._state_text(step, res)
+        return step
+
+    @staticmethod
+    def _lost_res(res, off, mm, deg):
+        res["dx"], res["dy"] = res["dx"] + off[0], res["dy"] + off[1]   # from the prediction
+        res["window"] = [round(mm), round(deg, 1)]
+        res["off"] = [round(off[0]), round(off[1])]
+        return res
+
+    def _loop(self):
+        """The running event loop when the bridge runs the lost search in a thread (lidar.defer), else None."""
+        if not getattr(self.m.lidar, "defer", False):
+            return None
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
+    def _lost_job(self, loop, args, off, mm, deg, odo, mx, my, now):
+        """Run one lost search in the worker thread; its result is handled on the loop (_lost_done). The field is not
+        touched meanwhile: nothing is mapped while lost, and no other search starts before this one is done."""
+        gen = self.gen
+        prof = getattr(self.m, "prof", loopprof.NULL)
+
+        def work():
+            with prof.thread("match.lost"):
+                try:
+                    return match(*args, coarse_stride=2)
+                except Exception as e:
+                    return {"ok": False, "why": "matcher error: %s: %s" % (type(e).__name__, e), "new": True,
+                            "dx": 0.0, "dy": 0.0, "dth": 0.0}
+
+        def done(fut):              # (worker thread)
+            try:
+                loop.call_soon_threadsafe(self._lost_done, fut, gen, off, mm, deg, odo, mx, my, now)
+            except RuntimeError:    # the loop is gone (shutdown)
+                pass
+        self.job = _pool().submit(work)
+        self.job.add_done_callback(done)
+
+    def _lost_done(self, fut, gen, off, mm, deg, odo, mx, my, now):
+        if gen != self.gen:
+            return                  # reset / another map meanwhile
+        self.job = None
+        S = self.m.settings
+        if self.mode != "lost" or not S.get("lidar_match"):
+            return                  # found / trusted by hand / switched off meanwhile
+        try:
+            res = fut.result()
+        except Exception as e:
+            res = {"ok": False, "why": "matcher error: %s: %s" % (type(e).__name__, e), "new": True, "dx": 0.0, "dy": 0.0}
+        t0 = time.perf_counter()
+        with getattr(self.m, "prof", loopprof.NULL).part("lidar.match"):
+            self._result(self._lost_res(res, off, mm, deg), True, odo, mx, my, now, S)
+        self.cost_ms = res.get("ms", 0.0) + (time.perf_counter() - t0) * 1000.0
 
     def _now(self):
         return getattr(self.m.lidar, "clock", time.monotonic)()

@@ -843,9 +843,17 @@ class Planner:
             self._job_done(fut, go, gen)
             return True
         loop = asyncio.get_running_loop()
-        self.job = loop.run_in_executor(None, fn, pose)
+        self.job = loop.run_in_executor(None, self._run_job, fn, pose)
         self.job.add_done_callback(lambda fut: self._job_done(fut, go, gen))
         return True
+
+    def _run_job(self, fn, pose):
+        """Worker thread: the job, counted in the bridge's loop profile as thread time (#102: it competes for the GIL)."""
+        prof = getattr(self, "prof", None)
+        if prof is None:
+            return fn(pose)
+        with prof.thread("planner" + getattr(fn, "__name__", ".job").replace("_plan_", ".").replace("_", ".", 1)):
+            return fn(pose)
 
     def _job_done(self, fut, go, gen):
         if self.pending:

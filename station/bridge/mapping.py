@@ -14,22 +14,33 @@ Sensor model (see station/README.md "Map"):
   the floor or go over obstacles); typical pitch = median of the last ~2 s, so the IMU mount offset does not matter.
 - pose correction: "stop_scan" (match a scan taken standing still, #71) or the experimental "correct"
   (continuous): see scanmatch.py. map pose = corr o odometry pose; places, plans and the browser use it.
+
+Event-loop cost (#102): a tile goes to the browsers only when its bytes changed since it was last sent (CRC of the raw
+tile); encoding is limited to TILE_BUDGET_S per poll, the robot's nearest tiles first, the rest carried over (worked off
+every TILE_AGAIN_S) so every change still arrives; the encoded tiles are cached for new clients. Autosave copies the
+grid on the loop and writes JSON + PNG in a worker thread.
 """
+import asyncio
+import base64
 import collections
 import json
 import math
 import os
 import re
+import threading
 import time
+import zlib
 
 from .occgrid import MAX_CELLS, Grid
 from .places import HOME, Places
 from .zones import Zones
-from . import lidarmatch, scanmatch
+from . import lidarmatch, loopprof, scanmatch
 
 SENSOR_FWD_MM = 26.0
 SENSOR_RADIUS_MM = 12.9
 SEND_EVERY_S = 0.5
+TILE_BUDGET_S = 0.015      # tile encoding per poll (#102; Pi Zero 2W: ~0.5 ms a tile); the rest waits for the next one
+TILE_AGAIN_S = 0.1         # a carried-over backlog is worked off this often (new changes still every SEND_EVERY_S)
 AUTOSAVE_S = 60.0
 AUTOSAVE_NAME = "autosave"
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
@@ -125,6 +136,13 @@ class Mapper:
         self.zones = Zones()             # virtual walls / no-go / fence / slow / mazes (#70), <map>.zones.json
         self.zones_pending = False
         self.zone_listeners = []         # callables(zones): the layers changed (the sim mirrors maze walls)
+        self.prof = loopprof.NULL        # the bridge's loop profile (#102)
+        self.tile_queue = set()          # absolute tiles changed but not sent yet (#102: the encoding budget carries them over)
+        self.tile_sent = {}              # absolute tile -> (crc32 of its raw bytes, base64 png) as last broadcast
+        self.tile_grid = None            # the Grid those belong to (load replaces it)
+        self.tile_stats = {"sent": 0, "same": 0, "polls_cut": 0}
+        self.last_tiles = 0.0
+        self.saving = False              # an autosave is being written in a worker thread
 
     # ------------------------------------------------------------ settings
     def _settings_path(self):
@@ -262,16 +280,18 @@ class Mapper:
             self.body_at = (x, y)
             self.grid.clear_disc(x, y, rb)
 
-    def integrate_scan(self, ox, oy, runs, robot_xy):
+    def integrate_scan(self, ox, oy, runs, robot_xy, seen=None, last=True):
         """One LD19 revolution (#76), map frame: ox, oy the lidar axis, runs the point runs (lidar.py),
-        robot_xy the axle centre (its own spot is free)."""
+        robot_xy the axle centre (its own spot is free). A turn in parts (#102): seen carried from part to part
+        (Grid.integrate_scan), last on the final one."""
         if not self.settings["enabled"] or self.hold:
             return
-        self.grid.integrate_scan(ox, oy, runs, margin_mm=self.grid.res)
-        self._body_free(robot_xy[0], robot_xy[1])
-        self.n["scans"] += 1
-        self.n["used"] += 1
+        self.grid.integrate_scan(ox, oy, runs, margin_mm=self.grid.res, seen=seen)
         self.changed_since_save = True
+        if last:
+            self._body_free(robot_xy[0], robot_xy[1])
+            self.n["scans"] += 1
+            self.n["used"] += 1
 
     # ------------------------------------------------------------ browser messages
     def _header(self, full):
@@ -281,17 +301,94 @@ class Mapper:
             m.update(self.grid.info())
         return m
 
-    def full_msg(self):
-        tiles = sorted(self.grid.touched | self.grid.dirty)
+    def full_msg(self, store=False):
+        """The whole map (a new client, or everyone after a reset / load). Tiles unchanged since they were last broadcast
+        come from the cache; store: this goes to every client, so it also becomes what was last sent."""
+        self._tile_sync()
+        g = self.grid
+        ox, oy = g.tile_origin()
+        tiles = []
+        for tx, ty in sorted(g.touched | g.dirty):
+            t = (tx + ox, ty + oy)
+            raw = g.tile_raw(tx, ty)
+            crc = zlib.crc32(raw)
+            c = self.tile_sent.get(t)
+            if c is None or c[0] != crc:
+                c = (crc, base64.b64encode(g.png_of_raw(raw)).decode("ascii"))
+                if store:
+                    self.tile_sent[t] = c
+            tiles.append([t[0], t[1], c[1]])
+        if store:
+            self.tile_queue.clear()
         m = self._header(True)
-        m["tiles"] = self.grid.tiles_msg(tiles)
+        m["tiles"] = tiles
         return json.dumps(m, separators=(",", ":"))
 
+    def _tile_sync(self):
+        if self.grid is not self.tile_grid:          # a loaded map: nothing of the old one was sent
+            self.tile_grid = self.grid
+            self.tile_queue.clear()
+            self.tile_sent.clear()
+
+    def _queue_dirty(self):
+        """The grid's dirty tiles -> the send queue (absolute indices: stable while the grid grows). True if any."""
+        self._tile_sync()
+        dirty = self.grid.take_dirty()
+        if dirty:
+            ox, oy = self.grid.tile_origin()
+            self.tile_queue.update((tx + ox, ty + oy) for tx, ty in dirty)
+        return bool(dirty)
+
+    def _encode_tiles(self, now):
+        """[[tx, ty, base64 png], ...] of queued tiles whose bytes changed, nearest the robot first, within
+        TILE_BUDGET_S (at least one tile per call, so a backlog always shrinks)."""
+        g = self.grid
+        ox, oy = g.tile_origin()
+        size = g.res * g.T
+        rx, ry = self.body_at or (0.0, 0.0)
+        rx, ry = math.floor(rx / size), math.floor(ry / size)
+        order = sorted(self.tile_queue, key=lambda t: (t[0] - rx) ** 2 + (t[1] - ry) ** 2)
+        clock = time.perf_counter
+        end = clock() + TILE_BUDGET_S
+        out = []
+        q, sent, st = self.tile_queue, self.tile_sent, self.tile_stats
+        for t in order:
+            if out and clock() > end:
+                st["polls_cut"] += 1
+                break
+            q.discard(t)
+            tx, ty = t[0] - ox, t[1] - oy
+            if not (0 <= tx < g.ntx and 0 <= ty < g.nty):
+                continue
+            raw = g.tile_raw(tx, ty)
+            crc = zlib.crc32(raw)
+            c = sent.get(t)
+            if c is not None and c[0] == crc:
+                st["same"] += 1                  # marked dirty, but the bytes are what the browsers already have
+                continue
+            b64 = base64.b64encode(g.png_of_raw(raw)).decode("ascii")
+            sent[t] = (crc, b64)
+            out.append([t[0], t[1], b64])
+            st["sent"] += 1
+        self.last_tiles = now
+        return out
+
     def poll(self, now=None):
-        """Messages to broadcast now (throttled to SEND_EVERY_S); [] most of the time."""
+        """Messages to broadcast now (throttled to SEND_EVERY_S, a tile backlog every TILE_AGAIN_S); [] most of the time."""
         now = time.monotonic() if now is None else now
         if now - self.last_send < SEND_EVERY_S:
-            return []
+            if not self.tile_queue or now - self.last_tiles < TILE_AGAIN_S or self.full_pending:
+                return []
+            t0 = time.perf_counter()                     # the carried-over tiles only
+            with self.prof.part("map.tiles"):
+                tiles = self._encode_tiles(now)
+            out = []
+            if tiles:
+                m = self._header(False)
+                m["tiles"] = tiles
+                out.append(json.dumps(m, separators=(",", ":")))
+            self.cpu_s += time.perf_counter() - t0
+            return out
         self.last_send = now
         t0 = time.perf_counter()
         out = []
@@ -302,18 +399,23 @@ class Mapper:
         if self.full_pending:
             self.full_pending = False
             self.grid.take_dirty()
-            out.append(self.full_msg())
+            with self.prof.part("map.tiles"):
+                out.append(self.full_msg(store=True))
             self.places_pending = True
             self.zones_pending = True
         else:
-            dirty = self.grid.take_dirty()
+            dirty = self._queue_dirty()
             lm = self.lmatch
             key = (lm.mode, lm.state if lm.mode != "track" else "")
             # slipping / lost (#79) nothing is mapped, so no tiles would carry the new state and correction: header only
             hdr = key != self.lm_sent or (lm.mode != "track" and self.corr != self.corr_sent)
-            if dirty or (hdr and now - self.last_hdr >= 1.0):
+            tiles = []
+            if self.tile_queue:
+                with self.prof.part("map.tiles"):
+                    tiles = self._encode_tiles(now)
+            if tiles or (hdr and now - self.last_hdr >= 1.0):
                 m = self._header(False)
-                m["tiles"] = self.grid.tiles_msg(dirty) if dirty else []
+                m["tiles"] = tiles
                 out.append(json.dumps(m, separators=(",", ":")))
                 self.lm_sent, self.corr_sent, self.last_hdr = key, list(self.corr), now
                 if dirty:
@@ -330,8 +432,9 @@ class Mapper:
             out.append(self.zones_msg())
         if now - self.last_autosave >= AUTOSAVE_S:
             self.last_autosave = now
-            if self.changed_since_save and self.n["used"] and self.dir:
-                self.save(AUTOSAVE_NAME, quiet=True)
+            if self.changed_since_save and self.n["used"] and self.dir and not self.saving:
+                with self.prof.part("map.autosave"):
+                    self.autosave()
         self.cpu_s += time.perf_counter() - t0
         dt = now - self.cpu_t0
         if dt >= 5.0:
@@ -406,6 +509,8 @@ class Mapper:
 
     def reset(self):
         self.grid.reset()
+        self.tile_queue.clear()
+        self.tile_sent.clear()
         self.corr = [0.0, 0.0, 0.0]
         self.matcher.reset()
         self.stopscan.reset()
@@ -582,23 +687,79 @@ class Mapper:
     def path(self, name):
         return os.path.join(self.dir, name + ".json") if self.dir and NAME_RE.match(name or "") else None
 
+    def _save_meta(self):
+        return {"corr": list(self.corr), "saved": time.strftime("%Y-%m-%dT%H:%M:%S"), "readings": self.n["used"]}
+
+    @staticmethod
+    def _write_map(p, grid, meta):
+        """<name>.json + the <name>.png preview (not read back), each through a temp file (an autosave thread may be
+        writing the same map at the same time)."""
+        tmp = "%s.%d.tmp" % (p, threading.get_ident())
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(grid.to_json(meta))
+        os.replace(tmp, p)
+        png = p[:-5] + ".png"
+        with open(png + ".tmp%d" % threading.get_ident(), "wb") as f:
+            f.write(grid.png())
+        os.replace(png + ".tmp%d" % threading.get_ident(), png)
+
     def save(self, name, quiet=False):
         if not self.dir:
             raise OSError("no robot profile yet")
         os.makedirs(self.dir, exist_ok=True)
-        p = self.path(name)
-        tmp = p + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(self.grid.to_json({"corr": self.corr, "saved": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                                       "readings": self.n["used"]}))
-        os.replace(tmp, p)
-        with open(p[:-5] + ".png", "wb") as f:        # preview to look at (not read back)
-            f.write(self.grid.png())
+        self._write_map(self.path(name), self.grid, self._save_meta())
         self.save_places(name)
         self.save_zones(name)
         if not quiet:
             self.name = name
             self.changed_since_save = False
+
+    def autosave(self):
+        """The periodic autosave (#102): the grid is copied here (on the loop, a few ms on the Pi), the JSON + PNG are
+        built and written in a worker thread (zlib lets go of the GIL). Without a running event loop: right here."""
+        if not self.dir or self.saving:
+            return False
+        d, p, snap, meta = self.dir, self.path(AUTOSAVE_NAME), self.grid.snapshot(), self._save_meta()
+        # places / zones as text now (they are small); the files are written with the map
+        side = []
+        for path, obj, keep in ((self.places_path(AUTOSAVE_NAME), self.places, bool(self.places.items or self.places.origin)),
+                                (self.zones_path(AUTOSAVE_NAME), self.zones, bool(self.zones.items))):
+            if path:
+                side.append((path, obj.to_json(), keep))
+
+        def write():
+            os.makedirs(d, exist_ok=True)
+            self._write_map(p, snap, meta)
+            for path, text, keep in side:
+                if keep or os.path.exists(path):
+                    try:
+                        tmp = "%s.%d.tmp" % (path, threading.get_ident())
+                        with open(tmp, "w", encoding="utf-8") as f:
+                            f.write(text)
+                        os.replace(tmp, path)
+                    except OSError:
+                        pass
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            write()
+            return True
+        prof = self.prof
+
+        def work():
+            with prof.thread("map.autosave"):
+                write()
+
+        def done(fut):
+            self.saving = False
+            e = fut.exception()
+            if e is not None:
+                self.say("map autosave failed: %s: %s" % (type(e).__name__, e))
+        self.saving = True
+        loop.run_in_executor(None, work).add_done_callback(done)
+        return True
 
     def load(self, name):
         p = self.path(name)

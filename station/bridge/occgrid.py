@@ -351,7 +351,7 @@ class Grid:
             self._mark_box(x0, x1, y0, y1)
             self.updates += 1
 
-    def integrate_scan(self, ox, oy, runs, margin_mm=0.0, margin_frac=0.02):
+    def integrate_scan(self, ox, oy, runs, margin_mm=0.0, margin_frac=0.02, seen=None):
         """One spinning-lidar revolution (#76), dense. ox, oy: sensor origin; runs: lists of world points (mm) in
         rotation order, each list a stretch with no angular gap (the points of one run are neighbours, so the
         space between them is seen too).
@@ -360,7 +360,9 @@ class Grid:
           span per row, `translate` per span, so a 3 m scan costs a few hundred row operations, not 450 rays x 120 cells.
         - hits: the cell of every point, plus a line between neighbours 2 - 5 cells apart (125 mm: a wall 8 m away has points 112 mm apart) (a wall seen from far
           away is a line, not dots); each cell counts once per scan however many points land in it.
-        Hits win over free space (applied after it). Returns the number of cells marked occupied."""
+        Hits win over free space (applied after it). Returns the number of cells marked occupied.
+        seen: a set of cells already hit by this revolution (a turn integrated in parts, #102: the runs are cut with one
+        shared point, so the fans meet edge to edge; its cell counts once): skipped here, and this call's hits added."""
         pts = [p for run in runs for p in run]
         if not pts:
             return 0
@@ -369,9 +371,10 @@ class Grid:
         xs.append(ox)
         ys.append(oy)
         self._cover(xs, ys)
-        res, W, H, g = self.res, self.W, self.H, self.cells
+        res, W, H, g, T = self.res, self.W, self.H, self.cells, self.T
         x0, y0 = self.x0, self.y0
         cox, coy = (ox - x0) / res, (oy - y0) / res
+        changed = set()           # tiles whose bytes really changed (#102: not the whole bounding box of the turn)
         floor, ceil, hypot = math.floor, math.ceil, math.hypot
         lut = self.free_lut
         hit = set()
@@ -414,14 +417,29 @@ class Grid:
             for j, cs in rows.items():
                 cs.sort()
                 b = j * W
+                ty = j // T
                 for k in range(0, len(cs) - 1, 2):
                     i0, i1 = max(0, int(ceil(cs[k] - 0.5))), min(W, int(ceil(cs[k + 1] - 0.5)))
                     if i1 > i0:
-                        g[b + i0:b + i1] = g[b + i0:b + i1].translate(lut)
+                        old = g[b + i0:b + i1]
+                        new = old.translate(lut)
+                        if new != old:            # free space seen again (already at the clamp) changes nothing
+                            g[b + i0:b + i1] = new
+                            for tx in range(i0 // T, (i1 - 1) // T + 1):
+                                changed.add((tx, ty))
+        if seen is not None:
+            hit -= seen
+            seen |= hit
         hl = self.hit_lut
         for i in hit:
-            g[i] = hl[g[i]]
-        self._mark_box(min(xs), max(xs), min(ys), max(ys))
+            v = g[i]
+            nv = hl[v]
+            if nv != v:
+                g[i] = nv
+                changed.add(((i % W) // T, i // W // T))
+        if changed:
+            self.dirty |= changed
+            self.fdirty |= changed
         self.updates += 1
         return len(hit)
 
@@ -454,6 +472,18 @@ class Grid:
         self.touched |= d
         return sorted(d)
 
+    def tile_raw(self, tx, ty):
+        """One tile's cell bytes, bottom row first (what the change check compares, #102)."""
+        T, W, g = self.T, self.W, self.cells
+        x0 = tx * T
+        return b"".join([g[j * W + x0: j * W + x0 + T] for j in range(ty * T, ty * T + T)])
+
+    def png_of_raw(self, raw):
+        """tile_raw() bytes -> the tile's PNG (top row first, greyscale)."""
+        T = self.T
+        grey = raw.translate(GREY)
+        return png_grey(T, T, [grey[k * T:(k + 1) * T] for k in range(T - 1, -1, -1)])
+
     def tile_rows(self, tx, ty, lut=GREY):
         """Rows of one tile, top (high y) first, mapped through lut."""
         T, W, g = self.T, self.W, self.cells
@@ -462,7 +492,7 @@ class Grid:
                 for j in range(ty * T + T - 1, ty * T - 1, -1)]
 
     def tile_png(self, tx, ty):
-        return png_grey(self.T, self.T, self.tile_rows(tx, ty))
+        return self.png_of_raw(self.tile_raw(tx, ty))
 
     def tiles_msg(self, tiles):
         """[[tx, ty, base64 png], ...] with absolute tile indices (world mm / tile size, floor): they
@@ -510,6 +540,16 @@ class Grid:
         n_occ = sum(c for v, c in enumerate(hist) if v > o_th)
         n_free = sum(c for v, c in enumerate(hist) if v < f_th)
         return n_occ, n_free
+
+    def snapshot(self):
+        """A frozen copy to save from a worker thread (#102): the cells are copied now (a few ms on the Pi for a 20 m map),
+        so the thread never sees a half-updated grid; to_json() / png() work on it as on the grid itself."""
+        g = Grid.__new__(Grid)
+        g.__dict__.update(self.__dict__)
+        g.cells = bytes(self.cells)
+        g.touched = self.touched | self.dirty
+        g.dirty, g.fdirty = set(), set()
+        return g
 
     # ------------------------------------------------------------ save / load
     def to_json(self, extra=None):
