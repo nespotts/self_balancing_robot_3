@@ -9,13 +9,15 @@ void ContactDetector::reset() {
   bump_peak_ = 0;
   hold_ms_ = 0;
   run_ = moved_ = false;
+  s_run_ = s_win_ = false;
   // (the signal history and was_upright_ stay: they describe the robot, not a detection)
 }
 
-uint8_t ContactDetector::fire(uint8_t kind, float d, float value, uint8_t flags) {
+uint8_t ContactDetector::fire(uint8_t kind, float d, float value, uint8_t flags, bool stall) {
   dir_ = d;
   value_ = value;
   flags_ = flags;
+  stall_ = stall;
   reset();
   return kind;
 }
@@ -48,18 +50,21 @@ uint8_t ContactDetector::update(const ContactIn& in) {
   const float d = in.cmd >= 0 ? 1.0f : -1.0f;
   const float c = fabsf(in.cmd);
   const float v = d * in.speed;
-  const uint32_t still = moved_ ? now - new_ms_ : 0;  // ms without new ground
+  const uint32_t still = moved_ ? now - new_ms_ : 0;    // ms without new ground
+  const uint32_t s_still = s_win_ ? now - s_a_ms_ : 0;  // stall: ms in the band
 
   // ---- a fall right after a candidate confirms it (a hard bump throws it over before the hold time is up)
   if (fell) {
     if (cand_ms_ && now - cand_ms_ <= kFallMs) return fire(LINK_CONTACT_BUMP, cand_d_, bump_peak_, LINK_CONTACT_FELL);
     if (still >= kStuckMs / 2) return fire(LINK_CONTACT_STUCK, run_d_, (float)still, LINK_CONTACT_FELL);
+    if (s_still >= kStallMs / 2) return fire(LINK_CONTACT_STUCK, s_d_, (float)s_still, LINK_CONTACT_FELL, true);
   }
   if (cand_ms_ && now - cand_ms_ > kFallMs) cand_ms_ = 0;
   if (!in.watch || !in.upright) {
     bump_ms_ = hold_ms_ = 0;
     moved_ = false;
     run_ = false;
+    s_run_ = s_win_ = false;
     return 0;
   }
 
@@ -121,6 +126,42 @@ uint8_t ContactDetector::update(const ContactIn& in) {
     const uint32_t s = now - new_ms_;
     if (s >= kStuckMs) return fire(LINK_CONTACT_STUCK, d, (float)s, 0);
     if (in.lidar_stuck && s >= kStuckMs / 2) return fire(LINK_CONTACT_STUCK, d, (float)s, LINK_CONTACT_LIDAR);
+  }
+
+  // ---- stall (#111): commanded (>= kStallMinCmd, either way) but the wheels (nearly) still while the lean builds
+  if (c >= kStallMinCmd && (!s_run_ || d == s_d_)) {
+    if (!s_run_) {
+      s_run_ = true;
+      s_d_ = d;
+      s_on_ms_ = now;
+      s_pos_ = 0;
+      s_win_ = false;
+    }
+    s_pos_ += v * (float)dt * 0.001f;
+    // (driving: not while slowing for a stop - as STUCK - and not this slowly: a balancing robot can stand in its motor
+    // dead band there, the nav stuck check only)
+    if (in.ramp || now - s_on_ms_ < kStallStartMs || (in.drive && (c < kStallDriveMinCmd || !in.cruise))) {
+      s_win_ = false;  // leaning in / ramping up: a balancing robot lags there
+    } else {
+      if (!s_win_ || s_pos_ > s_a_pos_ + kStallNewMm || s_pos_ < s_a_pos_ - kStallBackMm) {
+        s_win_ = true;  // (it moved: the window starts again here)
+        s_a_pos_ = s_pos_;
+        s_a_ms_ = now;
+        s_a_lean_ = in.vel_out;
+        s_sum_ = 0;
+      }
+      s_sum_ += fabsf(v) * (float)dt * 0.001f;                                      // |travel| in the window
+      s_abs_ += (fabsf(v) - s_abs_) * fminf(1.0f, (float)dt / kStallStillTauMs);  // mean |speed|, last ~0.2 s
+      const uint32_t s = now - s_a_ms_;
+      // (driving slowly: a balancing robot can stand in its motor dead band a while)
+      const uint32_t win = in.drive && c < kStuckMinCmd ? kStallDriveMs : kStallMs;
+      // (still now; rocking against it before is fine, up to twice that on average)
+      if (s >= win && s_abs_ <= kStallStillMms && s_sum_ * 1000.0f <= 2.0f * kStallStillMms * (float)s &&
+          (d * (in.vel_out - s_a_lean_) >= kStallBuildDeg || in.held))
+        return fire(LINK_CONTACT_STUCK, d, (float)s, in.lidar_stuck ? LINK_CONTACT_LIDAR : 0, true);
+    }
+  } else {
+    s_run_ = s_win_ = false;
   }
   return 0;
 }

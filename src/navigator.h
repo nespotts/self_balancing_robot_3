@@ -50,18 +50,25 @@
 //   corners' swing circle ahead / behind -> first step straight away from it (<= nav.stuck_backoff_mm).
 // Stuck (#62): driving / turning but < nav.stuck_mm (or 15 deg) of progress for nav.stuck_ms -> BLOCKED,
 //   log "nav: stuck ...", back off nav.stuck_backoff_mm. GOTO then goes on; EXPLORE waits for a new list.
+//   Driving (not the lidar's stuck): also a contact report (MSG_CONTACT stuck, a mark) and contactReset (#111): the
+//   wheels did not turn, so it pushed against something (the slow pushes the stall rule leaves to it).
 //   Lidar stuck (#79, EVT_LINK_STUCK): spinning wheels count as odometry progress, so the bridge's LD19 matcher
 //   reports "wheels turn, robot still"; the next driving stuck check (within 500 ms, while trying to drive) takes it
 //   the same way. Turning in place needs no help: the heading is the gyro's.
-// Contacts (#104, src/contact.h): obstacles below the lidar's scan plane are found by touch. Driving forward in GOTO /
-//   EXPLORE, a BUMP (speed falls far below the command with a pitch-rate spike) or STUCK (no progress for 0.4 s while
-//   the command and the velocity loop's lean push on) -> BLOCKED, log "nav: contact bump|stuck at x,y ...", back off
-//   nav.stuck_backoff_mm (rear corridor checked, as stuck), and MSG_CONTACT to the bridge (contact point on the body's
-//   front edge, pose frame): it marks the spot and its planner replans round it. GOTO waits kContactWaitMs for that
-//   new list, then tries again; EXPLORE waits for a new list. STATION: reported only (someone drives). HOLD: never.
-//   nav.stuck_ms 0 turns these checks off too. STUCK counts only while cruising: not slowing down for a stop (the last
-//   point, a sharp corner) and not ramping up from one (the speed rise limit after a start / turn in place / BLOCKED);
-//   slowing for a pass-through corner (#103) and the ramp back up after it are cruising.
+// Contacts (#104, src/contact.h): obstacles below the lidar's scan plane are found by touch. Driving in GOTO /
+//   EXPLORE, backing off (BLOCKED, stuck, contact) or stepping away from a wall before a turn (#111), a BUMP (speed falls
+//   far below the command with a pitch-rate spike), STUCK (no progress for 0.4 s while the command and the velocity
+//   loop's lean push on) or STALL (#111: from 30 mm/s either way, the wheels still for 0.4 s while the lean builds) ->
+//   BLOCKED, log "nav: contact bump|stuck at x,y (..., rear when reversing, backing off|holding)", MSG_CONTACT to the
+//   bridge (contact point on the body's edge in the direction of travel, pose frame: it marks the spot and its planner
+//   replans round it), and the controller's contactReset() (takeUnwind(): command 0, velocity integrator back to its
+//   free value - it stands up instead of leaning on it). Found while driving: back off nav.stuck_backoff_mm (rear
+//   corridor checked, as stuck). Found while backing off / stepping away (that way is blocked too): no back-off, hold
+//   the spot (and no dead-zone back-off). GOTO waits kContactWaitMs for that new list, then tries again; EXPLORE waits
+//   for a new list. STATION: reported only (someone drives). HOLD: never. nav.stuck_ms 0 turns these checks off too.
+//   STUCK counts only while cruising: not slowing down for a stop (the last point, a sharp corner) and not ramping up
+//   from one (the speed rise limit after a start / turn in place / BLOCKED); slowing for a pass-through corner (#103)
+//   and the ramp back up after it are cruising. STALL waits while the command is held by its rise limit (any ramp).
 // No fresh lidar frame and no range readings for 3 s (rng.enable 0, sensor fault): no obstacle stop is possible,
 //   so EXPLORE pauses (stands still, keeps its state) and GOTO drives at most nav.blind_speed (0 = GOTO pauses
 //   too). Without the sweep that is 500 ms after the last lidar frame (lidar silent / stopped, bridge gone).
@@ -87,6 +94,7 @@ struct NavIn {
   float pitch_rate = 0;               // deg/s, + = pitching forward
   float cmd_speed = 0;                // the controller's ramped speed setpoint, mm/s
   float vel_out = 0;                  // velocity loop lean, deg
+  bool held = false;                  // the velocity loop held at its anti-windup limit (CtlOut.held, #111)
 };
 
 class Navigator {
@@ -141,6 +149,12 @@ class Navigator {
   const ContactFrame& contactFrame() const { return contact_frame_; }
   void contactSent() { contact_due_ = false; }
   bool contact() const { return contact_; }   // BLOCKED after a contact (backing off / waiting)
+  // A contact it acts on (GOTO / EXPLORE, #111): the controller's contactReset() is due (once).
+  bool takeUnwind() {
+    const bool u = unwind_;
+    unwind_ = false;
+    return u;
+  }
 
   static bool navMode(uint8_t m) { return m == MODE_GOTO || m == MODE_EXPLORE || m == MODE_HOLD; }
 
@@ -168,13 +182,23 @@ class Navigator {
   void log(const char* fmt, ...) __attribute__((format(printf, 2, 3)));
   void contactCheck(const NavIn& in);                       // #104: the detector, then the reaction
   void startContact(const NavIn& in, uint8_t kind);
-  void reportContact(const NavIn& in, uint8_t kind, uint8_t flags);
+  void reportContact(const NavIn& in, uint8_t kind, uint8_t flags, bool hold, float dir, float value);
+  void contactWatch(uint8_t src, bool on, bool cruise, bool ramp) {  // this step's motion, watched from the next step
+    contact_watch_ = on;
+    contact_src_ = on ? src : (uint8_t)SRC_NONE;
+    contact_cruise_ = cruise;
+    contact_ramp_ = ramp;
+  }
 
   // contacts (#104)
   ContactDetector cdet_;
-  bool contact_watch_ = false;        // the last step drove forward (GOTO / EXPLORE): watch for contacts
+  enum Src : uint8_t { SRC_NONE, SRC_DRIVE, SRC_BACK, SRC_AWAY };
+  bool contact_watch_ = false;        // the last step moved (GOTO / EXPLORE): watch for contacts
+  uint8_t contact_src_ = SRC_NONE;    // ... driving, backing off, or stepping away from a wall before a turn (#111)
   bool contact_cruise_ = false;       // ... not slowing down for a stop (pass-through corners #103 count as cruising)
+  bool contact_ramp_ = false;         // ... the command held by its rise limit (#111: the stall rule waits)
   bool launch_ = false;               // ramping up from a stop (the speed rise limit, #103): not cruising
+  bool unwind_ = false;               // a contact it acts on: the controller's contactReset() due (#111)
   bool contact_ = false;              // BLOCKED by a contact; GOTO: waiting for a new list
   uint32_t contact_ms_ = 0;
   float contact_hx_ = 0, contact_hy_ = 0;  // where it backed off to (held while it waits)

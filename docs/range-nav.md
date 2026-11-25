@@ -105,7 +105,7 @@ No new params.
 | NavStatusFrame | at once on a change of state / index / count, else 2 Hz in GOTO/EXPLORE/HOLD; `obstacle_mm` = blocking range |
 | Log | `nav: blocked, obstacle at 287 mm (waypoint 2/2)`, `nav: clear …`, `nav: passed 1/3, 118 mm off` (#103), `nav: reached 3/3, 12 mm off` (the last one), `nav: arrived`, `nav: stuck, no progress driving for 2.5 s (waypoint 1/2)`, `nav: stuck, wheels turn but the lidar sees no motion (waypoint 1/2)`, `nav: too close to turn (92 mm), stepping back`, `nav: contact bump at 1154,-23 (…)` (below) |
 
-## Contacts: obstacles below the lidar (issue #104)
+## Contacts: obstacles below the lidar (issues #104, #111)
 
 `src/contact.*`, used by the navigator. The LD19 scans at ~208 mm (the sweep at ~222 mm): shoes, toys, a low box, a step are invisible. The robot finds
 them by touch, backs off, and the bridge marks the spot so the planner goes round it.
@@ -115,19 +115,47 @@ them by touch, backs off, and the bridge marks the spot so the planner goes roun
                    v ■ shoe               + pitch-rate spike (body thrown on)       "nav: contact bump at x,y"
   pushing at 120 ──> ■             STUCK: no new ground for 0.4 s while the         MSG_CONTACT ──> bridge:
                      (still)              command + velocity-loop lean push on       orange bump mark ● on the map
+  backing off  ■ <── -40           STALL (#111): wheels still 0.4 s while the  ──>  rear contact, HOLD there
+  into it      (still)                    lean builds toward the command             (no back-off, no pushing on)
 ```
 
 | | |
 |---|---|
-| Watched | GOTO / EXPLORE while driving forward; STATION while it commands motion (reported only, the driver keeps control). Never HOLD (pushed by hand), BALANCE, MANUAL, turning in place. `nav.stuck_ms` 0 turns it off |
+| Watched | GOTO / EXPLORE while driving, **backing off** (BLOCKED, stuck, contact) or stepping away before a turn (#111); STATION while it commands motion (reported only, the driver keeps control). Never HOLD (pushed by hand), BALANCE, MANUAL, the stop at the last point, turning in place. `nav.stuck_ms` 0 turns it off |
 | BUMP | command ≥ 100 mm/s and steady; speed was ≥ 0.6 × command in the last 120 ms and fell by ≥ max(70 mm/s, 40 %) to < 0.6 × command, with a pitch rate ≥ 80 °/s toward the motion (normal balancing ~20 °/s RMS, peaks ~65; hard bumps 100–126) → it must stay < 0.5 × command for 80 ms (stopped or bounced back; rolling over a door strip cancels it). A fall within 0.6 s confirms it too (`fell`) |
 | STUCK | command ≥ 100 mm/s and **cruising** (not slowing for a stop: the last point or a sharp corner it turns in place at, and not ramping up from one: the #103 speed rise limit after a start / turn in place / BLOCKED, ~1.4 s to 250 mm/s, while the body still rocks; slowing for a pass-through corner and speeding up after it are cruising, those caps are 88–228 mm/s), it got going (≥ 50 mm/s, 0.5 s after the command came: a start rolls back first), then no new ground (10 mm) for 0.4 s while the velocity-loop lean pushes on (≥ 0.6°). Rocking against it counts. A lidar stuck (`EVT_LINK_STUCK`) waiting confirms it at 0.2 s (`lidar`) |
-| Latency (sim) | bump at 200–250 mm/s: ~0.1 s after the impact; stuck at 100–150 mm/s: ~0.4 s (the odometry stuck check: 2.5 s) |
-| Reaction | BLOCKED, back off `nav.stuck_backoff_mm` (rear corridor checked), then **hold** that spot; GOTO waits 4 s for a new list (the planner's route round the mark) and then tries again; EXPLORE waits for a new list |
-| Report | `MSG_CONTACT` (link v8): kind, contact point (pose frame, on the body's front edge, 50 mm ahead of the axle), heading of travel, peak dps / stalled ms, flags `lidar` / `fell` / `reported only` |
-| Log | `nav: contact bump at 1154,-23 (145 dps, backing off)`, `nav: contact stuck at 1160,-23 (400 ms, backing off)`, `nav: contact stuck at … (… reported only)` |
+| STALL (#111) | slow and reverse pushes, reported as `stuck`: command ≥ 30 mm/s either way for 0.3 s, not ramping up (the speed rise limit), then **0.4 s** with the wheels still (travel within −15…+10 mm, mean speed ≤ 15 mm/s now, ≤ 30 over the window) while the velocity-loop lean **grows** toward the command (≥ 0.08°, or held at the anti-windup limit). A build-up, not the absolute lean: the integrator also holds the robot's balance trim (−2…−4° on the real robot). Driving forward: only while cruising, from 60 mm/s, with a 0.8 s window below 100 (the sim's balancer stands in its motor dead band that long at 60, longer at 40–50) |
+| Stuck check | `nav: stuck, no progress driving for 2.5 s` (odometry) now also reports a contact (mark): the slow pushes below 60 mm/s |
+| Latency | real log replay: the 3 pushes v8 missed (back-offs at −40 / −80) at 0.4–0.6 s of stillness. Sim: bump at 200–250 mm/s ~0.1 s; stuck at 100–150 ~0.4 s; a rear box while backing off ~0.5 s; slow pushes at 60–80 0.9–2.4 s (it bounces off first), 40: the 2.5 s check |
+| Reaction | BLOCKED, the controller's **contactReset** (command 0, velocity integrator back to its free value: it stands up instead of leaning on it), back off `nav.stuck_backoff_mm` (rear corridor checked), then **hold** that spot. Found while backing off / stepping away (that way is blocked too): **no back-off, hold** (a rear contact, `rear`, `holding`). GOTO waits 4 s for a new list (the planner's route round the mark) and then tries again; EXPLORE waits for a new list |
+| Report | `MSG_CONTACT` (link v8): kind, contact point (pose frame, on the body's edge in the direction of travel, 50 mm from the axle: behind it when reversing), heading of travel (+180 reversing), peak dps / stalled ms, flags `lidar` / `fell` / `reported only` |
+| Log | `nav: contact bump at 1154,-23 (145 dps, backing off)`, `nav: contact stuck at 1160,-23 (400 ms, backing off)`, `nav: contact stuck at 591,-27 (401 ms, rear, holding)`, `nav: contact stuck at … (… reported only)` |
 | Bridge | a **bump mark**: disc r 70 mm, 35 mm past the contact point, zones kind `bump` (saved in `<map>.zones.json`). Planner: a wall (inflated by radius + margin). Not the watchdog (the robot is standing at it). A contact within 100 mm of a mark moves it (hits + 1). Map ⋯ → **Clear bump marks**; Draw → delete tool removes one; API `{"t": "zones", "action": "clear", "kind": "bump"}` ([api.md](api.md#zones)) |
-| Thresholds | compile-time (`ContactDetector::k*`), no params |
+| Same spot again (#111) | the planner counts stops: `nav: blocked` and `nav: stuck` 1, a contact 2. **3 within 150 mm in 30 s** (2 contacts, a contact + a block, 3 blocks) → a bump mark where it was blocked, the stuck boost (+100 mm margin), explore gives that frontier up, and it plans another way. Status: `stopped 3 times at the same spot (…): planning another way` |
+| Thresholds | compile-time (`ContactDetector::k*`, `Controller::kBlk*`, planner `LOOP_*`), no params |
+
+### Anti-windup (#111, `src/controller.*`)
+
+```
+  lean ▲            without: the integrator leans harder and harder ... until it falls
+       │         ╱
+       │       ╱  ┌──────────── with: at most +1° past its free value (P still pushes)
+       │     ╱ ───┘
+       │ ──╱  ↑ wheels still 0.3 s (|cmd| ≥ 30, mean |speed| < 15)       contact → back to the free value
+       └────────────────────────────────────────────────────────────► t
+```
+
+Blocked = commanded (≥ 30 mm/s) but the wheels not turning (mean |speed| < 15 mm/s over ~0.2 s) for 0.3 s: the velocity
+integrator leans at most 1° further toward the command than its **free value** (the integrator while following a steady
+command or standing: the robot's trim). `CtlOut.held` tells the stall rule. Normal driving and balancing never meet it:
+the sim's tour with it on and off is bit-identical (`TestAntiWindup`). Sim, 2 s against a box at 120 mm/s: +1.00° (without: +1.90°).
+
+### Real-log replay
+
+`station/tools/contact_replay.py extract <session.jsonl> <out.csv>` rebuilds the detector's inputs from the 100 Hz
+telemetry; `test/host/contact_replay.cpp` and `test_contact.py` (`TestRealReplay`) replay
+`station/sim/tests/data/contact_replay_20261125.csv` (v8, 2026-11-25): the 3 missed pushes are found, nothing outside the
+stretches where it really was blocked.
 
 <p>
 <img src="../station/docs/screenshots/phone-bump-mark.png" width="30%">
@@ -143,12 +171,15 @@ Sim: a route straight through a low box at (1.3, 0) m. It bumped (orange ! mark)
 | GOTO across the room and back, a few times (starts, stops, turns) | no `nav: contact` lines |
 | a shoe in the way at 250 mm/s | `contact bump` (may still fall over: the mark is made), backs off, orange mark, route goes round |
 | a heavy box at `nav.max_speed` 120 | `contact stuck` ~0.4 s after it stops |
+| a heavy box at `nav.max_speed` 80, then 50 | `contact stuck` ~1 s (80) / 2.5 s (50) after it stops; it stands up, backs off |
+| GOTO so it blocks at a wall, a box just behind it (the back-off hits it) | `contact stuck … (…, rear, holding)` ~0.7 s after the back-off starts; no pushing on, a mark behind it |
+| leave it wedged like that (EXPLORE) | after 2–3 stops there: `planner: stopped … times at the same spot …: planning another way` |
 | over the door strip / onto the carpet | no contact (if it does: the session log has the telemetry, report it) |
 | HOLD, push it back by hand and hold it | no contact, no mark |
 | Map ⋯ → Clear bump marks | marks gone, routes go straight again |
 
 Simulator: `--low CX,CY,W,H[,HEIGHT]` puts a low box in the room (the lidar and the sweep look over it; the body stops
-at it with a pitch kick). Tests: `test/host/nav_sim.cpp` (`testContact*`), `station/sim/tests/test_contact.py`,
+at it with a pitch kick). Tests: `test/host/nav_sim.cpp` (`testContact*`), `test/host/contact_replay.cpp`, `station/sim/tests/test_contact.py`,
 `station/bridge/tests/test_contacts.py`.
 
 Simulator: `station/sim/sim.py` `Navigator` is a line-by-line port (same params, states, logs);

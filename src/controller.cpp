@@ -19,12 +19,22 @@ void Controller::reset(const CtlIn& in) {
   heading_sp_ = in.heading;
   last_speed_ = in.speed_mms;
   last_pitch_ = in.pitch;
+  spd_abs_ = free_i_ = last_sp_ = 0;
+  clearBlock();
+}
+
+void Controller::contactReset() {
+  speed_sp_ = last_sp_ = 0;
+  vel_i_ = free_i_;  // (vel_out_ follows at the next velocity-loop step, <= 10 ms)
+  clearBlock();
 }
 
 void Controller::disengage() {
   upright_ = false;
   bal_i_ = str_i_ = vel_i_ = vel_out_ = vel_acc_dt_ = 0;
   speed_sp_ = turn_sp_ = 0;
+  spd_abs_ = free_i_ = last_sp_ = 0;
+  clearBlock();
   snap_heading_ = true;  // last_pitch_ / last_speed_ / heading_sp_ are re-taken by reset() on re-engage
   out_.upright = false;
   out_.active = false;
@@ -78,7 +88,30 @@ CtlOut Controller::step(const CtlIn& in) {
       vel_acc_dt_ = 0;
       const float lim = P(P_VEL_LIMIT);
       const float e = speed_sp_ - in.speed_mms;
+      // anti-windup (#111): blocked = commanded but the wheels not turning (header)
+      const float c = fabsf(speed_sp_), d = speed_sp_ >= 0 ? 1.0f : -1.0f;
+      spd_abs_ += (fabsf(in.speed_mms) - spd_abs_) * fminf(1.0f, vdt / kBlkTauS);
+      const float sp_acc = (speed_sp_ - last_sp_) / vdt;
+      last_sp_ = speed_sp_;
+      // free value: not commanded, or following a steady command (not speeding up / slowing down: that lean is not
+      // the robot's trim)
+      if (c < kBlkMinCmd || (fabsf(spd_abs_ - c) < kFreeErr * c && fabsf(sp_acc) < kFreeAcc)) free_i_ = vel_i_;
+      if (c < kBlkMinCmd || spd_abs_ >= kBlkStillMms || (blk_ms_ && d != blk_d_)) {
+        clearBlock();
+      } else if (!blk_ms_) {
+        blk_ms_ = in.now_ms ? in.now_ms : 1;
+        blk_d_ = d;
+      }
       vel_i_ = clampf(vel_i_ + P(P_VEL_KI) * e * vdt, lim);
+      if (blk_ms_ && in.now_ms - blk_ms_ >= kBlkMs) {
+        const float top = free_i_ + blk_d_ * kBlkLeanDeg;
+        if (blk_d_ * (vel_i_ - top) >= 0) {
+          vel_i_ = top;
+          held_ = true;
+        } else {
+          held_ = false;
+        }
+      }
       const float accel = (in.speed_mms - last_speed_) / vdt;  // D on measurement
       last_speed_ = in.speed_mms;
       vel_out_ = clampf(P(P_VEL_KP) * e + vel_i_ - P(P_VEL_KD) * accel, lim);
@@ -86,6 +119,8 @@ CtlOut Controller::step(const CtlIn& in) {
   } else {
     vel_out_ = vel_i_ = vel_acc_dt_ = 0;
     last_speed_ = in.speed_mms;
+    spd_abs_ = free_i_ = last_sp_ = 0;
+    clearBlock();
   }
 
   // --- balance loop: lean error -> power.
@@ -125,6 +160,7 @@ CtlOut Controller::step(const CtlIn& in) {
   o.heading_sp = heading_sp_;
   o.steer = steer;
   o.vel_out = vel_out_;
+  o.held = held_;
   o.upright = true;
   o.active = true;
   out_ = o;
