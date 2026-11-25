@@ -4,6 +4,27 @@
 
 #define FIRMWARE_ID "v4 " __DATE__ " " __TIME__  // 23 chars, fits HelloFrame.firmware[24]
 
+// ---- compile-time switches for bisecting the v9 crash on the robot (issue #109 follow-up) ----
+// Defaults = the fix. platformio.ini has one env per variant (-D flags); the boot log prints them ("build: ...").
+#ifndef SBR_WDOG_ENABLE
+#define SBR_WDOG_ENABLE 1      // RTWDOG hardware watchdog (src/watchdog.cpp). 0 = never touched
+#endif
+#ifndef SBR_WDT_FEED_EVERY_PASS
+#define SBR_WDT_FEED_EVERY_PASS 0  // 1 = v9: wdt_can_block() refreshed the RTWDOG on every background pass (~100 kHz)
+#endif
+#ifndef SBR_SNVS_MARKER
+#define SBR_SNVS_MARKER 0      // 1 = v9: SNVS_LPGPR2/3 rewritten every second (each SNVS access stalls the CPU ~90 us)
+#endif
+#ifndef SBR_I2C_BOUNDED
+#define SBR_I2C_BOUNDED 1      // 1 = bounded LPI2C reads + bit-bang recovery; 0 = plain Wire reads (v8 style), no recovery
+#endif
+#ifndef SBR_EARLY_HOOK
+#define SBR_EARLY_HOOK 1       // startup_early_hook: motor pins low a few us after reset (src/motors.cpp)
+#endif
+#ifndef SBR_CRASH_CAPTURE
+#define SBR_CRASH_CAPTURE 1    // own fault handlers + last-phase record in uncached RAM (src/crash_capture.h)
+#endif
+
 namespace pins {
 constexpr uint8_t IMU_CS = 10, IMU_INT = 30, IMU_RST = 33;      // BNO08x on SPI
 constexpr uint8_t ENC_L_DIR = 38, ENC_R_DIR = 39;               // AS5600: left on Wire, right on Wire1

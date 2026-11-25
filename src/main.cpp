@@ -12,6 +12,7 @@
 #include "battery.h"
 #include "config.h"
 #include "controller.h"
+#include "crash_capture.h"
 #include "encoder_io.h"
 #include "imu.h"
 #include "lidar_fwd.h"
@@ -33,8 +34,10 @@
 static Imu imu;
 static RangeSweep sweep;
 // AS5600s on bounded I2C reads (issue #109): left on Wire (LPI2C1, D18 / D19), right on Wire1 (LPI2C3, D17 / D16)
-static As5600Io enc_left(Wire, IMXRT_LPI2C1_ADDRESS, I2C_LEFT_SDA, I2C_LEFT_SCL, I2C_LEFT_HZ, pins::ENC_L_DIR, false);
-static As5600Io enc_right(Wire1, IMXRT_LPI2C3_ADDRESS, I2C_RIGHT_SDA, I2C_RIGHT_SCL, I2C_RIGHT_HZ, pins::ENC_R_DIR, true);
+static As5600Io enc_left(Wire, IMXRT_LPI2C1_ADDRESS, I2C_LEFT_SDA, I2C_LEFT_SCL, I2C_LEFT_HZ, pins::ENC_L_DIR, false,
+                         PH_ENC_L);
+static As5600Io enc_right(Wire1, IMXRT_LPI2C3_ADDRESS, I2C_RIGHT_SDA, I2C_RIGHT_SCL, I2C_RIGHT_HZ, pins::ENC_R_DIR, true,
+                          PH_ENC_R);
 static Odometry odom;
 static Controller ctl;
 static ModeManager modes;
@@ -267,6 +270,11 @@ static bool sendResetLog() {
     link.log("reset: crash report: %.150s", r.crash);
     if (strlen(r.crash) > 150) link.log("reset: crash report (2): %.150s", r.crash + 150);
   }
+  if (r.last[0]) link.log("reset: %s", r.last);  // the previous run's last phases (crash record, crash_capture.h)
+  if (r.snvs[0]) link.log("reset: %s", r.snvs);
+  link.log("build: wdog %d feed-every-pass %d snvs %d i2c %s early-hook %d capture %d", SBR_WDOG_ENABLE,
+           SBR_WDT_FEED_EVERY_PASS, SBR_SNVS_MARKER, SBR_I2C_BOUNDED ? "bounded" : "wire", SBR_EARLY_HOOK,
+           SBR_CRASH_CAPTURE);
   return true;
 }
 
@@ -587,13 +595,17 @@ static void controlStep() {
   const uint32_t t = micros();
   if (t - enc_last_us >= ENCODER_PERIOD_US) {
     enc_last_us = t;
-    odom.update(t, imu.heading(), s.yaw_rate_dps);
+    odom.update(t, imu.heading(), s.yaw_rate_dps);  // phases enc-L / enc-R / i2c-recover inside (encoder_io.h)
+    crash_phase(PH_STEP);
     if (odom.ok()) motors_speed_feedback(odom.leftCounts(), odom.rightCounts(), t);
   }
   // range sweep: a bounded slice of I2C work (a quarter of the step period), long before the next sample. Not while
   // the left encoder's bus (also the sweep's) is failing / recovering: Wire's own waits could stall the loop (#109).
-  if (sweep.started() && !odom.leftBusSuspect(micros()))
+  if (sweep.started() && !odom.leftBusSuspect(micros())) {
+    crash_phase(PH_SWEEP);
     sweep.service(micros(), (uint32_t)(250000.0f / P(P_CTL_RATE_HZ)), rangePose(), modes.motorsAllowed());
+  }
+  crash_phase(PH_STEP);
   for (RangeFrame rf; sweep.takeNavReading(rf);) nav.addRange(rf, now_ms);
   buildTelemetry(s.t_us);
 }
@@ -621,7 +633,10 @@ static void sendOutput(uint32_t now_us) {
   for (const char* l; (l = nav.peekLog()) != nullptr && link.log("%s", l);) nav.popLog();
   if (const char* r = radio.stats(now_ms)) link.log("%s", r);
   // LD19 bytes last: the telemetry above goes first, and the forwarder leaves it USB room (LidarForwarder::kReserve)
-  if (!imu.dataReady()) lidarService(micros(), now_ms);
+  if (!imu.dataReady()) {
+    crash_phase(PH_LIDAR);
+    lidarService(micros(), now_ms);
+  }
 }
 
 // Motor test (issues #16, #26): own safety interlocks inside MotorTest; here only the wiring.
@@ -705,6 +720,7 @@ static void background() {
     ctl.disengage();  // re-engage check + settle when samples come back (issue #39)
   }
 
+  crash_phase(PH_BG);
   ControlPacket pkt;
   if (radio.poll(pkt, now_ms)) {
     modes.onRadioPacket(pkt, now_ms);
@@ -735,19 +751,20 @@ static void background() {
 
   if (imu.dataReady()) return;
   bg_poll_us = micros();  // the watchdog's "comms healthy" (watchdog.h)
+  crash_phase(PH_LINK);
   link.poll(onLinkFrame, 256);
   if (imu.dataReady()) return;
 
+  crash_phase(PH_LINK);
   if (link.hostConnected()) hello_pending = reset_log_pending = true;
   sendOutput(now_us);
+  crash_phase(PH_LINK);
   if (reset_log_pending && !hello_pending && sendResetLog()) reset_log_pending = false;
+  crash_phase(PH_ENC_LOG);
   encoderLog(now_us, now_ms);
-  static uint32_t snvs_ms = 0;
-  if (now_ms - snvs_ms >= 1000) {  // the reset-cause marker: RTC seconds + uptime (reset_cause.h)
-    snvs_ms = now_ms;
-    reset_cause_tick(now_ms);
-  }
+  reset_cause_tick(now_ms);  // SBR_SNVS_MARKER only: the v9 SNVS marker, 1 Hz (phase "snvs")
 
+  crash_phase(PH_BATT);
   batt.update(now_ms);
   motors_set_vbatt(batt.packV(), now_ms);
   button.update();
@@ -757,11 +774,13 @@ static void background() {
     if (now_us - enc_last_us >= 10000) {
       enc_last_us = now_us;
       odom.update(now_us, imu.heading(), imu.sample().yaw_rate_dps);
+      crash_phase(PH_BG);
       if (odom.ok()) motors_speed_feedback(odom.leftCounts(), odom.rightCounts(), now_us);
     }
     if (now_us - last_tlm_us >= 100000 && !tlm_fresh) buildTelemetry(now_us);
     static uint32_t sweep_us = 0;
     if (sweep.started() && now_us - sweep_us >= 2500 && !odom.leftBusSuspect(now_us)) {
+      crash_phase(PH_SWEEP);
       sweep_us = now_us;
       sweep.service(now_us, 600, rangePose(), modes.motorsAllowed());
       for (RangeFrame rf; sweep.takeNavReading(rf);) nav.addRange(rf, now_ms);
@@ -786,9 +805,12 @@ static void background() {
 
   // things that may block for a few ms: only with the motors off, and the watchdog on its long (idle) timeout
   if (imu.dataReady()) return;
+  crash_phase(PH_WDT);
   const bool motors_off = !motors_active && !mtest.driving() && wdt_can_block();
+  crash_phase(PH_IMU_SVC);
   imu.service(now_ms, motors_off);
   radio.service(now_ms, motors_off);
+  crash_phase(PH_SLOW);
   // rng.enable 1 while the lidar runs: the sweep is about to start (motors off) and drive D28 / D29 (its sensor 1's
   // XSHUT / INT): Serial7 lets go of them first. The lidar comes back after a reboot with rng.enable 0.
   if (lidar.on() && P(P_RNG_ENABLE) >= 0.5f && motors_off && !sweep.started()) {
@@ -868,13 +890,17 @@ void setup() {
   if (wdt)
     link.log("watchdog: RTWDOG on, %lu ms while the motors may run, %lu ms idle", (unsigned long)WDT_RUN_MS,
              (unsigned long)WDT_IDLE_MS);
-  else
+  else if (SBR_WDOG_ENABLE)
     link.log("watchdog: FAILED to start (RTWDOG locked): no hang protection this boot");
+  else
+    link.log("watchdog: off in this build (SBR_WDOG_ENABLE 0)");
   bg_poll_us = micros();  // (the "reset: ..." line follows the first HELLO: reset_log_pending)
   rate_t0_ms = millis();
 }
 
 void loop() {
+  crash_tick(millis());  // uptime in the crash record (one uncached store)
+  crash_phase(PH_WDT);
   // Hardware watchdog (#109): fed here once per pass while background() runs and, with the motors possibly driven, the
   // balance steps come. Short timeout whenever the motors may run (armed in a mode, or the motor test).
   WdtIn w;
@@ -884,9 +910,13 @@ void loop() {
   w.motors_active = motors_active || mtest.driving() || modes.motorsAllowed();
   if (w.motors_active && !have_step) w.step_us = w.now_us;  // armed before the first step: background stops it
   wdt_service(w);
+  crash_phase(PH_IMU_POLL);
   if (imu.poll()) {
+    crash_phase(PH_STEP);
     controlStep();
+    crash_phase(PH_LOOP);
     return;
   }
   background();
+  crash_phase(PH_LOOP);  // back in the core (yield: serialEvent, EventResponder)
 }

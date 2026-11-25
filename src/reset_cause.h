@@ -1,13 +1,19 @@
 // Why the Teensy last reset (issue #109), read once at boot and sent in every HELLO (link v9) + a log line.
 //
 // SRC_SRSR holds the reset sources (sticky: cleared after reading, so the next boot sees only its own). The RT1062 has
-// no brownout flag: a power dip is a power-on reset. The SNVS domain (RTC + 4 general-purpose registers) is told apart:
-// every second the firmware writes a marker, its build hash, the RTC seconds and its uptime there. At boot:
-//   marker gone                      -> the SNVS lost power too: a real power cycle (cold power-on)
-//   marker there, off < 3 s          -> power dip / reset pin: brownout likely
+// no brownout flag: a power dip is a power-on reset. The previous run is told apart by the crash record in uncached
+// RAM (src/crash_capture.h: marker, build hash, uptime, last phases, RTC seconds at its boot), which survives every
+// warm reset but not a power cycle. At boot:
+//   record gone                      -> RAM lost power: a real power cycle (cold power-on)
+//   record there, off < 3 s          -> power dip / reset pin: brownout likely
 //   another build hash               -> flashed
 //   reboot-button flag               -> requested
-// The Teensy core's CrashReport (fault address, CFSR, temperature) is logged too when it holds a crash.
+//   RTWDOG-interrupt flag            -> watchdog (whatever SRSR says)
+//   fault flag                       -> crash: our fault handler saved PC / LR / SP / CFSR / HFSR / BFAR / MMFAR
+// v9 used the SNVS general-purpose registers instead (SBR_SNVS_MARKER): every SNVS access stalls the CPU ~90 us
+// with interrupts held, and the LPGPRs are zeroized on an SNVS security violation (LPCR.GPR_Z_DIS = 0, the default;
+// debug/JTAG activity is one trigger, and the Teensy's bootloader chip sits on JTAG) - hence "previous run 0 s,
+// off unknown" after the v9 crashes.
 #pragma once
 #include <stdint.h>
 
@@ -27,16 +33,19 @@
 
 struct ResetFacts {
   uint32_t srsr = 0, gpr5 = 0;
-  bool snvs_ok = false;     // the SNVS marker survived
+  bool snvs_ok = false;     // the previous run's record survived (crash record in RAM; v9: the SNVS marker)
   bool same_build = false;  // ... and holds this build's hash
   bool planned = false;     // ... and the "reboot requested" flag
   uint32_t off_s = 0xFFFFFFFFu;  // RTC seconds since the previous run's last tick (snvs_ok only)
+  bool wdog_isr = false;    // ... the RTWDOG interrupt ran in the previous run
+  bool fault = false;       // ... our fault handler ran in the previous run
 };
 
 // Pure (host-tested): the reset sources -> LinkResetCause.
 inline uint8_t reset_classify(const ResetFacts& f) {
   if (f.srsr & RST_SRSR_TEMP) return LINK_RESET_TEMP;
-  if (f.srsr & RST_SRSR_WDOG3) return LINK_RESET_WATCHDOG;
+  if (f.snvs_ok && f.fault) return LINK_RESET_FAULT;
+  if ((f.srsr & RST_SRSR_WDOG3) || (f.snvs_ok && f.wdog_isr)) return LINK_RESET_WATCHDOG;
   if (f.srsr & RST_SRSR_LOCKUP_SW) {
     if (f.gpr5 == RST_GPR5_FAULT) return LINK_RESET_FAULT;
     if (f.snvs_ok && !f.same_build) return LINK_RESET_FLASHED;
@@ -72,12 +81,15 @@ struct ResetInfo {
   uint32_t srsr = 0;
   uint32_t prev_uptime_s = 0;
   uint32_t off_s = 0xFFFFFFFFu;
-  char crash[200] = {};       // short CrashReport text ("" = none)
+  char crash[200] = {};       // fault registers of a captured crash ("" = none)
+  char last[160] = {};        // the previous run's last phases / flags ("" = no record)
+  char snvs[64] = {};         // SBR_SNVS_MARKER only: what the SNVS marker said
 };
-// First thing in setup() (after the motor pins): read + clear SRSR / GPR5, read the SNVS marker, take the CrashReport.
+// First thing in setup() (after the motor pins): read + clear SRSR / GPR5, read the previous run's crash record and
+// the core's CrashReport block (raw registers), start this run's record.
 void reset_cause_capture(const char* build_id);
 const ResetInfo& reset_info();
-void reset_cause_tick(uint32_t now_ms);  // once a second: the SNVS marker (RTC seconds + uptime)
+void reset_cause_tick(uint32_t now_ms);  // every loop pass: uptime in the crash record (+ the SNVS marker 1 Hz, v9)
 void reset_cause_mark_planned();         // before a software reset the firmware asks for (reboot button)
 void reset_cause_set_wdt(bool running);
 #endif
