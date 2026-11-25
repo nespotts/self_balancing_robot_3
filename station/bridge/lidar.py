@@ -52,6 +52,7 @@ POSE_STALE_S = 0.5         # no telemetry for this long before the scan: pose un
 FLOWING_S = 1.5
 HEAD_JUMP_DEG = 30.0       # telemetry heading step this much beyond yaw rate x dt: a pose reset, not a turn (#99)
 _FW_STAT_RE = re.compile(r"^lidar: .*usb drop (\d+), overflow (\d+)")
+_FW_SECT_RE = re.compile(r"; sectors ([\d.]+)/s.*max (\d+) us/slice (\d+) us/turn")
 
 DEFAULTS = {
     "enabled": True,
@@ -397,6 +398,10 @@ class Lidar:
         m = _FW_STAT_RE.search(text)
         if m:
             self.reader.fw = {"usb_drop": int(m.group(1)), "overflow": int(m.group(2))}
+            s = _FW_SECT_RE.search(text)      # link v10 (#113): the Teensy's own obstacle sectors, rate and cost
+            if s:
+                self.reader.fw.update(sectors_hz=float(s.group(1)), sectors_slice_us=int(s.group(2)),
+                                      sectors_turn_us=int(s.group(3)))
 
     def on_tlm(self, d, t):
         """One telemetry frame; t its arrival time. With the robot's t_us the pose is stamped with when it was measured

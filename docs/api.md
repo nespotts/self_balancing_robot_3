@@ -67,7 +67,7 @@ the pose after a lidar gap (quiet, lost after 3 s); `slips` / `lost` / `found` /
 #105 relocalisation: `reloc` (null when nothing is going on) = `{"phase":"pending|searching|confirming|found|ambiguous|none|unconfirmed|set|set_poor","by":"auto|reset|load|user|set|retrace","why":"...","score":0.94,"margin":0.41,"ms":220,"cands":2,"age_s":1.3,"running":false}`: the whole-map search (`by` what started it: lost > 5 s, a Teensy reboot / pose reset, a map load, Find myself, Set position, `retrace`: the window search at a well-mapped spot while retracing steps), its best fit and margin over the best pose elsewhere; `found` shows for 10 s after the confirmation; `ambiguous` = two places fit (use Set position); `global` / `relocated` = searches run / poses found and confirmed. Its settings are map settings
 (`{"t":"map","action":"set","settings":{"lidar_match":false}}`, `match_*`), in `settings.json`.
 `status.robot_name` / `status.robot_source` (#97): the robot profile in use, `"balancer"`, `"shark"`, `"sim"` ... (`null` until the first HELLO + params are in), and how it was found: `"sys.platform"` (param 1 = balancer, 2 = shark), `"firmware"` (a simulator, `sim ...`), `"default"` (older firmware: balancer), `"override"` (`--robot NAME`). Maps, places, zones, `lidar.json`, `planner.json`, presets and fall records are kept per robot, see [the station README](../station/README.md#robot-profiles-one-pi-several-robots). The Pi can move between robots: a new connection is identified again from its own HELLO. `status.robot_pending` / `status.robot_wait_s` (#101): the robot on this connection is still being identified, and for how long the link has been up without it (0 = identified). Until it is known the bridge asks again (`GET_PARAMS`, every 2 s, later every 10 s), falls back to the firmware string 3 s after the HELLO, and refuses settings changes (`map` / `lidar` / `plan` `set`) with `{"t": "error", "code": "no_profile", "text": "robot not identified yet; not saved"}`; after 5 s the Health page shows a **Profile** warning tile.
-`status.lidar_nav` (null without a lidar port): `{"sent":812,"age_s":0.04,"skipped":{"off","no_pose","stale","tilt","few","no_link"}}`, the obstacle frames for the robot's navigator ([below](#link-messages-to-the-robot)).
+`status.lidar_nav` (null without a lidar port): `{"sent":812,"age_s":0.04,"skipped":{"off","no_pose","stale","tilt","few","no_link","teensy"},"on_teensy":false,"config_sent":0,"config_age_s":null}`, the obstacle frames for the robot's navigator ([below](#link-messages-to-the-robot)); `on_teensy` (link v10, #113): the robot computes them itself, `config_sent` / `config_age_s` its `MSG_LIDAR_CONFIG`s.
 `scan` (on connect and after each stop-and-scan): `{"t":"scan","corr":[dx,dy,dth],"applied":3,"last":{...},"history":[{"ok":true,"why":"","dx":-31,"dy":12,"dth":-1.2,"mm":33,"n":58,"inliers":51,"margin":0.11,"who":"auto","time":1795300000},...]}` (newest first, 20 kept; `why` says why a scan was not used).
 No WebSocket (old Kindle): `GET /api/state`, `GET|POST /api/cmd`.
 The Android app uses `POST /api/cmd` when it is left: `cmd_vel 0`, `{"t":"plan","action":"stop"}`, and `set_mode` BALANCE if the
@@ -208,7 +208,42 @@ blocked for more than 0.2 s the Logs tab says so.
 ## Link messages to the robot
 
 The bridge <-> Teensy link itself (framed binary, CRC16) is defined in
-[include/protocol/link_protocol.h](../include/protocol/link_protocol.h) (link v9), mirrored in `station/bridge/link_protocol.py`.
+[include/protocol/link_protocol.h](../include/protocol/link_protocol.h) (link v10), mirrored in `station/bridge/link_protocol.py`.
+
+New in v10 (issue #113, [ld19.md](ld19.md#obstacles-for-the-robot-issues-77-113)): **the Teensy computes the LD19 obstacle
+sectors itself.**
+
+```mermaid
+sequenceDiagram
+  participant T as Teensy (v10)
+  participant B as bridge (v10)
+  T->>B: HELLO caps = LINK_CAP_LIDAR_SECTORS
+  Note over B: robot profile bound (lidar.json)
+  B->>T: MSG_LIDAR_CONFIG (mount, filters, gate)
+  B->>T: ... again on a change and every 2 s
+  Note over T: LD19 bytes -> 36 sectors -> navigator, ~10 Hz
+  T->>B: MSG_LIDAR_RAW (as before: the map)
+  Note over B: no MSG_LIDAR_OBSTACLES
+```
+
+**`HelloFrame`** grew to 48 bytes: byte 44 `caps` u32, 0x01 `LINK_CAP_LIDAR_SECTORS`. **`MSG_LIDAR_CONFIG`** (0x88,
+**Pi -> Teensy**), 76 bytes, the robot profile's lidar.json (the source of truth; the Teensy keeps it in RAM only):
+
+| Byte | Field | |
+|---|---|---|
+| 0 | `flags` u8 | 0x01 `ENABLED`, 0x02 `FLIP`, 0x04 `PITCH_AUTO` (typical pitch = median of 3 s), 0x08 `FLOOR_CLIP`, 0x10 `DESKEW` |
+| 1 | `mask_n` u8 | 0 .. 8 mask sectors |
+| 2 | reserved u16 | 0 |
+| 4 .. 43 | 10 x f32 | `x_mm`, `y_mm`, `yaw_deg`, `height_mm`, `min_range_mm`, `max_range_mm`, `min_intensity`, `pitch_gate_deg` (= max(`pitch_limit_deg`, `pitch_max_deg`)), `pitch_ref_deg`, `time_offset_ms` |
+| 44 .. 75 | `mask_cdeg` 16 x u16 | from, to per mask sector, 0.01 deg, robot frame CCW |
+
+Sent once the profile is bound, at once when the settings change, every 2 s, and after every HELLO. While the Teensy has it, it
+ignores `MSG_LIDAR_OBSTACLES`. Compatibility: a v9 bridge reads the first 44 HELLO bytes and never sends `MSG_LIDAR_CONFIG`, so
+v10 firmware takes its obstacle frames as before; a v10 bridge reads a v9 HELLO as `caps` 0 and keeps sending v9 firmware
+obstacle frames. Firmware log: `lidar: sectors on the Teensy (#113): mount x 0 y 0 yaw -90, ...` on a new config, and
+`; sectors 10.0/s, skip ..., max N us/slice M us/turn` at the end of the 30 s `lidar:` line. `status.lidar_nav` gained
+`on_teensy`, `config_sent`, `config_age_s`. Opt-in `SBR3_LOG_LIDAR_RAW=1`: the bridge logs every `MSG_LIDAR_RAW` as
+`["lraw", t, seq, flags, "hex"]` (~35 kB/s) for `test/host/make_ld19_replay.py --session`. No params.
 
 New in v9 (issue #109, [safety.md](safety.md#runaway-motor-2026-11-25-109)): **`HelloFrame`** grew to 44 bytes, the
 reset cause of this boot (the same in every HELLO of one boot):
@@ -270,7 +305,8 @@ New in v5:
 
 **`MSG_LIDAR_OBSTACLES` (0x87, Pi -> Teensy, ~10 Hz, issue #77)**: one LD19 return per sector (the nearest inside the robot's
 driving corridor, else the nearest: #99), for the navigator
-([ld19.md](ld19.md#obstacles-for-the-robot-issue-77)). Sent by `station/bridge/lidar_obstacles.py` once per good turn.
+([ld19.md](ld19.md#obstacles-for-the-robot-issues-77-113)). Sent by `station/bridge/lidar_obstacles.py` once per good turn, only to
+firmware without `LINK_CAP_LIDAR_SECTORS` (v10 firmware makes the same frame itself, #113).
 
 | Byte | Field | |
 |---|---|---|

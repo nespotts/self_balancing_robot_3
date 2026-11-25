@@ -16,6 +16,7 @@
 #include "encoder_io.h"
 #include "imu.h"
 #include "lidar_fwd.h"
+#include "lidar_sectors.h"
 #include "mode_manager.h"
 #include "motor_test.h"
 #include "motors.h"
@@ -49,6 +50,7 @@ static MotorTest mtest;  // wheels-up motor test (mot.test), owns the motors whi
 static Navigator nav;    // waypoints, GOTO / EXPLORE / HOLD, obstacle check (issue #8)
 static LidarForwarder lidar;  // LD19 on Serial7 -> MSG_LIDAR_RAW (issue #100)
 static uint8_t lidar_rx_mem[LIDAR_RX_EXTRA];
+static LidarSectors sectors;  // the LD19 obstacle sectors computed here, for the navigator (issue #113)
 
 // control step state
 static bool have_step = false, motors_active = false;
@@ -255,6 +257,9 @@ static bool sendHello() {
   h.prev_uptime_s = r.prev_uptime_s;
   h.off_s = r.off_s;
   h.uptime_ms = millis();
+  // v10 (#113): send MSG_LIDAR_CONFIG, not MSG_LIDAR_OBSTACLES - while Serial7 reads the LD19 (with rng.enable 1 the
+  // bridge may read one from its own serial port: it then sends the frames as before)
+  h.caps = lidar.on() ? LINK_CAP_LIDAR_SECTORS : 0;
   return link.send(MSG_HELLO, &h, sizeof(h));
 }
 
@@ -306,6 +311,9 @@ struct Serial7LidarIo : LidarFwdIo {
   }
   int room() override { return Serial.availableForWrite(); }
   bool send(const uint8_t* payload, uint8_t len) override { return link.send(MSG_LIDAR_RAW, payload, len); }
+  void tap(const uint8_t* data, int n, bool hole) override {  // every chunk read: the Teensy's own sectors (#113)
+    if (sectors.configured()) sectors.feed(data, n, micros(), hole);
+  }
   bool takeOverrun() override {  // LPUART7 receiver overrun (its 4-byte FIFO overflowed: interrupts were off)
     const uint32_t s = LPUART7_STAT;
     if (!(s & LPUART_STAT_OR)) return false;
@@ -344,6 +352,61 @@ static void lidarService(uint32_t now_us, uint32_t now_ms) {
   lidar.noteCycles(ARM_DWT_CYCCNT - c0);
 }
 
+// ------------------------------------------------------------------ LD19 obstacle sectors on the Teensy (issue #113)
+
+// The navigator's corridor half width (navigator.cpp updateObstacles): the in-corridor rule of the sectors (#99).
+static float corridorHalf() {
+  return P(P_NAV_SIDE_MIN_MM) > 0 ? fminf(0.5f * P(P_NAV_CORRIDOR_MM), 86.0f) : 0.5f * P(P_NAV_CORRIDOR_MM);
+}
+
+// Pose + pitch history for the deskew: every balance step's pose (the telemetry snapshot), pitch every 10 ms (3 s of it
+// for the typical pitch, like the bridge's 100 Hz telemetry). Background, never in the step itself.
+static void sectorsHistory() {
+  static uint32_t pose_step = 0, pitch_us = 0;
+  if (!sectors.configured() || step_count == pose_step) return;
+  pose_step = step_count;
+  sectors.addPose(tlm.t_us, tlm.x_mm, tlm.y_mm, tlm.heading_deg, tlm.pitch_deg);
+  if (tlm.t_us - pitch_us >= 10000) {
+    pitch_us = tlm.t_us;
+    sectors.addPitch(tlm.t_us, tlm.pitch_deg);
+  }
+}
+
+// One slice of a finished turn's processing, in the same step-phase window as the forwarder (first 60 % of the balance
+// period after a step): each slice is a few tens of us, timed for the status line. A frame goes straight into the
+// navigator, as a MSG_LIDAR_OBSTACLES from the bridge would.
+static void sectorsService(uint32_t now_us) {
+  if (!sectors.busy()) return;
+  const float rate = P(P_CTL_RATE_HZ);
+  const uint32_t window_us = (uint32_t)(600000.0f / (rate < 50.0f ? 50.0f : rate));
+  const uint32_t since = now_us - last_step_us;
+  if (since >= window_us && since <= IMU_STALE_US) return;
+  const uint32_t c0 = ARM_DWT_CYCCNT;
+  sectors.service(micros(), corridorHalf());
+  LidarObstacleFrame f;
+  if (sectors.takeFrame(f)) nav.addLidar(f, navIn(millis()));
+  sectors.noteCycles(ARM_DWT_CYCCNT - c0);
+}
+
+static int sectorsStatus(char* out, int n, uint32_t now_ms) { return sectors.statusText(out, n, now_ms); }
+
+static void onLidarConfig(const LidarConfigFrame& f) {
+  const bool was = sectors.active();
+  if (sectors.configure(f, millis())) {
+    const LidarConfigFrame& c = sectors.config();
+    if (sectors.active())
+      link.log("lidar: sectors on the Teensy (#113): mount x %.0f y %.0f yaw %.0f%s h %.0f, range %.0f..%.0f, int %.0f, "
+               "gate %.1f deg, mask %u, %s%s",
+               (double)c.x_mm, (double)c.y_mm, (double)c.yaw_deg, (c.flags & LINK_LCFG_FLIP) ? " flip" : "",
+               (double)c.height_mm, (double)c.min_range_mm, (double)c.max_range_mm, (double)c.min_intensity,
+               (double)c.pitch_gate_deg, (unsigned)c.mask_n, (c.flags & LINK_LCFG_DESKEW) ? "deskew" : "no deskew",
+               (c.flags & LINK_LCFG_FLOOR_CLIP) ? ", floor clip" : "");
+    else
+      link.log("lidar: sectors off (lidar disabled in the robot profile)");
+  }
+  if (sectors.active() != was) lidar.setMaxHold(sectors.active() ? 2 * LINK_LIDAR_RAW_MAX : 0);
+}
+
 static void handleEvent(uint8_t ev) {
   switch (ev) {
     case EVT_MARK_WAYPOINT:
@@ -360,6 +423,7 @@ static void handleEvent(uint8_t ev) {
       imu.resetHeading();
       ctl.shiftHeading(-h_old);  // keep the heading target where it physically was
       nav.onPoseReset();         // waypoints / obstacle points / hold point were in the old frame
+      sectors.poseReset();       // ... and the lidar turn in progress (#113)
       link.log("pose reset (waypoints cleared)");
       break;
     }
@@ -504,10 +568,18 @@ static void onLinkFrame(uint8_t type, const uint8_t* p, uint8_t len) {
       }
       break;
     case MSG_LIDAR_OBSTACLES:  // LD19 obstacle sectors from the bridge (#77): replace the sweep while fresh
-      if (len == sizeof(LidarObstacleFrame)) {
+      // (#113: not while this firmware computes them itself; a v9 bridge never configures that, so it keeps working)
+      if (len == sizeof(LidarObstacleFrame) && !sectors.active()) {
         LidarObstacleFrame f;
         memcpy(&f, p, sizeof(f));
         nav.addLidar(f, navIn(now_ms));
+      }
+      break;
+    case MSG_LIDAR_CONFIG:  // v10 (#113): the robot profile's lidar settings for the Teensy's own sectors
+      if (len == sizeof(LidarConfigFrame)) {
+        LidarConfigFrame f;
+        memcpy(&f, p, sizeof(f));
+        onLidarConfig(f);
       }
       break;
     case MSG_EVENT:
@@ -639,6 +711,10 @@ static void sendOutput(uint32_t now_us) {
     crash_phase(PH_LIDAR);
     lidarService(micros(), now_ms);
   }
+  // the Teensy's own LD19 obstacle sectors (#113): the pose history, then one slice of a finished turn
+  crash_phase(PH_SECTORS);
+  sectorsHistory();
+  if (!imu.dataReady()) sectorsService(micros());
 }
 
 // Motor test (issues #16, #26): own safety interlocks inside MotorTest; here only the wiring.
@@ -817,10 +893,11 @@ static void background() {
   // XSHUT / INT): Serial7 lets go of them first. The lidar comes back after a reboot with rng.enable 0.
   if (lidar.on() && P(P_RNG_ENABLE) >= 0.5f && motors_off && !sweep.started()) {
     lidarEnd();
+    hello_pending = true;  // (#113) caps without LINK_CAP_LIDAR_SECTORS now
     link.log("lidar: Serial7 off, rng.enable 1 takes D28 / D29 (sweep sensor 1); reboot with rng.enable 0 for the LD19");
   }
   if (const char* s = sweep.serviceSlow(now_ms, motors_off)) link.log("%s", s);
-  if (const char* s = lidar.status(now_ms)) link.log("%s", s);
+  if (const char* s = lidar.status(now_ms, sectors.configured() ? sectorsStatus : nullptr)) link.log("%s", s);
   if (g_param_save_requested) {
     if (motors_off) {
       g_param_save_requested = false;

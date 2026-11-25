@@ -22,6 +22,8 @@ struct LidarFwdIo {
   virtual int room() = 0;                                      // free bytes in the USB transmit buffer now
   virtual bool send(const uint8_t* payload, uint8_t len) = 0;  // one MSG_LIDAR_RAW frame (false = not sent)
   virtual bool takeOverrun() { return false; }                 // UART hardware overrun since the last call (and clear it)
+  // every chunk read, sent or dropped (#113: the Teensy's own LD19 parser); hole = bytes before it were lost
+  virtual void tap(const uint8_t* data, int n, bool hole) { (void)data; (void)n; (void)hole; }
   virtual ~LidarFwdIo() {}
 };
 
@@ -37,6 +39,10 @@ class LidarForwarder {
   // cycles_per_us: for noteCycles() (600 on the Teensy 4.1).
   void begin(int rx_capacity, uint32_t now_ms, uint32_t cycles_per_us = 600);
   void end() { on_ = false; }
+  // #113: while the Teensy computes the obstacle sectors from these bytes, they may wait in the UART buffer for USB room
+  // only this long (bytes): then they are read (parsed) and dropped for the Pi, so a stalled Pi link never delays the
+  // navigator's lidar by more than ~20 ms. 0 = the default (the buffer nearly full, ~100 ms).
+  void setMaxHold(int bytes);
   bool on() const { return on_; }
 
   // One background pass. Returns true if a frame went out.
@@ -44,7 +50,9 @@ class LidarForwarder {
 
   // A status line for the robot log (or nullptr): first bytes, every 30 s while bytes flow (5 s after they start), and
   // when they stop. "lidar: ... usb drop N" is read by the bridge (station/bridge/lidar.py) for the Health tile.
-  const char* status(uint32_t now_ms);
+  // extra (#113): appends "; <its text>" to the periodic rates line (the sectors' own cost and counters).
+  typedef int (*StatusExtra)(char* out, int n, uint32_t now_ms);
+  const char* status(uint32_t now_ms, StatusExtra extra = nullptr);
 
   // CPU time of one service() call as measured by the caller (cycles), for the status line's "max ... us".
   void noteCycles(uint32_t cycles) {
@@ -59,7 +67,8 @@ class LidarForwarder {
   int maxChunk() const { return max_chunk_; }
 
  private:
-  int high_water_ = 0, capacity_ = 0, left_ = 0;
+  int high_water_ = 0, base_high_water_ = 0, max_hold_ = 0, capacity_ = 0, left_ = 0;
+  bool tap_hole_ = false;
   uint32_t cycles_per_us_ = 600;
   bool on_ = false, waiting_ = false, overflow_ = false, flowing_ = false, said_first_ = false, have_last_ = false;
   uint8_t seq_ = 0;

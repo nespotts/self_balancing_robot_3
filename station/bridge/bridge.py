@@ -210,9 +210,14 @@ class Bridge:
             self.lidar.defer = True                         # a turn's mapping in its own loop callbacks (#102)
         # ... and its obstacles for the robot's navigator: MSG_LIDAR_OBSTACLES per scan (#77)
         # (the robot's corridor params; nothing sent until its profile, and with it lidar.json, is bound: #99)
+        # (link v10, #113: firmware with LINK_CAP_LIDAR_SECTORS computes them itself and gets the settings instead)
         self.lidar_obst = LidarObstacles(self.lidar, self.send, clock=_now, params=self.param_values,
-                                         ready=lambda: self.robot is not None and not self.robot_pending
+                                         ready=lambda: self.robot is not None and not self.robot_pending,
+                                         teensy=self._teensy_sectors
                                          ) if self.lidar else None
+        # opt-in (#113): MSG_LIDAR_RAW into the session log as ["lraw", t, seq, flags, "hex"] (~35 kB/s), a real LD19
+        # capture for test/host/lidar_sectors_replay.py
+        self.log_lidar_raw = os.environ.get("SBR3_LOG_LIDAR_RAW", "") not in ("", "0")
         # ... and the matcher's stuck check: wheels turning, lidar pose still -> the navigator backs off (#79, link v6)
         self.mapper.lmatch.stuck_listeners.append(lambda: self.send(lp.encode_event(lp.EVT_LINK_STUCK)))
         self.planner = Planner(self, NAV_STATE_NAMES)          # route planning + explore on the map
@@ -421,9 +426,12 @@ class Bridge:
                 self.robot_estop = rf
                 self.push_status()
         elif t == lp.MSG_LIDAR_RAW:
-            # LD19 bytes the Teensy forwards from its Serial7 (#100, ~98 frames/s): into the LD19 parser. Not logged.
+            # LD19 bytes the Teensy forwards from its Serial7 (#100, ~98 frames/s): into the LD19 parser. Not logged
+            # (unless SBR3_LOG_LIDAR_RAW, #113).
             if self.lidar:
                 self.lidar.on_raw(p)
+            if self.log_lidar_raw and len(p) > 2:
+                self.log.record("lraw", p[0], p[1], bytes(p[2:]).hex())
         elif t == lp.MSG_RANGE:
             d = lp.decode_range(p)
             self.log.rng(d)
@@ -478,6 +486,8 @@ class Bridge:
             self.hello = d
             self.log.record("hello", d)
             self._robot_hello(d)
+            if self.lidar_obst:
+                self.lidar_obst.config_reset()     # (#113) the lidar settings again, to a robot that computes sectors
             if changed:
                 self.params = {}
                 self.params_dirty = True
@@ -499,6 +509,13 @@ class Bridge:
                 self.last_get_params = _now()
             if self.estop:                     # Teensy rebooted while latched here: latch it there again
                 self.send(lp.encode_event(lp.EVT_LINK_ESTOP))
+
+    def _teensy_sectors(self):
+        """The robot computes the LD19 obstacle sectors itself (#113): its HELLO says so, and the scans come from its
+        Serial7 (a lidar on the Pi's own serial port is not the one the Teensy sees: then the frames go as before)."""
+        if not (self.hello or {}).get("caps", 0) & lp.LINK_CAP_LIDAR_SECTORS:
+            return False
+        return not self.lidar or self.lidar.reader.source() != "serial"
 
     def on_contact(self, d):
         """MSG_CONTACT (#104): mark the spot on the map (zones kind "bump", saved with it) and let the planner replan
@@ -639,6 +656,8 @@ class Bridge:
                 msgs = self.lidar.poll(now)
             for text in msgs:                             # the live LD19 scan points, <= 3 Hz (#76)
                 self.broadcast(text, droppable=True)
+        if self.lidar_obst:
+            self.lidar_obst.tick(now)                     # MSG_LIDAR_CONFIG to firmware that computes sectors (#113)
         with P("planner.tick"):
             self.planner.tick(now)
         with P("ros.tick"):

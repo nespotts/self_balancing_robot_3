@@ -147,7 +147,9 @@ class TestSizes(unittest.TestCase):
         self.assertEqual(lp.TELEMETRY_SIZE, 108)
         self.assertEqual(lp.RANGE_SIZE, 28)
         self.assertEqual(lp.PARAM_INFO_SIZE, 38)
-        self.assertEqual(lp.HELLO_SIZE, 44)
+        self.assertEqual(lp.HELLO_SIZE, 48)
+        self.assertEqual(lp.HELLO_V9_SIZE, 44)
+        self.assertEqual(lp.LIDAR_CONFIG_SIZE, 76)
         self.assertEqual(lp.HELLO_V8_SIZE, 28)
         self.assertEqual(lp.NAV_STATUS_SIZE, 20)
         for name, (fmt, fields) in lp.STRUCTS.items():
@@ -201,7 +203,7 @@ class TestRoundTrip(unittest.TestCase):
         h = self.parse_one(lp.encode_hello(param_count=11, firmware="v4 test"))
         self.assertEqual(h, {"link_version": lp.LINK_PROTOCOL_VERSION, "radio_version": 2, "param_count": 11, "firmware": "v4 test",
                              "reset_cause": 0, "reset_flags": 0, "srsr": 0, "prev_uptime_s": 0, "off_s": 0xFFFFFFFF,
-                             "uptime_ms": 0})
+                             "uptime_ms": 0, "caps": 0})
         # v9 reset cause (#109) round trip, and a v8 HELLO (28 bytes) still decodes with an unknown cause
         h = self.parse_one(lp.encode_hello(param_count=3, firmware="v4", reset_cause=lp.LINK_RESET_WATCHDOG,
                                            reset_flags=lp.LINK_RESETF_SNVS | lp.LINK_RESETF_CRASH, srsr=0x80,
@@ -211,6 +213,12 @@ class TestRoundTrip(unittest.TestCase):
         v8 = lp.encode_frame(lp.MSG_HELLO, struct.pack("<BBH24s", 8, 2, 5, b"v4 old"))
         h = self.parse_one(v8)
         self.assertEqual((h["link_version"], h["firmware"], h["reset_cause"], h["off_s"]), (8, "v4 old", 0, 0xFFFFFFFF))
+        # v10 caps (#113) round trip, and a v9 HELLO (44 bytes) decodes with caps 0
+        h = self.parse_one(lp.encode_hello(param_count=3, firmware="v4", caps=lp.LINK_CAP_LIDAR_SECTORS, uptime_ms=7))
+        self.assertEqual((h["caps"], h["uptime_ms"]), (lp.LINK_CAP_LIDAR_SECTORS, 7))
+        v9 = lp.encode_frame(lp.MSG_HELLO, struct.pack("<BBH24sBBHIII", 9, 2, 5, b"v4 v9", 3, 0, 0, 10, 0xFFFFFFFF, 99))
+        h = self.parse_one(v9)
+        self.assertEqual((h["link_version"], h["reset_cause"], h["uptime_ms"], h["caps"]), (9, 3, 99, 0))
         self.assertEqual(len(lp.RESET_CAUSE_NAMES), lp.LINK_RESET_OTHER + 1)
         p = self.parse_one(lp.encode_param_info(3, 4.63, 0.0, 20.0, "bal.kd"))
         self.assertEqual(p["name"], "bal.kd")
@@ -235,6 +243,22 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual(self.parse_one(lp.encode_event(lp.EVT_RESET_POSE)), {"event": 4})
         g = self.parse_one(lp.encode_goto([(1.0, 2.0), (3.0, 4.0)], replace=True))
         self.assertEqual(g, {"replace": 1, "count": 2, "points": [(1.0, 2.0), (3.0, 4.0)]})
+
+    def test_lidar_config(self):
+        """MSG_LIDAR_CONFIG (v10, #113): lidar.json settings -> the Teensy's LidarConfigFrame."""
+        from station.bridge.lidar import DEFAULTS
+        s = dict(DEFAULTS, yaw_deg=-90.0, min_range_mm=60.0, height_mm=208.0, mask=[[87.0, 93.0], [350.5, 10.25]],
+                 pitch_limit_deg=2.5, pitch_max_deg=6.0, flip=True, deskew=False)
+        f = lp.encode_lidar_config(s)
+        self.assertEqual((f[2], f[3]), (lp.MSG_LIDAR_CONFIG, lp.LIDAR_CONFIG_SIZE))
+        d = self.parse_one(f)
+        self.assertEqual(d["flags"], lp.LINK_LCFG_ENABLED | lp.LINK_LCFG_FLIP | lp.LINK_LCFG_PITCH_AUTO | lp.LINK_LCFG_FLOOR_CLIP)
+        self.assertEqual((d["yaw_deg"], d["min_range_mm"], d["height_mm"], d["pitch_gate_deg"]), (-90.0, 60.0, 208.0, 6.0))
+        self.assertEqual(d["mask"], [[87.0, 93.0], [350.5, 10.25]])
+        s["mask"] = [[i, i + 1] for i in range(12)]          # more than LINK_LIDAR_MASK_MAX: the first 8
+        self.assertEqual(len(self.parse_one(lp.encode_lidar_config(s))["mask"]), lp.LINK_LIDAR_MASK_MAX)
+        with self.assertRaises(ValueError):
+            lp.decode_lidar_config(lp.lidar_config_payload(s)[:-2])
 
     def test_goto_len_and_split(self):
         f = lp.encode_goto([(0.0, 0.0)] * 3)

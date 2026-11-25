@@ -24,6 +24,12 @@ Per scan (the same packets lidar.py maps, before its every_n / ray_step / mappin
 Nothing is sent while the lidar is silent / stopped, tilted or without a pose: 500 ms after the last frame the firmware
 falls back to the sweep, or to its blind rules (EXPLORE pauses, GOTO <= nav.blind_speed). Nor before the robot profile is
 bound (#97: lidar.json, the mount settings, is loaded then), see ready.
+
+Link v10 (#113): firmware whose HELLO has LINK_CAP_LIDAR_SECTORS computes these sectors itself (src/lidar_sectors.cpp, a
+port of this file + lidar.Lidar.deskew + ld19.Ld19Stream, checked against them by test/host/lidar_sectors_replay.py). It
+then gets no frames from here (see teensy): only the robot profile's lidar settings, MSG_LIDAR_CONFIG, sent by tick() once
+the profile is bound, at once when they change and every CONFIG_RESEND_S (a lost frame, a Teensy reboot). Older firmware
+(no caps) gets the frames as before.
 """
 import cmath
 import math
@@ -39,6 +45,7 @@ _IM = operator.attrgetter("imag")
 _INF = float("inf")
 
 MAX_SCAN_AGE_S = 0.25         # the scan's last packet is older than this when it gets here: not sent
+CONFIG_RESEND_S = 2.0         # MSG_LIDAR_CONFIG again this often (#113)
 # src/navigator.cpp: kAxisFwd, kSensorOut, kHalfWidth (front = x - 38.9 for x >= 26, rear = 13.1 - x)
 AXIS_FWD_MM, SENSOR_OUT_MM, HALF_WIDTH_MM = 26.0, 12.9, 76.0
 FRONT_OFF_MM, REAR_OFF_MM = AXIS_FWD_MM + SENSOR_OUT_MM, AXIS_FWD_MM - SENSOR_OUT_MM
@@ -68,23 +75,61 @@ def pitch_ref(hist, settings):
 
 
 class LidarObstacles:
-    def __init__(self, lidar, send, clock=time.monotonic, params=None, ready=None):
+    def __init__(self, lidar, send, clock=time.monotonic, params=None, ready=None, teensy=None):
         """lidar: lidar.Lidar (settings, mask, pose history; this registers for its scans). send(frame) -> bool.
         params() -> {name: value} of the robot's params (the corridor, #99); ready() -> False while the robot profile
-        (and with it lidar.json, the mount) is not bound yet (#97): nothing is sent then. None = always ready."""
+        (and with it lidar.json, the mount) is not bound yet (#97): nothing is sent then. None = always ready.
+        teensy() -> True when the firmware computes the sectors itself (HELLO caps, link v10, #113): no frames then,
+        tick() sends it the settings instead. None = never (older firmware)."""
         self.lidar = lidar
         self.send = send
         self.clock = clock
         self.params = params
         self.ready = ready
+        self.teensy = teensy
         self.seq = 0
-        self.n = {"sent": 0, "off": 0, "unbound": 0, "no_pose": 0, "stale": 0, "tilt": 0, "few": 0, "no_link": 0}
+        self.n = {"sent": 0, "off": 0, "unbound": 0, "no_pose": 0, "stale": 0, "tilt": 0, "few": 0, "no_link": 0,
+                  "teensy": 0}
         self.last_sent = None         # clock time of the last frame sent
         self.last_pts = None          # its sectors: [(x, y) or None] * 36, robot frame
         self.last_age_ms = None
+        self.cfg_payload = None       # the last MSG_LIDAR_CONFIG payload sent (#113) ...
+        self.cfg_t = None             # ... and when (None: send at the next tick)
+        self.cfg_sent = 0
         lidar.scan_listeners.append(self.on_scan)
 
+    def on_teensy(self):
+        """The firmware computes the sectors itself (#113)."""
+        try:
+            return bool(self.teensy and self.teensy())
+        except Exception:
+            return False
+
+    def config_reset(self):
+        """A HELLO (a new connection or a Teensy reboot, #113): its settings are sent again at the next tick."""
+        self.cfg_t = None
+
+    def tick(self, now=None):
+        """MSG_LIDAR_CONFIG to firmware that computes the sectors (#113): once the robot profile is bound, at once when the
+        settings change, and every CONFIG_RESEND_S. True = one was sent."""
+        if not self.on_teensy():
+            return False
+        if self.ready is not None and not self.ready():
+            return False
+        now = self.clock() if now is None else now
+        p = lp.lidar_config_payload(self.lidar.settings)
+        if p == self.cfg_payload and self.cfg_t is not None and now - self.cfg_t < CONFIG_RESEND_S:
+            return False
+        if not self.send(lp.encode_frame(lp.MSG_LIDAR_CONFIG, p)):
+            return False
+        self.cfg_payload, self.cfg_t = p, now
+        self.cfg_sent += 1
+        return True
+
     def on_scan(self, scan):
+        if self.on_teensy():
+            self.n["teensy"] += 1                       # the robot computes its own sectors (#113): nothing to do here
+            return False
         frame = self.build(scan)
         if frame is None:
             return False
@@ -167,4 +212,6 @@ class LidarObstacles:
     def status(self, now=None):
         now = self.clock() if now is None else now
         return {"sent": self.n["sent"], "age_s": None if self.last_sent is None else round(now - self.last_sent, 2),
-                "skipped": {k: v for k, v in self.n.items() if k != "sent"}}
+                "skipped": {k: v for k, v in self.n.items() if k != "sent"},
+                "on_teensy": self.on_teensy(), "config_sent": self.cfg_sent,          # #113
+                "config_age_s": None if self.cfg_t is None else round(now - self.cfg_t, 2)}

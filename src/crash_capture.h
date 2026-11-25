@@ -39,13 +39,14 @@ enum CrashPhase : uint8_t {
   PH_LIDAR,      // LD19 forwarding (Serial7)
   PH_WDOG_ISR,   // inside the RTWDOG interrupt
   PH_FAULT,      // inside our fault handler
+  PH_SECTORS,    // LD19 obstacle sectors on the Teensy (#113: a turn's deskew / sector slices, the navigator feed)
   PH_COUNT
 };
 
 inline const char* crash_phase_name(uint8_t p) {
   static const char* const k[] = {"-",     "setup", "loop",  "wdt",   "imu-poll", "step",   "enc-L",
                                   "enc-R", "i2c-recover", "sweep", "bg", "link", "enc-log", "snvs",
-                                  "batt",  "imu/radio-svc", "slow", "lidar", "WDOG-ISR", "FAULT"};
+                                  "batt",  "imu/radio-svc", "slow", "lidar", "WDOG-ISR", "FAULT", "sectors"};
   return p < PH_COUNT ? k[p] : "?";
 }
 
