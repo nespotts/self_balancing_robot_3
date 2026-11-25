@@ -14,7 +14,7 @@ import zlib
 from station.bridge import link_protocol as lp
 from station.bridge.mapping import Mapper
 from station.bridge.occgrid import GREY, UNKNOWN, Grid, png_grey
-from station.bridge.planner import BLOCKED, DEFAULTS, MARGIN, CostMap
+from station.bridge.planner import BLOCKED, DEFAULTS, END_GROW_MM, MARGIN, CostMap
 from station.sim.sim import ROBOT_RADIUS, SimRobot, _box
 from station.sim.tour import TOUR, DriftRobot, OfflineBridge, drive_offline, plan_offline
 
@@ -37,6 +37,71 @@ def png_size_and_pixels(data):
 def reading(x=0.0, y=0.0, heading=0.0, angle=0.0, r=1000, valid=1, pitch=-3.0, sid=0):
     return {"t_us": 0, "x_mm": x, "y_mm": y, "heading_deg": heading, "pitch_deg": pitch,
             "sensor_angle_deg": angle, "range_mm": r, "sensor_id": sid, "valid": valid}
+
+
+def doorway_run(args):
+    """One explore of the two-room doorway sim (#62 / #68 / #108): width mm, seed. Returns a dict: closest approach
+    to any wall, got through, and for every squeeze route the planner sent through the doorway (a fresh plan or a
+    re-centred one): where it crosses the wall line against the centre of the gap as the squeeze map had it then, and
+    the clearance it reported. Module level: the sweep runs it in worker processes."""
+    from station.bridge import planner as P
+    width, seed = args
+    c = 600.0
+    r = SimRobot(seed=seed)
+    r.room.segs = _box(750, 0, 3500, 2000) + [(1000, -1000, 1000, c - width / 2.0), (1000, c + width / 2.0, 1000, 1000)]
+    m = Mapper(tempfile.mkdtemp())
+    out = {"width": width, "seed": seed, "x": -1e9, "close": 1e9, "jamb": 1e9, "cross": []}
+    ends = [(1000, c - width / 2.0 - 150, 1000, c - width / 2.0), (1000, c + width / 2.0, 1000, c + width / 2.0 + 150)]
+
+    def note(planner, path):
+        cm = planner.costmap("squeeze")
+        so = cm.solid()
+        lo, hi = None, None
+        for x in (987.5, 1012.5):
+            for k in range(-12, 13):
+                y = c + 12.5 + 25 * k
+                i = cm.cell(x, y)
+                if so[i]:
+                    if y < c:
+                        lo = y if lo is None else max(lo, y)
+                    else:
+                        hi = y if hi is None else min(hi, y)
+        if lo is None or hi is None or hi - lo > 2 * (cm.hard_mm + 40.0):
+            return                                     # one side open on the map: no gap centre to keep to
+        for (ax, ay), (bx, by) in zip(path, path[1:]):
+            if (ax - 1000.0) * (bx - 1000.0) < 0:
+                y = ay + (by - ay) * (1000.0 - ax) / (bx - ax)
+                if lo < y < hi:
+                    out["cross"].append((round(planner.clock(), 1), round(y - (lo + hi) / 2.0, 1),
+                                         planner._sq_clear_now, (hi - lo) / 2.0 - cm.res / 2.0 - cm.radius_mm))
+
+    orig_e, orig_c = P.Planner._plan_explore, P.Planner._check
+
+    def plan_explore(self, pose):
+        res = orig_e(self, pose)
+        if res[0] == "path" and res[3] == "squeeze":
+            note(self, res[1])
+        return res
+
+    def check(self, pose):
+        res = orig_c(self, pose)
+        if res[0] == "recentre" or (res[0] == "path" and res[3] == "squeeze"):
+            note(self, res[1])
+        return res
+
+    def watch(robot, b):
+        out["x"] = max(out["x"], robot.X)
+        out["close"] = min(out["close"], robot.room.clearance(robot.X, robot.Y))
+        out["jamb"] = min(out["jamb"], robot.room._seg_clearance(robot.X, robot.Y, ends))     # the doorway's jambs
+    P.Planner._plan_explore, P.Planner._check = plan_explore, check
+    try:
+        plan_offline(r, m, {"t": "plan", "action": "explore"}, max_s=400, on_step=watch)
+    finally:
+        P.Planner._plan_explore, P.Planner._check = orig_e, orig_c
+    out["through"] = out["x"] > 1000 + ROBOT_RADIUS + 20
+    out["touch"] = out["close"] <= ROBOT_RADIUS + 1.0
+    out["jamb_touch"] = out["jamb"] <= ROBOT_RADIUS + 1.0
+    return out
 
 
 def wall_grid(occ_x_mm=1000, y_range=(-1000, 1000), free_box=(-1500, -1500, 1500, 1500)):
@@ -239,6 +304,64 @@ class TestCostMap(unittest.TestCase):
                 y = ay + (by - ay) * (1000 - ax) / (bx - ax)
                 self.assertLess(abs(y), 150 - 76)                     # through the gap, body clear of the ends
 
+    def test_thin_wall_end_keeps_margin(self):
+        # issue #108: the range sweep draws a thin wall's end short - its last cells fade to unknown (a beam passing
+        # just beside the end sweeps its free wedge over them). A wall x 1000..1050 ending at y = 0 whose last 50 mm
+        # are unknown: legs passing the end still keep radius + margin from the real end (to a cell's rounding), on
+        # the normal map and on the squeeze map; without the wall-end growth they cut ~50 mm closer.
+        g = Grid(size_m=8)
+        for j in range(g.H):
+            for i in range(g.W):
+                x, y = g.x0 + (i + 0.5) * g.res, g.y0 + (j + 0.5) * g.res
+                if -1500 <= x <= 2500 and -1500 <= y <= 1500:
+                    g.cells[j * g.W + i] = g.LO
+        for y in range(-1500, 0, 5):
+            for dx in (0, 25):
+                g.cells[g.index(1000 + dx, y)] = g.HI if y < -50 else UNKNOWN
+        g._mark([-1500, 2500], [-1500, 1500])
+        g.take_dirty()
+
+        def wall_dist(path):
+            best = 1e9
+            for (ax, ay), (bx, by) in zip(path, path[1:]):
+                n = max(1, int(math.hypot(bx - ax, by - ay) / 5))
+                for k in range(n + 1):
+                    x, y = ax + (bx - ax) * k / n, ay + (by - ay) * k / n
+                    best = min(best, math.hypot(max(1000 - x, 0, x - 1050), max(-1500 - y, 0, y)))
+            return best
+        squeeze = {"settings": dict(DEFAULTS, margin_mm=DEFAULTS["squeeze_mm"]), "res_mm": 25, "specks": True}
+        for kw in ({}, squeeze):
+            for start, goal in (((500, -700), (1600, -700)), ((500, -300), (1500, -300)), ((700, 400), (1300, -600))):
+                worst = {}
+                for grow in (0.0, END_GROW_MM):
+                    cm = CostMap(g, grow_mm=grow, **kw)
+                    path = cm.astar(start, goal, unknown_ok=False)
+                    self.assertIsNotNone(path)
+                    worst[grow] = wall_dist(path)
+                need = cm.hard_mm - cm.res * 0.71
+                self.assertGreaterEqual(worst[END_GROW_MM], need, (cm.res, start, goal))
+        self.assertLess(worst[0.0], need)                     # (the fade does cut in without it)
+
+    def test_squeeze_centres_waypoints_in_gap(self):
+        # issue #108: a 250 mm gap (wall x 1000..1050, jamb cells end at y 475 / start at 725). Its centre (600) lies on
+        # a 25 mm cell edge, so the A* cells pass 12.5 mm off it at best (and the flat soft band lets them take any
+        # cell of the corridor); the route's waypoints are moved onto the centre line, the robot enters square to it.
+        g = wall_grid(y_range=(-1500, 475))
+        for y in range(725, 1500, 10):
+            for dx in (0, 25):
+                g.cells[g.index(1000 + dx, y)] = g.HI
+        cm = CostMap(g, dict(DEFAULTS, margin_mm=DEFAULTS["squeeze_mm"]), res_mm=g.res, specks=True,
+                     grow_mm=END_GROW_MM)
+        cm.centre = True
+        for start, goal in (((300, 100), (1700, 1100)), ((300, 1100), (1700, 0)), ((400, 600), (1600, 600))):
+            path = cm.astar(start, goal, unknown_ok=False)
+            self.assertIsNotNone(path)
+            ys = [ay + (by - ay) * (1025 - ax) / (bx - ax) for (ax, ay), (bx, by) in zip(path, path[1:])
+                  if (ax - 1025) * (bx - 1025) < 0]
+            self.assertEqual(len(ys), 1, path)
+            self.assertAlmostEqual(ys[0], 600, delta=6, msg=path)
+            self.assertGreaterEqual(cm.wall_clearance(path), 120)    # 137.5 to the jamb cells, less half a cell
+
     def test_frontiers(self):
         g = wall_grid()
         cm = CostMap(g)
@@ -355,6 +478,30 @@ class TestSimMapping(unittest.TestCase):
             s, b = plan_offline(r, m, {"t": "plan", "action": "explore"}, max_s=400, on_step=watch)
             self.assertGreater(seen["x"], 1000 + ROBOT_RADIUS + 20, (width, seed))
             self.assertGreater(seen["close"], ROBOT_RADIUS + 1.0, (width, seed))
+
+    def test_squeeze_doorway_sweep(self):
+        # issue #108: doorways 240-320 mm x 10 seeds (50 explores, in worker processes).
+        # - Planner: every squeeze route through a gap the map shows on both sides crosses it on the centre line
+        #   (within half a 25 mm cell of the middle between the jamb cells; it used to take any cell of the hard
+        #   corridor: up to 62 mm off), and the clearance it reports is the route's own (<= what the gap gives).
+        # - Robot: touching a jamb is rare. Not never: the range sweep's free wedge (cone_deg) of beams passing just
+        #   beside a thin wall end erases the end on the map (strongly free, 60-150 mm of it at times), and no route
+        #   can keep off a jamb the map does not have. master (749889b): 7 of these 50 runs touched a jamb, 2 never got
+        #   through. (Touching other walls - squeeze legs along a wall keep only radius + 35 - is not counted here.)
+        import multiprocessing
+        jobs = [(w, s) for w in (240, 260, 280, 300, 320) for s in range(1, 11)]
+        with multiprocessing.Pool(max(1, min(8, (os.cpu_count() or 2) - 1))) as pool:
+            runs = pool.map(doorway_run, jobs)
+        crossings = [(r["width"], r["seed"], c) for r in runs for c in r["cross"]]
+        self.assertGreater(len(crossings), 20)
+        for w, s, (t, off, clear, half) in crossings:
+            self.assertLessEqual(abs(off), 13.0, (w, s, t, off))
+            if clear is not None:
+                self.assertLessEqual(clear, half + 25.0, (w, s, t, clear, half))
+        jamb = [(r["width"], r["seed"]) for r in runs if r["jamb_touch"]]
+        stuck = [(r["width"], r["seed"]) for r in runs if not r["through"]]
+        self.assertLessEqual(len(jamb), 5, jamb)          # (now 4: 240/9, 240/10, 260/2, 300/6 - each a jamb end 45-150 mm
+        self.assertLessEqual(len(stuck), 2, stuck)        #  short or missing on the map when the route was planned; now 0)
 
 
 class TestPlannerSettings(unittest.TestCase):

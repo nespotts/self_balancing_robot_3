@@ -29,16 +29,30 @@ MARGIN = 250              # within radius + margin: only to drive out of it near
 OCC_P, FREE_P = 0.62, 0.40
 OCC_BYTE = UNKNOWN + math.log(OCC_P / (1 - OCC_P)) / UNIT     # ~138
 FREE_BYTE = UNKNOWN + math.log(FREE_P / (1 - FREE_P)) / UNIT  # ~120
-# fine byte -> class bits: 2 = occupied, 1 = free, 0 = unknown (OR-able: occupied wins)
-CLASS_LUT = bytes(2 if v > OCC_BYTE else (1 if v < FREE_BYTE else 0) for v in range(256))
+# fine byte -> class bits: 2 = occupied, 1 = free, 4 = unknown (OR-able: occupied wins, then free; the unknown bit
+# tells whether any fine cell of a coarse one was unknown, #108)
+CLASS_LUT = bytes(2 if v > OCC_BYTE else (1 if v < FREE_BYTE else 4) for v in range(256))
 # squeeze plans (#62): only sure walls count (~0.8). The sensor cone draws weak stray hits into a doorway
 # (just over OCC_BYTE) from beams that clip a jamb; those count as free there (seen, not a frontier).
 # Only for maps without range weighting (mapping "range_weight" off): with it, far hits are weak by design
 # (a wall seen from 1-2 m sits at ~140-155 and would vanish from a sure-walls map, letting squeeze routes and
 # frontiers through it), and close free readings already clear far stray hits out of doorways (#63).
 SURE_OCC_BYTE = 155
-SURE_LUT = bytes(2 if v > SURE_OCC_BYTE else (1 if v < FREE_BYTE or v > OCC_BYTE else 0) for v in range(256))
-FINAL_LUT = bytes([0, 1, 2, 2] + [0] * 252)
+SURE_LUT = bytes(2 if v > SURE_OCC_BYTE else (1 if v < FREE_BYTE or v > OCC_BYTE else 4) for v in range(256))
+FINAL_LUT = bytes(2 if v & 2 else (1 if v & 1 else 0) for v in range(256))     # OR of classes -> 0 / 1 / 2
+UNK_BIT = bytes(1 if v & 4 else 0 for v in range(256))
+OCC_ONLY = bytes([0, 0, 1] + [0] * 253)       # state -> 1 where occupied
+FREE_ONE = bytes([0, 1] + [0] * 254)          # state -> 1 where free
+UNKNOWN_ONE = bytes([1] + [0] * 255)          # state -> 1 where unknown
+THREE_UP = bytes(1 if v >= 3 else 0 for v in range(256))
+# #108: a thin wall end is drawn short. Beams that pass just beside it sweep their free wedge (cone_deg)
+# over its last cells, so the end fades into unknown cells (a 260 mm doorway's jamb: last occupied cell 45 mm short,
+# the two cells after it 137 / 121 - unknown). Unknown cells within this of a wall count as wall for the hard bands (both maps; at 50 mm: a cell with
+# any unknown fine cell). Where the end is erased to strongly free the map has no trace of it: see the doorway sweep.
+END_GROW_MM = 50.0
+CENTRE_LEAD_MM = 150.0    # squeeze routes: lead-in / lead-out on the gap's centre line, this far beyond its narrow part
+CENTRE_REACH_MM = 100.0   # ... a waypoint moves at most this far sideways onto the centre line
+GAP_SIDE_MM = 100.0       # ... a gap: walls within radius + margin + this on both sides of the route
 
 DEFAULTS = {
     "robot_radius_mm": 80.0,    # footprint radius the planner keeps off obstacles
@@ -87,10 +101,13 @@ def clean_settings(s, base):
 
 
 class CostMap:
-    def __init__(self, grid, settings=None, res_mm=50.0, margin_m=1.0, sure_walls=False, specks=None, zones=None):
+    def __init__(self, grid, settings=None, res_mm=50.0, margin_m=1.0, sure_walls=False, specks=None, zones=None,
+                 grow_mm=0.0):
         """sure_walls: only sure walls count (SURE_LUT); specks: fill unknown specks (default: = sure_walls).
         zones: a zones.ZoneView (#70): virtual walls / zone edges become walls before inflation, no-go insides and
-        the outside of the fence are blocked after it, slow zones cost more."""
+        the outside of the fence are blocked after it, slow zones cost more.
+        grow_mm (#108): (partly) unknown cells this close to a wall at the edge of seen-free space are wall too (hard
+        bands only): thin wall ends the sensor cone drew short (see _grow)."""
         S = dict(DEFAULTS, **(settings or {}))
         self.lut = SURE_LUT if sure_walls else CLASS_LUT
         self.g = grid
@@ -122,9 +139,11 @@ class CostMap:
         self.centre = False          # squeeze maps (set by the Planner): shortcuts keep to the gap centre line (#68)
         self.hard_mm = S["robot_radius_mm"] + S["margin_mm"]
         self.inner_r = (S["robot_radius_mm"] + min(30.0, S["margin_mm"])) / self.res
+        self.radius_mm = S["robot_radius_mm"]
+        self._ccache = {}            # cell -> clearance (cells), see _clearance
         if zones:
             zones.mark_lines(self)
-        self._inflate(S["robot_radius_mm"] + S["margin_mm"], S["soft_mm"])
+        self._inflate(S["robot_radius_mm"] + S["margin_mm"], S["soft_mm"], grow_mm)
         if zones:
             zones.mark_areas(self, BLOCKED, MARGIN)
         self.unknown_ok = bool(S["unknown_ok"])
@@ -133,7 +152,7 @@ class CostMap:
     def _classify(self):
         g, W, f, w = self.g.cells, self.g.W, self.f, self.w
         nb = w * f
-        state = bytearray()
+        state, part = bytearray(), bytearray()
         for cy in range(self.h):
             acc = 0
             for k in range(f):
@@ -144,28 +163,75 @@ class CostMap:
                 acc |= acc >> (8 * k)
             row = acc.to_bytes(nb, "big")[f - 1::f]
             state += row.translate(FINAL_LUT)
+            part += row.translate(UNK_BIT)
         self.state = state                          # 0 unknown, 1 free, 2 occupied
+        self.part_unknown = part                    # 1: a fine cell of it is unknown (see _grow)
 
     def _fill_specks(self):
         """Squeeze maps: an unknown cell with 3+ free 4-neighbours counts as free (a weakly seen speck in a
         doorway would cut the only way through; explore never travels through unknown)."""
+        # (#108: counted for all cells at once with whole-map integer shifts - one byte per cell, a count <= 4 never
+        # carries into the next byte; the cell-by-cell loop over the unknown was most of a squeeze map's build)
         w, n, st = self.w, len(self.state), self.state
-        fill = []
-        i = st.find(0)
+        full = (1 << (8 * n)) - 1
+        free = int.from_bytes(st.translate(FREE_ONE), "big")
+        if not hasattr(CostMap, "_colmask") or CostMap._colmask[0] != (w, n):
+            first = (b"\x00" + b"\x01" * (w - 1)) * (n // w)      # 0 in column 0
+            last = (b"\x01" * (w - 1) + b"\x00") * (n // w)       # 0 in the last column
+            CostMap._colmask = ((w, n), int.from_bytes(first, "big"), int.from_bytes(last, "big"))
+        _k, not_first, not_last = CostMap._colmask
+        # big-endian: cell i+1's byte shifted left by 8 lands on cell i
+        cnt = (((free << 8) & full) & not_last) + ((free >> 8) & not_first) + \
+            ((free << (8 * w)) & full) + (free >> (8 * w))
+        both = (int.from_bytes(cnt.to_bytes(n, "big").translate(THREE_UP), "big") &
+                int.from_bytes(st.translate(UNKNOWN_ONE), "big")).to_bytes(n, "big")
+        i = both.find(1)
         while i >= 0:
-            ix = i % w
-            k = 0
-            for o in (1, -1, w, -w):
-                j = i + o
-                if 0 <= j < n and abs(j % w - ix) <= 1 and st[j] == 1:
-                    k += 1
-            if k >= 3:
-                fill.append(i)
-            i = st.find(0, i + 1)
-        for i in fill:
-            st[i] = 1
+            st[i] = 1                # (part_unknown keeps them for the wall-end growth, #108)
+            i = both.find(1, i + 1)
 
-    def _inflate(self, hard_mm, soft_mm):
+    @staticmethod
+    def _paint(buf, w, h, cells, r, val):
+        """buf[...] = val on a disc of radius r (cells) round each cell."""
+        ri = int(math.floor(r))
+        spans = [(dy, int(math.floor(math.sqrt(max(0.0, r * r - dy * dy))))) for dy in range(-ri, ri + 1)]
+        fill = bytes([val]) * (2 * ri + 3)
+        for i in cells:
+            cx, cy = i % w, i // w
+            for dy, dx in spans:
+                y = cy + dy
+                if 0 <= y < h:
+                    a, b = max(0, cx - dx), min(w, cx + dx + 1)
+                    buf[y * w + a:y * w + b] = fill[:b - a]
+
+    def _grow(self, occ, grow_mm):
+        """(#108) Cells within grow_mm of an occupied one that are (partly) unknown - at 50 mm cells: any of its fine
+        cells - and lie in or next to seen-free space: where a wall end the sensor drew short may still go on (filled
+        specks count: they were unknown). Cells deep in the unknown behind a wall add nothing (its own bands cover
+        them), so only the ones at the edge of seen space count."""
+        w, h, st = self.w, self.h, self.state
+        r = grow_mm / self.res
+        if r < 1.0 or not occ:
+            return []
+        near = bytearray(w * h)
+        self._paint(near, w, h, occ, r, 1)
+        n = w * h
+        both = (int.from_bytes(near, "big") & int.from_bytes(self.part_unknown, "big")).to_bytes(n, "big")
+        out = []
+        i = both.find(1)
+        while i >= 0:
+            s = st[i]
+            if s == 1:
+                out.append(i)
+            elif s == 0:
+                ix = i % w
+                if (ix + 1 < w and st[i + 1] == 1) or (ix > 0 and st[i - 1] == 1) or \
+                        (i + w < n and st[i + w] == 1) or (i >= w and st[i - w] == 1):
+                    out.append(i)
+            i = both.find(1, i + 1)
+        return out
+
+    def _inflate(self, hard_mm, soft_mm, grow_mm=0.0):
         w, h = self.w, self.h
         cost = bytearray(w * h)
         rh = hard_mm / self.res
@@ -177,18 +243,22 @@ class CostMap:
             occ.append(i)
             i = st.find(2, i + 1)
         self.n_occ = len(occ)
-        for r, val in ((rs, 20), (rh, MARGIN), (self.inner_r, BLOCKED)):
-            ri = int(math.floor(r))
-            spans = [(dy, int(math.floor(math.sqrt(max(0.0, r * r - dy * dy))))) for dy in range(-ri, ri + 1)]
-            fill = bytes([val]) * (2 * ri + 3)
-            for i in occ:
-                cx, cy = i % w, i // w
-                for dy, dx in spans:
-                    y = cy + dy
-                    if 0 <= y < h:
-                        a, b = max(0, cx - dx), min(w, cx + dx + 1)
-                        cost[y * w + a:y * w + b] = fill[:b - a]
+        self.grown = self._grow(occ, grow_mm) if grow_mm > 0 else []
+        self._solid = None
+        self._paint(cost, w, h, occ, rs, 20)
+        for r, val in ((rh, MARGIN), (self.inner_r, BLOCKED)):
+            self._paint(cost, w, h, occ, r, val)
+            self._paint(cost, w, h, self.grown, r, val)    # (their soft band: the wall's own one covers it)
         self.cost = cost
+
+    def solid(self):
+        """1 = a wall for clearances: occupied (zones' blocked areas too) or a grown wall end (#108)."""
+        if self._solid is None:
+            s = bytearray(self.state.translate(OCC_ONLY))
+            for i in self.grown:
+                s[i] = 1
+            self._solid = s
+        return self._solid
 
     # ---------------------------------------------------------- coordinates
     def cell(self, x, y):
@@ -314,21 +384,117 @@ class CostMap:
         return True
 
     def _clearance(self, i, cache, R):
-        """Distance (cells, capped at R) from cell i to the nearest occupied cell."""
+        """Distance (cells, capped at R) from cell i to the nearest wall cell (occupied or a grown wall end)."""
         v = cache.get(i)
         if v is None:
-            w, st = self.w, self.state
+            w, so = self.w, self.solid()
             cx, cy = i % w, i // w
             best = R * R
-            for y in range(max(0, cy - int(R)), min(self.h, cy + int(R) + 1)):
+            ri = int(R)
+            x0, x1 = max(0, cx - ri), min(w, cx + ri + 1)
+            for y in range(max(0, cy - ri), min(self.h, cy + ri + 1)):
                 row = y * w
-                for x in range(max(0, cx - int(R)), min(w, cx + int(R) + 1)):
-                    if st[row + x] == 2:
-                        d = (x - cx) ** 2 + (y - cy) ** 2
-                        if d < best:
-                            best = d
+                j = so.find(1, row + x0, row + x1)
+                while j >= 0:
+                    d = (j - row - cx) ** 2 + (y - cy) ** 2
+                    if d < best:
+                        best = d
+                    j = so.find(1, j + 1, row + x1)
             v = cache[i] = math.sqrt(best)
         return v
+
+    def _walls_near(self, x, y, r_mm):
+        """Centres (world mm) of the wall cells in the square of half side r_mm round (x, y)."""
+        w, h, so, res = self.w, self.h, self.solid(), self.res
+        cx, cy = int((x - self.x0) // res), int((y - self.y0) // res)
+        k = int(r_mm / res) + 1
+        x0, x1 = max(0, cx - k), min(w, cx + k + 1)
+        pts = []
+        for yy in range(max(0, cy - k), min(h, cy + k + 1)):
+            row = yy * w
+            j = so.find(1, row + x0, row + x1)
+            while j >= 0:
+                pts.append((self.x0 + (j - row + 0.5) * res, self.y0 + (yy + 0.5) * res))
+                j = so.find(1, j + 1, row + x1)
+        return pts
+
+    @staticmethod
+    def _dist2(x, y, pts, cap2):
+        best = cap2
+        for px, py in pts:
+            d = (px - x) ** 2 + (py - y) ** 2
+            if d < best:
+                best = d
+        return best
+
+    def wall_clearance(self, pts, step_mm=10.0):
+        """Smallest distance (mm) from the polyline pts to a wall, to the wall cells' near edges (a wall cell's
+        hit is anywhere inside it: centre - half a cell); capped at radius + margin + 80. #108: what a squeeze
+        route really keeps - the doorway's jambs as the map has them, grown wall ends included."""
+        cap = self.hard_mm + 80.0
+        R = cap / self.res
+        best = cap
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            n = max(1, int(math.hypot(bx - ax, by - ay) / step_mm))
+            for k in range(n + 1):
+                x, y = ax + (bx - ax) * k / n, ay + (by - ay) * k / n
+                i = self.cell(x, y)
+                if i is None:
+                    continue
+                c = self._clearance(i, self._ccache, R) * self.res   # cell-centre distance: within ~0.7 cell
+                if c - self.res > best:
+                    continue
+                d = math.sqrt(self._dist2(x, y, self._walls_near(x, y, min(cap, c + self.res)), cap * cap))
+                best = min(best, d - self.res / 2.0)
+        return max(0.0, best)
+
+    def _centre_xy(self, p, t, unknown_ok):
+        """Squeeze maps (#108): move p sideways (across direction t, at most CENTRE_REACH_MM) to where it is
+        furthest from the walls on both sides - the gap's centre line, off the 25 mm cell grid. None if a side is
+        open (the farthest point is at the reach limit) or there is no wall near."""
+        nx, ny = -t[1], t[0]
+        reach = CENTRE_REACH_MM
+        look = reach + self.hard_mm + 80.0
+        pts = self._walls_near(p[0], p[1], look)
+        if not pts:
+            return None
+        cap2 = look * look
+        step = 5.0
+        kmax = int(reach / step)
+        best, bk = -1.0, None
+        for k in sorted(range(-kmax, kmax + 1), key=abs):       # ties: the smallest move
+            d = self._dist2(p[0] + nx * k * step, p[1] + ny * k * step, pts, cap2)
+            if d > best + 1e-6:
+                best, bk = d, k
+        if bk is None or abs(bk) == kmax or best >= cap2:
+            return None
+        q = (p[0] + nx * bk * step, p[1] + ny * bk * step)
+        i = self.cell(*q)
+        if i is None or not self.passable(i, unknown_ok):
+            return None
+        return q
+
+    def _gap_axis(self, m, t):
+        """Direction through the gap at its centre m: across the line between the nearest wall cells on either side
+        of the route (a doorway: through it, square to the jambs), signed along t."""
+        nx, ny = -t[1], t[0]
+        pts = self._walls_near(m[0], m[1], CENTRE_REACH_MM + self.hard_mm + 80.0)
+        a = b = None
+        for px, py in pts:
+            s = (px - m[0]) * nx + (py - m[1]) * ny
+            d = (px - m[0]) ** 2 + (py - m[1]) ** 2
+            if s < 0 and (a is None or d < a[0]):
+                a = (d, px, py)
+            elif s > 0 and (b is None or d < b[0]):
+                b = (d, px, py)
+        if a is None or b is None:
+            return t
+        gx, gy = b[1] - a[1], b[2] - a[2]
+        L = math.hypot(gx, gy)
+        ux, uy = gy / L, -gx / L
+        if ux * t[0] + uy * t[1] < 0:
+            ux, uy = -ux, -uy
+        return ux, uy
 
     def _centred_line(self, a, b, floor, cache, R):
         """Squeeze maps: the straight segment a-b never gets closer to a wall than `floor` cells."""
@@ -347,19 +513,40 @@ class CostMap:
         ends (less half a cell), so legs stay on the gap's centre line instead of cutting the jamb."""
         if len(cells) <= 2:
             return [self.center(i) for i in cells]
-        cache, R = {}, (self.hard_mm + 80.0) / self.res
+        cache, R = self._ccache, (self.hard_mm + 80.0) / self.res
         must = set()
+        runs = []
         if self.centre:                  # per narrow stretch: its centre cell + a lead-in / lead-out stay waypoints
-            lead = int(round(150.0 / self.res))
+            lead = int(round(CENTRE_LEAD_MM / self.res))
             tight = (self.hard_mm + 40.0) / self.res
-            run = []
+            last = len(cells) - 1
+
+            def triple(r, pinch=False):
+                mid = r[len(r) // 2]
+                if pinch:     # a gap: its narrowest cell (a doorway: in the doorway, not where the stretch is centred)
+                    inner = [k for k in r if 0 < k < last] or r       # (not the robot / the goal themselves)
+                    mid = min(inner, key=lambda k: (round(self._clearance(cells[k], cache, R), 1), abs(k - mid)))
+                return max(0, r[0] - lead), mid, min(last, r[-1] + lead)
+            run, gap = [], []
             for k, c in enumerate(cells + [None]):
-                if c is not None and self._clearance(c, cache, R) < tight:
+                t = c is not None and self._clearance(c, cache, R) < tight
+                if t:
                     run.append(k)
                 elif run:
-                    must.update((max(0, run[0] - lead), run[len(run) // 2], min(len(cells) - 1, run[-1] + lead)))
+                    must.update(triple(run))
                     run = []
-        out = [cells[0]]
+                # #108: the gap itself = where walls are close on both sides (a narrow stretch also runs on along a
+                # wall beyond a doorway: its middle is not the doorway's)
+                if t and self._two_sided(cells, k, self.hard_mm + GAP_SIDE_MM):
+                    gap.append(k)
+                elif gap:
+                    ks = triple(gap, pinch=True)
+                    must.update(ks)
+                    runs.append(ks)
+                    gap = []
+            for kin, kmid, kout in runs:     # a gap: only its lead-in, middle and lead-out must stay (#108)
+                must -= {k for k in must if kin < k < kout and k != kmid}
+        out = [0]                        # kept indices into cells
         i = 0
         while i < len(cells) - 1:
             j = min([m for m in must if m > i] + [len(cells) - 1])    # never skip over a must-keep cell
@@ -371,9 +558,148 @@ class CostMap:
                     if self._centred_line(cells[i], cells[j], floor, cache, R):
                         break
                 j -= 1
-            out.append(cells[j])
+            out.append(j)
             i = j
-        return [self.center(i) for i in out]
+        pts = [self.center(cells[k]) for k in out]
+        if runs:
+            self._centre_runs(cells, out, pts, runs, unknown_ok)
+        return pts
+
+    def _centre_runs(self, cells, out, pts, runs, unknown_ok):
+        """Squeeze maps (#108): put each narrow stretch's waypoints on the gap's true centre line. The A* cells only
+        know the gap to a cell (25 mm: a 240 mm doorway's centre lies on a cell edge) and, with the soft band flat
+        inside the gap, take any cell of the hard corridor. The middle waypoint moves across to the point furthest
+        from both sides, the lead-in / lead-out onto the line through it square to the jambs (the robot drives
+        straight through). A moved point is kept only when its legs stay clear."""
+        pos = {k: n for n, k in enumerate(out)}
+        last = len(cells) - 1
+        for kin, kmid, kout in runs:
+            if kmid not in pos or kmid in (0, last):
+                continue
+            a = self.center(cells[max(0, kmid - 2)])
+            b = self.center(cells[min(last, kmid + 2)])
+            L = math.hypot(b[0] - a[0], b[1] - a[1])
+            if L < 1e-6:
+                continue
+            t = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+            n = pos[kmid]
+            if pts[n] is None:
+                continue
+            m = self._centre_xy(pts[n], t, unknown_ok)
+            if m is None or not self._legs_clear(pts, n, m, unknown_ok):
+                continue
+            pts[n] = m
+            u = self._gap_axis(m, t)
+            for j in range(pos.get(kin, n) + 1, pos.get(kout, n)):      # other waypoints in the gap: onto the line
+                if j == n or pts[j] is None:
+                    continue
+                p = pts[j]
+                s = (p[0] - m[0]) * u[0] + (p[1] - m[1]) * u[1]
+                p0, p1 = self._beside(pts, j, -1), self._beside(pts, j, 1)
+                s0 = (p0[0] - m[0]) * u[0] + (p0[1] - m[1]) * u[1]
+                s1 = (p1[0] - m[0]) * u[0] + (p1[1] - m[1]) * u[1]
+                if not s0 + 20.0 < s < s1 - 20.0:
+                    continue                  # would step back (or bunch up) along the line: leave it
+                q = (m[0] + u[0] * s, m[1] + u[1] * s)
+                i = self.cell(*q)
+                if i is not None and self.passable(i, unknown_ok) and self._legs_clear(pts, j, q, unknown_ok):
+                    pts[j] = q
+            for k, sgn in ((kin, -1.0), (kout, 1.0)):
+                if k not in pos or k in (0, last) or k == kmid or pts[pos[k]] is None:
+                    continue                  # the robot / the goal stay where they are
+                j = pos[k]
+                p = pts[j]
+                d = max(CENTRE_LEAD_MM, sgn * ((p[0] - m[0]) * u[0] + (p[1] - m[1]) * u[1]))
+                o = self._beside(pts, j, -1 if sgn < 0 else 1)   # the waypoint before the lead-in / after the lead-out
+                so = sgn * ((o[0] - m[0]) * u[0] + (o[1] - m[1]) * u[1])
+                for f in (1.0, 0.66, 0.4):
+                    if d * f > so - 50.0:
+                        continue                  # not 50 mm beyond the waypoint before / after it: no step back
+                    q = (m[0] + sgn * u[0] * d * f, m[1] + sgn * u[1] * d * f)
+                    i = self.cell(*q)
+                    if i is not None and self.passable(i, unknown_ok) and self._legs_clear(pts, j, q, unknown_ok):
+                        pts[j] = q
+                        break
+                else:
+                    # no room for it (the robot is about at the gap already): straight on to the middle, if clear
+                    a, b = self._beside(pts, j, -1), self._beside(pts, j, 1)
+                    ca, cb = self.cell(*a), self.cell(*b)
+                    if ca is not None and cb is not None and self.clear_line(
+                            ca, cb, unknown_ok, allow_start_zone=(a is pts[0])):
+                        pts[j] = None
+        pts[:] = [p for p in pts if p is not None]
+
+    @staticmethod
+    def _beside(pts, j, step):
+        """The nearest waypoint before (step -1) / after (+1) j that is still there."""
+        k = j + step
+        while pts[k] is None:
+            k += step
+        return pts[k]
+
+    def _two_sided(self, cells, k, r_mm):
+        """Route cell k has walls within r_mm on both sides (left and right of the route there)."""
+        last = len(cells) - 1
+        return self._two_sided_xy(self.center(cells[k]), self.center(cells[max(0, k - 2)]),
+                                  self.center(cells[min(last, k + 2)]), r_mm)
+
+    def _two_sided_xy(self, p, a, b, r_mm):
+        """Walls within r_mm of p on both sides of the direction a -> b."""
+        nx, ny = a[1] - b[1], b[0] - a[0]
+        L = math.hypot(nx, ny)
+        if L < 1e-6:
+            return False
+        nx, ny = nx / L, ny / L
+        r2, lo, hi = r_mm * r_mm, False, False
+        half = self.res / 2.0
+        for ox, oy in self._walls_near(p[0], p[1], r_mm):
+            dx, dy = ox - p[0], oy - p[1]
+            if dx * dx + dy * dy <= r2:
+                s = dx * nx + dy * ny
+                if s < -half:
+                    lo = True
+                elif s > half:
+                    hi = True
+                if lo and hi:
+                    return True
+        return False
+
+    def recentre(self, pts, unknown_ok, min_mm=10.0):
+        """Squeeze maps (#108): a route planned earlier, its waypoints in a gap (walls close on both sides) moved
+        onto the gap's centre line as this (newer) map has it - the robot sees a doorway's jambs better as it
+        comes closer. The first point (the robot) and the last (the goal) stay. None if nothing moved min_mm."""
+        out = list(pts)
+        moved = False
+        for j in range(1, len(out) - 1):
+            p, a, b = out[j], out[j - 1], out[j + 1]
+            if not self._two_sided_xy(p, a, b, self.hard_mm + GAP_SIDE_MM):
+                continue
+            L = math.hypot(b[0] - a[0], b[1] - a[1])
+            if L < 1e-6:
+                continue
+            q = self._centre_xy(p, ((b[0] - a[0]) / L, (b[1] - a[1]) / L), unknown_ok)
+            if q is None or math.hypot(q[0] - p[0], q[1] - p[1]) < min_mm or not self._legs_clear(out, j, q, unknown_ok):
+                continue
+            out[j] = q
+            moved = True
+        return out if moved else None
+
+    def _legs_clear(self, pts, j, q, unknown_ok):
+        """Would the route stay clear with waypoint j moved to q?"""
+        c = self.cell(*q)
+        if c is None:
+            return False
+        if j > 0:
+            p = self._beside(pts, j, -1)
+            a = self.cell(*p)
+            if a is None or not self.clear_line(a, c, unknown_ok, allow_start_zone=(p is pts[0])):
+                return False
+        if j + 1 < len(pts):
+            b = self.cell(*self._beside(pts, j, 1))
+            if b is None or not self.clear_line(c, b, unknown_ok):
+                return False
+        return True
+
     def path_clear(self, pts, unknown_ok=True):
         """Is a world polyline still free of obstacles (inflated)? The first point (the robot) may be
         in the inflated zone."""
@@ -532,6 +858,8 @@ class Planner:
         self.squeeze_left = SQUEEZE_TRIES   # explore: squeeze goals left before "done" (see SQUEEZE_TRIES)
         self.sq_free = None           # free cells in the squeeze map at the last squeeze plan
         self._sq_free_now = None      # (set by the worker with each squeeze explore plan)
+        self._sq_clear_now = None     # (set by the worker: a squeeze route's clearance in mm, #108)
+        self._sq_cm = None
         self.mode = "idle"            # idle | goto | explore
         self.goals = []               # goto: user goals (map frame)
         self.path = []                # current route, map frame (first point = robot when planned)
@@ -589,10 +917,10 @@ class Planner:
             # map is not range-weighted (see SURE_LUT)
             s["margin_mm"] = min(s["margin_mm"], s["squeeze_mm"])
             rw = self.b.mapper.settings.get("range_weight", False)
-            cm = CostMap(g, s, res_mm=g.res, sure_walls=not rw, specks=True, zones=zones)
+            cm = CostMap(g, s, res_mm=g.res, sure_walls=not rw, specks=True, zones=zones, grow_mm=END_GROW_MM)
             cm.centre = True
             return cm
-        return CostMap(g, s, zones=zones)
+        return CostMap(g, s, zones=zones, grow_mm=END_GROW_MM)
 
     def zone_view(self):
         """The map's zones (#70) as the planner sees them (Solve: that maze's exit closed), or None."""
@@ -890,10 +1218,12 @@ class Planner:
         if kind == "path":
             _, path, status, cmk = res
             squeeze = cmk == "squeeze"
+            clear = self._sq_clear_now if squeeze else None
             if squeeze and not self.squeeze:
-                # no speed field in MSG_GOTO: the robot's side check (nav.side_min_mm) slows it in the gap
-                self.b.say("planner: narrow gap - squeezing through with %d mm clearance (the robot slows "
-                           "down beside the walls)" % self.settings["squeeze_mm"])
+                # no speed field in MSG_GOTO: the robot's side check (nav.side_min_mm) slows it in the gap.
+                # The clearance is the route's own (#108), not the squeeze_mm setting it was planned with
+                self.b.say("planner: narrow gap - squeezing through with %s clearance (the robot slows "
+                           "down beside the walls)" % ("~%d mm" % clear if clear is not None else "little"))
             self.squeeze = squeeze
             if self.mode == "explore" and squeeze:
                 now_free = self._sq_free_now
@@ -915,12 +1245,17 @@ class Planner:
             self.sent_goal = self.goal
             self._send(path[1:] or path[-1:], go)
             if squeeze:
-                status += " (squeezing through a narrow gap)"
+                status += " (squeezing through a narrow gap%s)" % (", ~%d mm clearance" % clear if clear is not None
+                                                                   else "")
             elif cmk == "boost":
                 status += " (+%d mm margin after a stuck)" % self.boost
             self._set_status(status, log=False)
         elif kind == "ok":
             pass
+        elif kind == "recentre":      # the same route, its gap waypoints moved onto the centre line (#108)
+            self.path = res[1]
+            self._send(self.path[1:], False)
+            self._push()
         elif kind == "wait":
             self.path = []
             self._set_status(res[1], log=False)
@@ -1018,6 +1353,7 @@ class Planner:
                 route += leg[1:]
             if route:
                 n = len(route) - 1
+                self._sq_clear_now = self._route_clear(cm, route) if kind == "squeeze" else None
                 return ("path", route, "route: %d waypoint%s" % (n, "" if n == 1 else "s"), kind)
         return ("fail", "no route to %.1f, %.1f m" % (fail[0] / 1000, fail[1] / 1000))
 
@@ -1040,6 +1376,7 @@ class Planner:
             if fr:
                 if kind == "squeeze":
                     self._sq_free_now = cm.state.count(1)
+                    self._sq_cm = cm
                 break
         if not fr and held:
             fr, kind = held
@@ -1053,7 +1390,20 @@ class Planner:
             return ("blacklist", goal)
         self.goal = goal
         path[0] = pose[:2]
+        self._sq_clear_now = self._route_clear(self._sq_cm, path) if kind == "squeeze" else None
         return ("path", path, "exploring: frontier %.1f m away (%d left)" % (dist / 1000, len(fr)), kind)
+
+    @staticmethod
+    def _route_clear(cm, route):
+        """A squeeze route's clearance (mm, beyond the robot radius) as the map has the walls (#108). Not counted:
+        the first 100 mm from the robot (it may start beside a wall: that is where it is, not where it squeezes)."""
+        if len(route) < 2:
+            return None
+        (ax, ay), (bx, by) = route[0], route[1]
+        L = math.hypot(bx - ax, by - ay)
+        f = min(0.5, 100.0 / L) if L > 0 else 0.0
+        pts = [(ax + (bx - ax) * f, ay + (by - ay) * f)] + list(route[1:])
+        return max(0.0, cm.wall_clearance(pts) - cm.radius_mm)
 
     def _check(self, pose):
         """Periodic: is the remaining route still clear? explore: is the goal still a frontier?"""
@@ -1068,6 +1418,12 @@ class Planner:
                 return self._plan_explore(pose)
         if rest and not cm.path_clear([pose[:2]] + rest, unknown_ok=self.mode == "goto"):
             return self._plan_goto(pose) if self.mode == "goto" else self._plan_explore(pose)
+        if rest and self.squeeze:
+            # #108: the gap's jambs show up better as the robot comes closer: keep the route on its centre line
+            new = cm.recentre([pose[:2]] + rest, self.mode == "goto")
+            if new:
+                self._sq_clear_now = self._route_clear(cm, new)
+                return ("recentre", new)
         return ("ok",)
 
     def _remaining(self):
