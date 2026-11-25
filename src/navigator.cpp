@@ -351,12 +351,11 @@ void Navigator::startStuck(const NavIn& in, bool turning) {
   else
     log("nav: stuck, no progress %s for %.1f s (waypoint %u/%u)", turning ? "turning" : "driving",
         (double)(P(P_NAV_STUCK_MS) / 1000.0f), (unsigned)idx_ + 1, (unsigned)n_);
-  if (!turning && !stuck_lidar_) {
-    // #111: driving, the wheels not getting anywhere (the odometry: they are not spinning) - pushing against something
-    // (the slow pushes the stall rule leaves to this check, below 60 mm/s): mark it too, and stand up
-    reportContact(in, LINK_CONTACT_STUCK, 0, false, 1.0f, P(P_NAV_STUCK_MS));
-    unwind_ = true;
-  }
+  // #111: driving, the wheels not getting anywhere: stand up (contactReset) before backing off, or a robot leaning on
+  // what stopped it can't back away. No contact report: a balancing robot crawling at 40 mm/s - a squeeze through a
+  // doorway, a slow zone - can stand in its motor dead band this long with nothing in front of it, and a mark there
+  // shuts the doorway. Again and again at one spot: the planner's same-spot rule marks it
+  if (!turning && !stuck_lidar_) unwind_ = true;
   stuck_lidar_ = false;
   back_mm_ = P(P_NAV_STUCK_BACK);
   backing_ = back_mm_ > 0;

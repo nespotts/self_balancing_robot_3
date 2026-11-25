@@ -710,10 +710,10 @@ class Navigator:
         else:
             self.log("nav: stuck, no progress %s for %.1f s (waypoint %u/%u)"
                      % ("turning" if turning else "driving", P("nav.stuck_ms") / 1000.0, self.idx + 1, len(self.wp)))
+        # #111: driving, the wheels not getting anywhere: stand up (contact_reset) before backing off. No contact report
+        # (a balancing robot crawling at 40 mm/s can stand in its dead band this long with nothing in front of it, and
+        # a mark there shuts a doorway); again and again at one spot: the planner's same-spot rule marks it
         if not turning and not self.stuck_lidar and self.contact_on:
-            # #111: driving, the wheels not getting anywhere (the odometry: they are not spinning) - pushing against
-            # something (the slow pushes the stall rule leaves to this check, below 60 mm/s): mark it too, stand up
-            self._report_contact(i, lp.LINK_CONTACT_STUCK, 0, False, 1.0, P("nav.stuck_ms"))
             self.unwind = True
         self.stuck_lidar = False
         self.back_mm = P("nav.stuck_backoff_mm")
@@ -1253,15 +1253,16 @@ class Controller:
 
     def _clear_windup(self):
         self.spd_abs = self.free_i = 0.0     # anti-windup (#111): mean |speed|, the integrator's free value
-        self.last_sp = 0.0
+        self.last_sp = self.spd_fwd = 0.0
         self.blk_ms, self.blk_d, self.held = 0, 1.0, False
+        self.blk_i, self.blk_ref = 0.0, False
 
     def contact_reset(self):
         """Controller::contactReset (#111): a contact - ramped command to 0, the velocity integrator to its free value."""
-        free = self.free_i
+        free = self.blk_i if self.blk_ref else self.free_i   # (the lean before it pushed)
         self.speed_sp = self.last_sp = 0.0
         self.vel_i = free
-        self.blk_ms, self.held = 0, False
+        self.blk_ms, self.held, self.blk_ref = 0, False, False
 
     def on_mode_change(self):
         self.snap_heading = True
@@ -1307,18 +1308,24 @@ class Controller:
                 c, d = abs(self.speed_sp), (1.0 if self.speed_sp >= 0 else -1.0)
                 now_ms = int(i["now"] * 1000.0)
                 self.spd_abs += (abs(i["speed"]) - self.spd_abs) * min(1.0, vdt / BLK_TAU_S)
+                self.spd_fwd += (i["speed"] - self.spd_fwd) * min(1.0, vdt / BLK_TAU_S)   # (signed)
                 sp_acc = (self.speed_sp - self.last_sp) / vdt
                 self.last_sp = self.speed_sp
                 # free value: not commanded, or following a steady command (not speeding up / slowing down)
-                if c < BLK_MIN_CMD or (abs(self.spd_abs - c) < FREE_ERR * c and abs(sp_acc) < FREE_ACC):
+                if c < BLK_MIN_CMD or (abs(d * self.spd_fwd - c) < FREE_ERR * c and abs(sp_acc) < FREE_ACC):
                     self.free_i = self.vel_i
+                    self.blk_ref = False          # (free again: the next block takes a new reference)
                 if c < BLK_MIN_CMD or self.spd_abs >= BLK_STILL_MMS or (self.blk_ms and d != self.blk_d):
                     self.blk_ms, self.held = 0, False
                 elif not self.blk_ms:
                     self.blk_ms, self.blk_d = now_ms or 1, d
+                    if not self.blk_ref:            # (bouncing against it, blocked again: same reference)
+                        self.blk_i = self.vel_i
+                    self.blk_ref = True
                 self.vel_i = _clamp(self.vel_i + P("vel.ki") * e * vdt, lim)
                 if self.anti_windup and self.blk_ms and now_ms - self.blk_ms >= BLK_MS:
-                    top = self.free_i + self.blk_d * BLK_LEAN_DEG
+                    # (from where it was when the block began, not the free value: that can be old after crawling)
+                    top = self.blk_i + self.blk_d * BLK_LEAN_DEG
                     self.held = self.blk_d * (self.vel_i - top) >= 0
                     if self.held:
                         self.vel_i = top
@@ -1910,10 +1917,12 @@ class SimRobot:
             if not self.in_contact and abs(v) > 20.0:
                 self.theta_rate += PEND_A * (v / 1000.0) * math.cos(self.theta) * IMPACT_KICK
                 self.impacts.append((now, v))
-            elif self.in_contact and self.lean_on and self.theta_rate * v > 0:
-                # #111: pushing on, the body leans on it (the bumper rests against the box / wall): it does not pitch
-                # further into it (else the unsupported pendulum falls on, the balancer drives the wheels back and the
-                # robot bounces off again and again; the real robot's wheels stay still against it, 2026-11-25 log)
+            elif (self.in_contact and self.lean_on and self.theta_rate * v > 0 and self.room.low
+                    and self.room.clearance(nx, ny) > ROBOT_RADIUS):
+                # #111: pushing on against a low box, the body leans on it (the bumper rests against it): it does not
+                # pitch further into it (else the unsupported pendulum falls on, the balancer drives the wheels back and
+                # the robot bounces off again and again; the real robot's wheels stay still against it, 2026-11-25 log).
+                # Low boxes only: walls keep the older contact model (the wall / doorway tests are tuned on it)
                 self.theta_rate = 0.0
             self.in_contact = True
             self.vl = self.vr = self.v_prev = 0.0

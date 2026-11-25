@@ -230,27 +230,29 @@ class TestSlowAndBackoff(unittest.TestCase):
                 def go(b, r=r, at=at):
                     # once it stands: a low box, its face 0.45 m ahead (a short approach: the sim's balancer at
                     # 40 mm/s can stand in its motor dead band in free space for seconds too)
-                    at["face"] = face = r.X + 90.0 + 450.0
+                    at["face"], at["y"] = face, _ = r.X + 90.0 + 450.0, r.Y
                     r.room.add_low(face + 100.0, r.Y, 200.0, 300.0)
                     return b.planner.command({"t": "plan", "action": "goto", "points": [[r.X + 1800.0, r.Y]],
                                               "go": True}, "test")
-                secs, b = tour.plan_offline(r, m, go, max_s=40.0,
+                secs, b = tour.plan_offline(r, m, go, max_s=90.0,
                                             on_step=lambda rr, bb: fell.append(rr.t) if not rr.ctl.upright else None)
                 face = at["face"]
                 self.assertTrue(r.impacts, speed)
-                self.assertTrue(r.contacts and b.contacts, (speed, b.robot_logs[-6:]))
-                c = r.contacts[0]
-                self.assertEqual(c["kind"], lp.LINK_CONTACT_STUCK, speed)
-                self.assertAlmostEqual(c["x_mm"], face - 90.0 + 50.0, delta=40.0)           # at the box
-                dt = r.contact_times[0] - r.impacts[0][0]
-                # (the sim's robot bounces off it for ~1.4 s first; 60, 80: the stall rule's 0.8 s or the nav stuck check,
-                # whichever comes first; 40: the stuck check)
-                self.assertLess(dt, 3.0, speed)
-                self.assertTrue(m.zones.bumps(), speed)                 # marked ...
-                self.assertEqual(fell, [], speed)                       # ... never fell over
-                print("\n  slow push %3.0f mm/s: contact %.2f s after the first touch (%s), %d mark(s), %s" % (
-                    speed, dt, "stuck check" if c["value"] >= r.P("nav.stuck_ms") else "stall", len(m.zones.bumps()),
-                    b.planner.status))
+                # marked at the box: 80 by the stall rule (a contact ~0.9 s after the first touch); 40, 60 by the planner's
+                # same-spot rule after 3 stops there (the 2.5 s stuck check reports no contact: crawling that slowly the
+                # sim's balancer can stand in its dead band with nothing in front of it)
+                at_box = [z for z in m.zones.bumps() if abs(z["x"] - face) < 50.0 and abs(z["y"] - at["y"]) < 60.0]
+                self.assertTrue(at_box, (speed, m.zones.bumps(), b.robot_logs[-6:]))
+                if speed >= cm.STALL_DRIVE_MIN_CMD + 20.0:
+                    c = r.contacts[0]
+                    self.assertEqual(c["kind"], lp.LINK_CONTACT_STUCK, speed)
+                    self.assertAlmostEqual(c["x_mm"], face - 90.0 + 50.0, delta=40.0)       # at the box
+                    self.assertLess(r.contact_times[0] - r.impacts[0][0], 2.0, speed)
+                else:
+                    self.assertTrue(any("same spot" in l for l in b.lines), (speed, b.lines[-5:]))
+                self.assertEqual(fell, [], speed)                       # never fell over
+                print("\n  slow push %3.0f mm/s: marked at the box (%s), %d mark(s), %s" % (
+                    speed, "stall contact" if speed >= 80 else "same-spot rule", len(m.zones.bumps()), b.planner.status))
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
 
@@ -306,22 +308,29 @@ class TestAntiWindup(unittest.TestCase):
     """#111: pushing against it the velocity loop's lean is held; driving and balancing never meet the limit."""
 
     def test_lean_held_when_blocked(self):
+        """STATION (the joystick) pushes it into a low box at 120 mm/s for 4 s (contacts are only reported there): with the
+        limit the integrator leans 1 deg past where the wheels stopped and no further."""
         for aw in (True, False):
-            d = Drive(params=dict(LIVE, **{"nav.max_speed": 120.0}))
-            d.r.nav.contact_on = False                   # (no contact reaction: it pushes on, until the 2.5 s stuck check)
-            d.r.ctl.anti_windup = aw
-            d.goto([(2500.0, 0.0)])
-            d.run(30.0, lambda s: s.r.impacts and s.r.t - s.r.impacts[0][0] > 2.0)
+            d = Drive(params=LIVE)
             r = d.r
-            lean = r.ctl.vel_i - r.ctl.free_i
+            r.ctl.anti_windup = aw
+            r.set_mode(lp.MODE_STATION)
+            t_hit = None
+            while r.t < 40.0 and (t_hit is None or r.t < t_hit + 4.0):
+                r.on_frame(lp.MSG_CMD_VEL, lp.encode_cmd_vel(120.0, 0.0)[4:-2])
+                d.run(0.05)
+                if r.impacts and t_hit is None:
+                    t_hit = r.impacts[0][0]
+            lean = r.ctl.vel_i - r.ctl.blk_i                 # past the lean when the wheels stopped
             self.assertTrue(r.ctl.upright)
             if aw:
                 self.assertLessEqual(lean, ctl_mod.BLK_LEAN_DEG + 0.02)
                 self.assertTrue(r.ctl.held)
                 held = lean
             else:
-                self.assertGreater(lean, held + 0.4)    # without it the lean keeps growing
-                print("\nanti-windup, 2 s against a box at 120 mm/s: integrator +%.2f deg (without: +%.2f)" % (held, lean))
+                self.assertGreater(lean, held + 1.0)    # without it the lean keeps growing
+                print("\nanti-windup, 4 s pushed into a box at 120 mm/s: integrator +%.2f deg past where the wheels "
+                      "stopped (without: +%.2f)" % (held, lean))
 
     def test_normal_driving_unchanged(self):
         """The same tour / balancing with the anti-windup off: bit-identical runs (it never engaged), same metrics."""
