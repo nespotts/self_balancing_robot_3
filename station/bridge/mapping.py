@@ -31,11 +31,12 @@ import threading
 import time
 import zlib
 
-from .occgrid import MAX_CELLS, Grid
+from .occgrid import MAX_CELLS, UNIT, UNKNOWN, Grid
 from .places import HOME, Places
 from .zones import Zones
 from . import lidarmatch, loopprof, scanmatch
 
+WALL_BYTE = UNKNOWN + math.log(0.62 / 0.38) / UNIT   # #111: a mapped wall for contacts (the planner's OCC_BYTE)
 SENSOR_FWD_MM = 26.0
 SENSOR_RADIUS_MM = 12.9
 SEND_EVERY_S = 0.5
@@ -659,11 +660,29 @@ class Mapper:
 
     def add_contact(self, d):
         """MSG_CONTACT (#104, link_protocol.decode_contact): the robot touched something below the lidar's scan plane.
-        -> the bump mark (zones item, map frame) and whether an old one took it (merged); saved with the map."""
+        -> the bump mark (zones item, map frame) and whether an old one took it (merged); saved with the map.
+        (None, False) when the map has a wall where the mark would go (#111): it touched something the lidar sees (a
+        doorway's jamb while squeezing through): no mark - the planner keeps off mapped walls already, and a mark
+        there would shut the doorway."""
         x, y, h = self.map_pose(d["x_mm"], d["y_mm"], d["heading_deg"])
+        if self.wall_at_contact(x, y, h):
+            return None, False
         zid, merged = self.zones.add_bump(x, y, h, what=d.get("name", "bump"))
         self.zones_changed()
         return self.zones.find(zid), merged
+
+    def wall_at_contact(self, x, y, h):
+        """#111: an occupied map cell inside where a bump mark for a contact at (x, y) (map frame), heading h would go."""
+        from .zones import BUMP_AHEAD_MM, BUMP_R_MM
+        g = self.grid
+        cx, cy = x + BUMP_AHEAD_MM * math.cos(math.radians(h)), y + BUMP_AHEAD_MM * math.sin(math.radians(h))
+        n = int(BUMP_R_MM // g.res)
+        for i in range(-n, n + 1):
+            for j in range(-n, n + 1):
+                if (i * i + j * j) * g.res * g.res <= BUMP_R_MM * BUMP_R_MM and \
+                        g.value(cx + i * g.res, cy + j * g.res) > WALL_BYTE:
+                    return True
+        return False
 
     def zones_command(self, m, who="?", robot_xy=None):
         """{"t": "zones", "action": ...}, points in the odometry frame (like places / goto), stored in the map frame:

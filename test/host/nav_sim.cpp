@@ -995,8 +995,8 @@ static void testContactStuck() {
 
 // #111: slow pushes (the old rules need >= 100 mm/s) and blocked back-offs
 static void testContactSlow() {
-  printf("goto: pushes into it slowly (40 / 60 / 80 mm/s) -> contact stuck (60, 80: stall ~0.8 s; 40: the 2.5 s stuck "
-         "check), back off (#111)\n");
+  printf("goto: pushes into it slowly (40 / 60 / 80 mm/s) -> 60, 80: contact stuck (stall ~0.8 s); 40: the 2.5 s stuck "
+         "check (no contact); back off (#111)\n");
   const float speeds[] = {40, 60, 80};
   for (float sp : speeds) {
     reset();
@@ -1004,22 +1004,26 @@ static void testContactSlow() {
     Bot b;
     contactStart(b, sp);
     uint32_t stall_ms = 0;
-    for (int i = 0; i < 8000 && !g_contacts; i++) {
+    const bool stall = sp >= ContactDetector::kStallDriveMinCmd;
+    for (int i = 0; i < 8000 && !g_contacts && !b.nav.stuck(); i++) {
       runC(b, 0.005f);
       if (b.stalled && !stall_ms) stall_ms = b.ms;
     }
     printf("  %.0f mm/s: stalled %.3f s, detected %.3f s (+%u ms), %s, contact at %.0f, %.0f, unwinds %d\n", sp,
-           stall_ms / 1000.0, b.ms / 1000.0, (unsigned)(b.ms - stall_ms), b.nav.contact() ? "contact" : "-", g_last.x_mm,
-           g_last.y_mm, b.unwinds);
-    CHECK(g_contacts == 1);
-    CHECK(g_last.kind == LINK_CONTACT_STUCK);
+           stall_ms / 1000.0, b.ms / 1000.0, (unsigned)(b.ms - stall_ms), b.nav.contact() ? "contact" : "stuck check",
+           g_last.x_mm, g_last.y_mm, b.unwinds);
     // driving below 100 mm/s: kStallDriveMs (a free balancing robot can stand in its dead band a while there); below
-    // 60 mm/s the nav stuck check (nav.stuck_ms 2.5 s) reports it
-    if (sp >= ContactDetector::kStallDriveMinCmd)
+    // 60 mm/s only the nav stuck check (nav.stuck_ms 2.5 s): it stands up and backs off, no contact report
+    if (stall) {
+      CHECK(g_contacts == 1);
+      CHECK(g_last.kind == LINK_CONTACT_STUCK);
       CHECK(stall_ms && b.ms - stall_ms >= 600 && b.ms - stall_ms <= 1300);
-    else
+      CHECK(fabsf(g_last.x_mm - 1200) < 25 && fabsf(g_last.heading_deg) < 2);  // the front edge
+    } else {
+      CHECK(g_contacts == 0);
+      CHECK(b.nav.stuck() && b.nav.state() == NAV_BLOCKED);
       CHECK(stall_ms && b.ms - stall_ms >= 1500 && b.ms - stall_ms <= 3000);
-    CHECK(fabsf(g_last.x_mm - 1200) < 25 && fabsf(g_last.heading_deg) < 2);  // the front edge
+    }
     CHECK(b.unwinds == 1);         // the controller stood it up
     CHECK(fabsf(b.vt_ramp) < 10);  // (its command zeroed: the back-off ramps from 0)
     runC(b, 0.6f);

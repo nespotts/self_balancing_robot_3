@@ -211,7 +211,10 @@ class OfflineBridge:
         """MSG_CONTACT (#104), as Bridge.on_contact: a bump mark on the map, the planner replans round it."""
         mark, merged = self.mapper.add_contact(d)
         self.contacts.append((d, mark, merged))
-        self.say("robot: contact %s -> bump mark %s%s" % (d["name"], mark["id"], " (again)" if merged else ""))
+        if mark is None:      # (#111) on a wall the map has: no mark
+            self.say("robot: contact %s on a mapped wall - no bump mark" % d["name"])
+        else:
+            self.say("robot: contact %s -> bump mark %s%s" % (d["name"], mark["id"], " (again)" if merged else ""))
         self.planner.on_contact(mark)
 
     def update(self):

@@ -31,7 +31,7 @@
 //          for a stop), below kStuckMinCmd the window is kStallDriveMs, and below kStallDriveMinCmd it does not count:
 //          a free balancing robot can stand in its motor dead band while the lean
 //          builds (stick-slip: the sim's stands up to ~0.8 s at 60 mm/s, longer at 40-50, where even the 2.5 s nav stuck
-//          check trips in free space). There the nav stuck check (2.5 s) reports the contact (Navigator::startStuck).
+//          check trips in free space). There: the nav stuck check (2.5 s, no mark) and the planner's same-spot rule.
 //          Back-offs and steps (where the 3 missed pushes were) and driving at >= kStuckMinCmd: kStallMs.
 //   A fall right after (upright lost within kFallMs of a bump candidate, or half the stuck / stall time without new
 //   ground) confirms it too (LINK_CONTACT_FELL): a hard bump throws a balancing robot over before the hold time is up.

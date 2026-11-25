@@ -50,8 +50,9 @@
 //   corners' swing circle ahead / behind -> first step straight away from it (<= nav.stuck_backoff_mm).
 // Stuck (#62): driving / turning but < nav.stuck_mm (or 15 deg) of progress for nav.stuck_ms -> BLOCKED,
 //   log "nav: stuck ...", back off nav.stuck_backoff_mm. GOTO then goes on; EXPLORE waits for a new list.
-//   Driving (not the lidar's stuck): also a contact report (MSG_CONTACT stuck, a mark) and contactReset (#111): the
-//   wheels did not turn, so it pushed against something (the slow pushes the stall rule leaves to it).
+//   Driving (not the lidar's): contactReset first (#111: stand up, or it can't back away from what it leans on). No
+//   contact report: crawling at 40 mm/s the robot can stand in its motor dead band this long with nothing in front of
+//   it. Again and again at one spot: the planner's same-spot rule marks it.
 //   Lidar stuck (#79, EVT_LINK_STUCK): spinning wheels count as odometry progress, so the bridge's LD19 matcher
 //   reports "wheels turn, robot still"; the next driving stuck check (within 500 ms, while trying to drive) takes it
 //   the same way. Turning in place needs no help: the heading is the gyro's.

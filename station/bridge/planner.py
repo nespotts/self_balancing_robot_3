@@ -92,14 +92,16 @@ BACK_SPEED_MMS = 80.0     # escape straight back (the edge is ahead): STATION cm
 BACK_MAX_S = 6.0          # ... for at most this long
 BACK_MODE_WAIT_S = 1.0    # the robot did not switch to STATION: the escape point goes as a waypoint instead
 # #111: stopped again and again at one spot (BLOCKED -> back-off -> the same route -> BLOCKED ...): blocks, stucks and
-# contacts within LOOP_R_MM of each other in LOOP_WINDOW_S, weighted (a contact 2, a block / stuck 1), reaching LOOP_COUNT
-# (2 contacts, a contact and a block, or 3 blocks) -> a bump mark where it was blocked, more margin (the stuck boost),
+# contacts within LOOP_R_MM of each other in LOOP_WINDOW_S, LOOP_COUNT of them (a block counts only when close, LOOP_BLOCK_MM)
+# (3 stops of any kind) -> a bump mark where it was blocked, more margin (the stuck boost),
 # explore gives that frontier goal up, and it plans another way
 LOOP_R_MM = 150.0
 LOOP_WINDOW_S = 30.0
-LOOP_WEIGHT = {"block": 1, "stuck": 1, "contact": 2}
+LOOP_WEIGHT = {"block": 1, "stuck": 1, "wall": 1, "contact": 1}   # (wall: a contact on a mapped wall, no mark)
 LOOP_COUNT = 3
 LOOP_AHEAD_MM = 39.0      # a block's obstacle: its distance (from the sensor head, front_) + this from the axle
+LOOP_BLOCK_MM = 160.0     # a block counts only at this distance or closer (the stop distance, live rng.obstacle_mm;
+                          # 2026-11-25 loop: 44-152 mm, a doorway squeeze: 260-300)
 LOOP_REPLAN_S = 1.0
 LOOP_SAME_S = 0.3         # reports this close in time (and 50 mm) are one stop (a stuck that is also a contact)
 BLOCKED_RE = re.compile(r"nav: blocked, obstacle at (\d+) mm")
@@ -1155,7 +1157,11 @@ class Planner:
             return
         m = BLOCKED_RE.match(text)
         if m:
-            self._spot("block", float(m.group(1)) + LOOP_AHEAD_MM)
+            # (only a block at something this close counts: inside / at the lidar's dead zone, where the map can't keep
+            # the route off it. Farther it is mapped, and a robot squeezing through a narrow doorway stops in front of
+            # it a few times while the route is recentred: marking that would shut the doorway)
+            if float(m.group(1)) <= LOOP_BLOCK_MM:
+                self._spot("block", float(m.group(1)) + LOOP_AHEAD_MM)
             return
         if not text.startswith("nav: stuck"):
             return
@@ -1168,12 +1174,17 @@ class Planner:
     def on_contact(self, mark):
         """The robot touched something the lidar can't see (#104): the bridge put a bump mark there (a wall for the
         costmap). The robot backs off and waits (GOTO: 4 s, EXPLORE: for a new list): replan round the mark
-        once it has backed off (no extra margin - the mark is the obstacle)."""
+        once it has backed off (no extra margin - the mark is the obstacle). mark None (#111): it touched a wall the
+        map has (no mark): replan, and it counts as a block for the same-spot rule."""
         if self.mode == "idle":
             return
         self.squeeze = False
         self.replan_at = self.clock() + CONTACT_REPLAN_S
         self.last_check = self.clock()
+        if mark is None:
+            self._set_status("robot touched a wall the map has, replanning")
+            self._spot("wall", None)
+            return
         self._set_status("robot touched something the lidar can't see: bump mark %s, replanning" % mark["id"])
         self._spot("contact", None)
 

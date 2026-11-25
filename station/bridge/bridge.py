@@ -504,7 +504,10 @@ class Bridge:
         """MSG_CONTACT (#104): mark the spot on the map (zones kind "bump", saved with it) and let the planner replan
         round it once the robot has backed off."""
         mark, merged = self.mapper.add_contact(d)
-        if mark is None:
+        if mark is None:      # (#111) on a wall the map has: no mark, the planner replans anyway
+            self.say("robot: %s a wall the map has - no bump mark" % (
+                "bumped into" if d["kind"] == lp.LINK_CONTACT_BUMP else "pushing against"))
+            self.planner.on_contact(None)
             return
         self.say("robot: %s at %.2f, %.2f m - %s" % (
             "bumped into something" if d["kind"] == lp.LINK_CONTACT_BUMP else "pushing against something",

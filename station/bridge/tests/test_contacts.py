@@ -221,6 +221,10 @@ class TestLoop(unittest.TestCase):
         self.later(0.8)
         self.at(-205.0, 256.0, -130.0)                                     # the back-off was blocked: a rear contact
         b._on_frame(lp.MSG_CONTACT, lp.encode_contact(contact(lp.LINK_CONTACT_STUCK, -170.0, 294.0, 50.0))[4:-2])
+        self.assertEqual(p.loop_marks, 0)                                  # 2 stops: not yet
+        self.later(2.0)
+        self.at(-198.0, 252.0, -130.0)                                     # the new list: the same route, blocked again
+        p.on_log("nav: blocked, obstacle at 56 mm (waypoint 1/5)")
         marks = b.mapper.zones.bumps()
         self.assertEqual(len(marks), 2)                                    # the contact's own + the loop mark ahead
         ahead = min(marks, key=lambda m: math.hypot(m["x"] - (-200.0 + 109.0 * math.cos(math.radians(-130.0))),
@@ -253,6 +257,31 @@ class TestLoop(unittest.TestCase):
         self.assertEqual(p.loop_marks, 1)
         p.on_log("nav: stuck, no progress driving for 2.5 s (waypoint 1/5)")   # 2 blocks + a stuck: 3
         self.assertEqual(p.loop_marks, 2)
+
+    def test_doorway_squeeze_blocks_do_not_count(self):
+        """Squeezing through a narrow doorway it stops in front of it a few times while the route is recentred (the
+        jambs 260-300 mm ahead, mapped): no mark, no blacklist - that would shut the doorway."""
+        p, b = self.p, self.b
+        for d in (300, 261, 262, 290, 278):
+            p.on_log("nav: blocked, obstacle at %d mm (waypoint 1/5)" % d)
+            self.later()
+        self.assertEqual((p.loop_marks, p.blacklist, b.mapper.zones.bumps()), (0, [], []))
+
+    def test_contact_on_a_mapped_wall_no_mark(self):
+        """A contact where the map has a wall (a doorway's jamb): no bump mark, the planner replans; it counts as a stop."""
+        b, p = self.b, self.p
+        g = b.mapper.grid
+        for k in range(-4, 5):                                             # a mapped wall at x 1000
+            for _ in range(20):
+                g.cells[g.index(1000.0, 500.0 + 25.0 * k)] = 250
+        self.at(910.0, 500.0, 0.0)
+        b._on_frame(lp.MSG_CONTACT, lp.encode_contact(contact(lp.LINK_CONTACT_BUMP, 960.0, 500.0, 0.0))[4:-2])
+        self.assertEqual(b.mapper.zones.bumps(), [])
+        self.assertIsNotNone(p.replan_at)
+        self.assertIn("wall the map has", p.status)
+        self.assertEqual(len(p.spots), 1)
+        b._on_frame(lp.MSG_CONTACT, lp.encode_contact(contact(lp.LINK_CONTACT_BUMP, 960.0, -500.0, 0.0))[4:-2])
+        self.assertEqual(len(b.mapper.zones.bumps()), 1)                   # (no wall there: marked)
 
     def test_one_stuck_contact_is_one_stop(self):
         p = self.p

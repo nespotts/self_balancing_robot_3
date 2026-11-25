@@ -6,12 +6,15 @@
 //   0 = d(pitch)/dt from consecutive samples (v3), 1 = gyro pitch rate.
 // Velocity-loop anti-windup (#111): pushing against something the wheels can't pass, the integrator would lean the
 // robot harder and harder until it falls. Blocked = |ramped command| >= kBlkMinCmd and the mean |speed| (~0.2 s)
-// below kBlkStillMms; after kBlkMs of that the integrator leans at most kBlkLeanDeg further toward the command than its
-// last free value (the P term still pushes: vel.kp x command), CtlOut.held = at that limit. Free value = the integrator
-// while the robot follows a steady command (mean |speed| within kFreeErr of it, the ramped command not changing) or is
-// not commanded to move: the robot's own balance trim (the real one sat at -2..-4 deg), not a lean to speed up. contactReset() (the navigator found a contact): the ramped command to
-// 0 and the integrator back to its free value, so the robot stands up instead of leaning on the obstacle (and does not
-// rock back into it when it backs off). Normal driving and balancing never meet the limit (same sim runs, #111).
+// below kBlkStillMms; after kBlkMs of that the integrator leans at most kBlkLeanDeg further toward the command than when
+// the block began (it stops the build-up, never pulls the lean back; a robot standing in its motor dead band still gets
+// that much to break free). The P term still pushes (vel.kp x command). CtlOut.held = at that limit. Free value = the
+// integrator while the robot follows a steady command (mean |speed| within kFreeErr of it, the ramped command not
+// changing) or is not commanded to move: the robot's own balance trim (the real one sat at -2..-4 deg), not a lean to
+// speed up. contactReset() (the navigator found a contact / a stuck): the ramped command to 0 and the integrator back to
+// the lean before it pushed (where the wheels stopped, else the free value), so the robot stands up instead of
+// leaning on the obstacle (and does not rock back into it when it backs off).
+// Normal driving and balancing never meet the limit (same sim runs, #111).
 // Pure logic (no Arduino calls) so it can be unit-tested on a host.
 #pragma once
 #include <stdint.h>
@@ -75,10 +78,13 @@ class Controller {
   bool snap_heading_ = true;
   // anti-windup (#111)
   float spd_abs_ = 0;     // mean |speed| (kBlkTauS)
+  float spd_fwd_ = 0;     // mean speed (signed, kBlkTauS)
   float free_i_ = 0;      // the integrator while following a steady command / not commanded
   float last_sp_ = 0;     // speed_sp_ at the last velocity-loop step
   uint32_t blk_ms_ = 0;   // blocked since (0 = not)
   float blk_d_ = 1;       // ... the command's direction
+  float blk_i_ = 0;       // ... the integrator then (kept over blocks until it is free again: blk_ref_)
+  bool blk_ref_ = false;
   bool held_ = false;
   CtlOut out_;
 };

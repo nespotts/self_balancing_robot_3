@@ -125,13 +125,13 @@ them by touch, backs off, and the bridge marks the spot so the planner goes roun
 | BUMP | command ≥ 100 mm/s and steady; speed was ≥ 0.6 × command in the last 120 ms and fell by ≥ max(70 mm/s, 40 %) to < 0.6 × command, with a pitch rate ≥ 80 °/s toward the motion (normal balancing ~20 °/s RMS, peaks ~65; hard bumps 100–126) → it must stay < 0.5 × command for 80 ms (stopped or bounced back; rolling over a door strip cancels it). A fall within 0.6 s confirms it too (`fell`) |
 | STUCK | command ≥ 100 mm/s and **cruising** (not slowing for a stop: the last point or a sharp corner it turns in place at, and not ramping up from one: the #103 speed rise limit after a start / turn in place / BLOCKED, ~1.4 s to 250 mm/s, while the body still rocks; slowing for a pass-through corner and speeding up after it are cruising, those caps are 88–228 mm/s), it got going (≥ 50 mm/s, 0.5 s after the command came: a start rolls back first), then no new ground (10 mm) for 0.4 s while the velocity-loop lean pushes on (≥ 0.6°). Rocking against it counts. A lidar stuck (`EVT_LINK_STUCK`) waiting confirms it at 0.2 s (`lidar`) |
 | STALL (#111) | slow and reverse pushes, reported as `stuck`: command ≥ 30 mm/s either way for 0.3 s, not ramping up (the speed rise limit), then **0.4 s** with the wheels still (travel within −15…+10 mm, mean speed ≤ 15 mm/s now, ≤ 30 over the window) while the velocity-loop lean **grows** toward the command (≥ 0.08°, or held at the anti-windup limit). A build-up, not the absolute lean: the integrator also holds the robot's balance trim (−2…−4° on the real robot). Driving forward: only while cruising, from 60 mm/s, with a 0.8 s window below 100 (the sim's balancer stands in its motor dead band that long at 60, longer at 40–50) |
-| Stuck check | `nav: stuck, no progress driving for 2.5 s` (odometry) now also reports a contact (mark): the slow pushes below 60 mm/s |
-| Latency | real log replay: the 3 pushes v8 missed (back-offs at −40 / −80) at 0.4–0.6 s of stillness. Sim: bump at 200–250 mm/s ~0.1 s; stuck at 100–150 ~0.4 s; a rear box while backing off ~0.5 s; slow pushes at 60–80 0.9–2.4 s (it bounces off first), 40: the 2.5 s check |
-| Reaction | BLOCKED, the controller's **contactReset** (command 0, velocity integrator back to its free value: it stands up instead of leaning on it), back off `nav.stuck_backoff_mm` (rear corridor checked), then **hold** that spot. Found while backing off / stepping away (that way is blocked too): **no back-off, hold** (a rear contact, `rear`, `holding`). GOTO waits 4 s for a new list (the planner's route round the mark) and then tries again; EXPLORE waits for a new list |
+| Stuck check | `nav: stuck, no progress driving for 2.5 s` (odometry): it stands up (contactReset) and backs off; **no contact report** (crawling at 40–50 mm/s a balancing robot can stand in its motor dead band that long with nothing in front of it, e.g. squeezing through a doorway). Slow pushes below 60 mm/s: marked by the same-spot rule after 3 stops |
+| Latency | real log replay: the 3 pushes v8 missed (back-offs at −40 / −80) at 0.4–0.6 s of stillness. Sim: bump at 200–250 mm/s ~0.1 s; stuck at 100–150 ~0.4 s; a rear box while backing off ~0.5 s; slow pushes at 80: ~0.9 s (it bounces off first); 40–60: the 2.5 s stuck check, marked after 3 stops there |
+| Reaction | BLOCKED, the controller's **contactReset** (command 0, velocity integrator back to the lean before it pushed: it stands up instead of leaning on it), back off `nav.stuck_backoff_mm` (rear corridor checked), then **hold** that spot. Found while backing off / stepping away (that way is blocked too): **no back-off, hold** (a rear contact, `rear`, `holding`). GOTO waits 4 s for a new list (the planner's route round the mark) and then tries again; EXPLORE waits for a new list |
 | Report | `MSG_CONTACT` (link v8): kind, contact point (pose frame, on the body's edge in the direction of travel, 50 mm from the axle: behind it when reversing), heading of travel (+180 reversing), peak dps / stalled ms, flags `lidar` / `fell` / `reported only` |
 | Log | `nav: contact bump at 1154,-23 (145 dps, backing off)`, `nav: contact stuck at 1160,-23 (400 ms, backing off)`, `nav: contact stuck at 591,-27 (401 ms, rear, holding)`, `nav: contact stuck at … (… reported only)` |
-| Bridge | a **bump mark**: disc r 70 mm, 35 mm past the contact point, zones kind `bump` (saved in `<map>.zones.json`). Planner: a wall (inflated by radius + margin). Not the watchdog (the robot is standing at it). A contact within 100 mm of a mark moves it (hits + 1). Map ⋯ → **Clear bump marks**; Draw → delete tool removes one; API `{"t": "zones", "action": "clear", "kind": "bump"}` ([api.md](api.md#zones)) |
-| Same spot again (#111) | the planner counts stops: `nav: blocked` and `nav: stuck` 1, a contact 2. **3 within 150 mm in 30 s** (2 contacts, a contact + a block, 3 blocks) → a bump mark where it was blocked, the stuck boost (+100 mm margin), explore gives that frontier up, and it plans another way. Status: `stopped 3 times at the same spot (…): planning another way` |
+| Bridge | a **bump mark**: disc r 70 mm, 35 mm past the contact point, zones kind `bump` (saved in `<map>.zones.json`). Planner: a wall (inflated by radius + margin). Not the watchdog (the robot is standing at it). A contact within 100 mm of a mark moves it (hits + 1). **No mark when the map has a wall there** (#111: a doorway jamb it touched while squeezing through; a mark would shut the doorway): the planner replans anyway. Map ⋯ → **Clear bump marks**; Draw → delete tool removes one; API `{"t": "zones", "action": "clear", "kind": "bump"}` ([api.md](api.md#zones)) |
+| Same spot again (#111) | the planner counts stops: a contact, `nav: stuck`, and `nav: blocked` **at ≤ 160 mm** (inside / at the lidar's dead zone; farther it is mapped, and squeezing through a doorway it stops 260–300 mm in front of it while the route is recentred). **3 within 150 mm in 30 s** → a bump mark where it was blocked, the stuck boost (+100 mm margin), explore gives that frontier up, and it plans another way. Status: `stopped 3 times at the same spot (…): planning another way` |
 | Thresholds | compile-time (`ContactDetector::k*`, `Controller::kBlk*`, planner `LOOP_*`), no params |
 
 ### Anti-windup (#111, `src/controller.*`)
@@ -139,16 +139,21 @@ them by touch, backs off, and the bridge marks the spot so the planner goes roun
 ```
   lean ▲            without: the integrator leans harder and harder ... until it falls
        │         ╱
-       │       ╱  ┌──────────── with: at most +1° past its free value (P still pushes)
+       │       ╱  ┌──────────── with: at most +1° past where the wheels stopped (P still pushes)
        │     ╱ ───┘
-       │ ──╱  ↑ wheels still 0.3 s (|cmd| ≥ 30, mean |speed| < 15)       contact → back to the free value
+       │ ──╱  ↑ wheels still 0.3 s (|cmd| ≥ 30, mean |speed| < 15)       contact / stuck → back to the lean before it pushed
        └────────────────────────────────────────────────────────────► t
 ```
 
 Blocked = commanded (≥ 30 mm/s) but the wheels not turning (mean |speed| < 15 mm/s over ~0.2 s) for 0.3 s: the velocity
-integrator leans at most 1° further toward the command than its **free value** (the integrator while following a steady
-command or standing: the robot's trim). `CtlOut.held` tells the stall rule. Normal driving and balancing never meet it:
-the sim's tour with it on and off is bit-identical (`TestAntiWindup`). Sim, 2 s against a box at 120 mm/s: +1.00° (without: +1.90°).
+integrator leans at most 1° further toward the command than **when the wheels stopped** (kept while it bounces against
+it, until it follows a command again; never pulled back: a robot standing in its motor dead band still gets that much to
+break free). `CtlOut.held` tells the stall rule. Normal driving and balancing never meet it: the sim's tour with it on
+and off is bit-identical (`TestAntiWindup`). Sim, pushed 4 s into a box at 120 mm/s (STATION): +1.00° past where the
+wheels stopped (without: +2.56°).
+
+Sim (#111 fix): pushing on against a **low box**, the body leans on it (does not pitch further into it); walls keep the
+older contact model.
 
 ### Real-log replay
 
@@ -171,7 +176,7 @@ Sim: a route straight through a low box at (1.3, 0) m. It bumped (orange ! mark)
 | GOTO across the room and back, a few times (starts, stops, turns) | no `nav: contact` lines |
 | a shoe in the way at 250 mm/s | `contact bump` (may still fall over: the mark is made), backs off, orange mark, route goes round |
 | a heavy box at `nav.max_speed` 120 | `contact stuck` ~0.4 s after it stops |
-| a heavy box at `nav.max_speed` 80, then 50 | `contact stuck` ~1 s (80) / 2.5 s (50) after it stops; it stands up, backs off |
+| a heavy box at `nav.max_speed` 80, then 50 | 80: `contact stuck` ~1 s after it stops, stands up, backs off, a mark; 50: `nav: stuck` after 2.5 s, backs off (no mark), after 3 stops there the planner marks it |
 | GOTO so it blocks at a wall, a box just behind it (the back-off hits it) | `contact stuck … (…, rear, holding)` ~0.7 s after the back-off starts; no pushing on, a mark behind it |
 | leave it wedged like that (EXPLORE) | after 2–3 stops there: `planner: stopped … times at the same spot …: planning another way` |
 | over the door strip / onto the carpet | no contact (if it does: the session log has the telemetry, report it) |
