@@ -21,10 +21,12 @@ import collections
 import json
 import math
 import os
+import re
 import time
 
-from .ld19 import POINT_RATE, Ld19Reader
+from .ld19 import POINT_RATE, TEENSY, Ld19Reader
 from .lidarmatch import ODO_JUMP_MM
+from .link_protocol import LINK_LIDAR_RAW_MAX
 
 PITCH_ABS_MAX = 30.0       # IMU pitch beyond this: lying down / carried, never map (same limit as mapping.py)
 TILT_REF_S = 3.0
@@ -33,6 +35,7 @@ MIN_POINTS = 30            # fewer usable points than this: skip the scan
 POSE_STALE_S = 0.5         # no telemetry for this long before the scan: pose unknown, skip
 FLOWING_S = 1.5
 HEAD_JUMP_DEG = 30.0       # telemetry heading step this much beyond yaw rate x dt: a pose reset, not a turn (#99)
+_FW_STAT_RE = re.compile(r"^lidar: .*usb drop (\d+), overflow (\d+)")
 
 DEFAULTS = {
     "enabled": True,
@@ -169,7 +172,10 @@ class Lidar:
         self._load_settings()
         self._mask = mask_table(self.settings["mask"])
         self.hist = PoseHistory()
-        self.reader = Ld19Reader(self.port, self.on_scan, say=self.say, clock=clock)
+        # port "teensy": only the LD19 bytes the Teensy forwards (MSG_LIDAR_RAW, #100). A serial port (USB adapter,
+        # UART, the sim's tcp://): that, and the Teensy's frames whenever the port has no valid packets (auto).
+        self.reader = Ld19Reader("" if self.port.lower() == TEENSY else self.port, self.on_scan, say=self.say,
+                                 clock=clock, teensy=True)
         self.n = {"scans": 0, "used": 0, "every_n": 0, "no_pose": 0, "few": 0, "points": 0,
                   "range": 0, "intensity": 0, "mask": 0, "tilt": 0, "floor": 0, "no_return": 0, "pose_jumps": 0}
         self.cpu_s = 0.0
@@ -220,6 +226,23 @@ class Lidar:
     # ------------------------------------------------------------ inputs
     async def run(self):
         await self.reader.run()
+
+    def on_raw(self, payload):
+        """A MSG_LIDAR_RAW frame from the robot link (#100): the Teensy's Serial7 bytes into the same LD19 parser."""
+        try:
+            seq, flags, data = payload[0], payload[1], bytes(payload[2:])
+        except IndexError:
+            data = b""
+        if not data or len(data) > LINK_LIDAR_RAW_MAX:
+            self.reader.raw["bad"] += 1
+            return
+        self.reader.feed_teensy(seq, flags, data)
+
+    def on_robot_log(self, text):
+        """The firmware's "lidar: ... usb drop N, overflow M ..." line: its own counters for the Health tile."""
+        m = _FW_STAT_RE.search(text)
+        if m:
+            self.reader.fw = {"usb_drop": int(m.group(1)), "overflow": int(m.group(2))}
 
     def on_tlm(self, d, t):
         h = self.hist.h

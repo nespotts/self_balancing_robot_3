@@ -389,6 +389,10 @@ class Bridge:
             if rf != self.robot_estop:          # the robot's own latch (v4 firmware)
                 self.robot_estop = rf
                 self.push_status()
+        elif t == lp.MSG_LIDAR_RAW:
+            # LD19 bytes the Teensy forwards from its Serial7 (#100, ~98 frames/s): into the LD19 parser. Not logged.
+            if self.lidar:
+                self.lidar.on_raw(p)
         elif t == lp.MSG_RANGE:
             d = lp.decode_range(p)
             self.log.rng(d)
@@ -404,6 +408,8 @@ class Bridge:
                 self.mapper.on_pose_reset()
                 if self.lidar:
                     self.lidar.hist.clear()       # the pose jumped: never interpolate across it
+            elif text.startswith("lidar: ") and self.lidar:
+                self.lidar.on_robot_log(text)     # the Teensy's LD19 forwarder counters (#100)
             self.planner.on_log(text)             # "nav: stuck": replan with a larger margin (#62)
             m = GO_HOME_RE.match(text)
             if m:       # GO_HOME from the remote or a station event: route it around obstacles (#53)

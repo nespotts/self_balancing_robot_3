@@ -149,7 +149,24 @@ blocked for more than 0.2 s the Logs tab says so.
 ## Link messages to the robot
 
 The bridge <-> Teensy link itself (framed binary, CRC16) is defined in
-[include/protocol/link_protocol.h](../include/protocol/link_protocol.h) (link v6), mirrored in `station/bridge/link_protocol.py`.
+[include/protocol/link_protocol.h](../include/protocol/link_protocol.h) (link v7), mirrored in `station/bridge/link_protocol.py`.
+
+New in v7: **`MSG_LIDAR_RAW`** (0x07, **Teensy -> Pi**, issue #100): the LD19 is wired to the Teensy's Serial7 (the Pi's H618 UART
+can't make 230400 baud) and the Teensy forwards its raw bytes ([ld19.md](ld19.md#wiring-the-pcbs-rplidar-c1-header-100)).
+~98 frames/s while the lidar runs (17.6 kB/s of LD19 data), `len` = 2 + n.
+
+| Byte | Field | |
+|---|---|---|
+| 0 | `seq` u8 | + 1 per chunk taken from Serial7, also for one dropped because the USB link had no room: a gap = lost bytes |
+| 1 | `flags` u8 | `LINK_LIDAR_RAW_OVERFLOW` (0x01): Serial7's 2 KB buffer filled up or the UART overran since the previous frame (bytes before this chunk missing) |
+| 2 .. 1 + n | raw bytes | n = 1 .. 180 (`LINK_LIDAR_RAW_MAX`); sent at 180, or 12 ms after the first of fewer arrived. Not aligned to the LD19's 47-byte packets |
+
+The bridge joins the chunks into the same LD19 parser as a serial port (header, CRC8, the packets' own ms timestamps time the points).
+Sent only while Serial7 runs: `rng.enable` 0 at boot (D28 / D29 are also the sweep's sensor 1 pins). Never blocks: no USB room -> the
+bytes wait; the buffer nearly full -> the oldest chunk is dropped (log line `lidar: ... usb drop N, overflow M ...` every 30 s).
+A v6 bridge ignores the message (unknown type: no lidar from the Teensy); v6 firmware never sends it. No params, no layout change.
+The bridge's CRC-16 is now `binascii.crc_hqx` (the same CRC in C), the firmware's a 256-entry table.
+
 New in v6: **`EVT_LINK_STUCK`** (0x83, a link-only `MSG_EVENT` value, issue #79): the bridge's LD19 matcher saw the wheels turn
 for `match_stuck_s` (2.5 s) in GOTO / EXPLORE while the robot did not move (wheel slip, a low obstacle the lidar does not see). The navigator's
 next driving stuck check (within 500 ms) takes it like its own: BLOCKED, log `nav: stuck, wheels turn but the lidar sees no motion (waypoint 1/2)`,

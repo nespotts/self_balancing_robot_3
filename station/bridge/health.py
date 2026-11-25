@@ -248,18 +248,34 @@ def lidar_tile(l):
     pps, rpm, crc = l.get("pps", 0.0), l.get("rpm", 0.0), l.get("crc_errors", 0)
     pk = max(1, l.get("packets", 0))
     age = l.get("scan_age_s")
+    src = l.get("source_label") or ""                    # Teensy (MSG_LIDAR_RAW, #100) / USB / UART / TCP
+    label = "Lidar · " + src if src else "Lidar"
+    teensy = l.get("teensy") or {}
+    via_teensy = src == "Teensy"
     if not l.get("enabled", True):
-        return _tile("lidar", "Lidar", NA, "off", "lidar mapping is switched off in the lidar settings")
+        return _tile("lidar", label, NA, "off", "lidar mapping is switched off in the lidar settings")
     if st == "waiting":
-        return _tile("lidar", "Lidar", NA, "no port", "waiting for %s (%s)" % (l.get("port"), l.get("error") or "not present"))
+        if l.get("port") == "teensy":
+            return _tile("lidar", label, NA, "no data",
+                         "no LD19 bytes from the Teensy (MSG_LIDAR_RAW: link v7 firmware, LD19 Tx on D28, rng.enable 0)")
+        return _tile("lidar", label, NA, "no port", "waiting for %s (%s)" % (l.get("port"), l.get("error") or "not present"))
     if st in ("no data", "junk"):
-        return _tile("lidar", "Lidar", WARN, "silent" if st == "no data" else "junk",
-                     "port open but %s: check the power, the Tx wire and 230400 baud" % (
+        return _tile("lidar", label, WARN, "silent" if st == "no data" else "junk",
+                     "%s but %s: check the power, the Tx wire and 230400 baud" % (
+                         "Teensy frames arrive" if via_teensy else "port open",
                          "no bytes arrive" if st == "no data" else "no valid packet (wrong baud rate or Rx / Tx swapped)"))
     if st == "stale":
-        return _tile("lidar", "Lidar", BAD, "stopped", "no packet for %s s" % (age if age is not None else "?"))
+        return _tile("lidar", label, BAD, "stopped", "no packet for %s s" % (age if age is not None else "?"))
     why = ["%.0f packets/s" % pps, "%.0f rpm" % rpm, "%d bad CRC" % crc]
     lvl = OK
+    if via_teensy:
+        lost = teensy.get("seq_gaps", 0)
+        why.append("%d chunks lost" % lost)
+        if teensy.get("overflows"):
+            why.append("%d Teensy buffer overflows" % teensy["overflows"])
+        if teensy.get("frames") and (lost + teensy.get("overflows", 0)) / float(teensy["frames"] + lost) > LIDAR_CRC_WARN:
+            lvl = WARN
+            why.append("the robot link drops lidar data (USB busy?)")
     if crc / pk > LIDAR_CRC_WARN:
         lvl = WARN
         why.append("many CRC errors: check the wiring")
@@ -272,7 +288,7 @@ def lidar_tile(l):
     if not l.get("flowing"):
         why.append("not mapped (no robot pose / lidar settings off)")
         lvl = worst([lvl, WARN])
-    return _tile("lidar", "Lidar", lvl, "%.0f/s %.0f rpm" % (pps, rpm), ", ".join(why))
+    return _tile("lidar", label, lvl, "%.0f/s %.0f rpm" % (pps, rpm), ", ".join(why))
 
 
 def evaluate(c):

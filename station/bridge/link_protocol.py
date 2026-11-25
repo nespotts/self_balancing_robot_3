@@ -1,13 +1,14 @@
-"""Link protocol v6 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
+"""Link protocol v7 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
 
 Frame: 0xA5 0x5A | type u8 | len u8 | payload[len] | crc16 u16 LE
 crc16 = CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over type, len and payload.
 All fields little-endian, packed. Keep in sync with the C header (tests check it).
 Pure Python, 3.8+.
 """
+import binascii
 import struct
 
-LINK_PROTOCOL_VERSION = 6
+LINK_PROTOCOL_VERSION = 7
 LINK_SYNC1 = 0xA5
 LINK_SYNC2 = 0x5A
 LINK_MAX_PAYLOAD = 200
@@ -21,6 +22,7 @@ MSG_LOG = 0x03
 MSG_PARAM_INFO = 0x04
 MSG_NAV_STATUS = 0x05
 MSG_HELLO = 0x06
+MSG_LIDAR_RAW = 0x07          # v7 (#100): raw LD19 bytes from the Teensy's Serial7
 MSG_HEARTBEAT = 0x80
 MSG_CMD_VEL = 0x81
 MSG_SET_MODE = 0x82
@@ -68,6 +70,10 @@ LINK_LIDAR_SECTORS = 36
 LINK_LIDAR_FRESH_MS = 500       # firmware: no frame for this long -> no lidar (sweep or blind)
 LINK_LIDAR_MAX_AGE_MS = 300     # firmware drops frames whose pose is older (bridge: does not send them)
 LIDAR_SECTOR_DEG = 360.0 / LINK_LIDAR_SECTORS
+
+# MSG_LIDAR_RAW (v7, #100): seq u8, flags u8, then 1 .. LINK_LIDAR_RAW_MAX raw LD19 bytes (see LidarRawFrame)
+LINK_LIDAR_RAW_MAX = 180
+LINK_LIDAR_RAW_OVERFLOW = 0x01  # the Teensy's Serial7 buffer filled / overran since the previous frame: bytes missing
 
 # TelemetryFrame.remote_flags (v3)
 LINK_RF_ESTOP = 0x01      # E-stop latched (from the remote)
@@ -128,6 +134,8 @@ EVENT_FMT = "<B"
 EVENT_FIELDS = ("event",)
 LIDAR_OBST_FMT = "<BBH" + "h" * (2 * LINK_LIDAR_SECTORS)      # xy_mm[72] = x0, y0, x1, y1, ...
 LIDAR_OBST_FIELDS = ("seq", "sectors", "age_ms", "xy_mm")
+LIDAR_RAW_FMT = "<BB%dB" % LINK_LIDAR_RAW_MAX                  # header + the most data bytes; len = 2 + n
+LIDAR_RAW_FIELDS = ("seq", "flags", "data")
 
 STRUCTS = {  # C struct name -> (format, fields); GotoFrame is variable length (see encode_goto)
     "HelloFrame": (HELLO_FMT, HELLO_FIELDS),
@@ -141,6 +149,7 @@ STRUCTS = {  # C struct name -> (format, fields); GotoFrame is variable length (
     "SetParamFrame": (SET_PARAM_FMT, SET_PARAM_FIELDS),
     "EventFrame": (EVENT_FMT, EVENT_FIELDS),
     "LidarObstacleFrame": (LIDAR_OBST_FMT, LIDAR_OBST_FIELDS),   # xy_mm is an array: encode/decode_lidar_obstacles
+    "LidarRawFrame": (LIDAR_RAW_FMT, LIDAR_RAW_FIELDS),          # variable length: encode/decode_lidar_raw
 }
 
 _S = {name: struct.Struct(fmt) for name, (fmt, _f) in STRUCTS.items()}
@@ -166,11 +175,17 @@ def _make_table():
 _CRC_TABLE = _make_table()
 
 
-def crc16(data, crc=0xFFFF):
+def crc16_py(data, crc=0xFFFF):
     tbl = _CRC_TABLE
     for b in data:
         crc = ((crc << 8) & 0xFFFF) ^ tbl[((crc >> 8) ^ b) & 0xFF]
     return crc
+
+
+def crc16(data, crc=0xFFFF):
+    """CRC-16/CCITT-FALSE. binascii.crc_hqx is the same CRC (poly 0x1021, not reflected, given start value) in C: with
+    ~100 MSG_LIDAR_RAW frames a second (#100) the Python loop above would cost the Pi a few % of a core."""
+    return binascii.crc_hqx(data, crc)
 
 
 # ---- framing -------------------------------------------------------------------------------
@@ -319,12 +334,19 @@ def decode_lidar_obstacles(p):
             "pts": [(xy[2 * i], xy[2 * i + 1]) for i in range(LINK_LIDAR_SECTORS)]}
 
 
+def decode_lidar_raw(p):
+    """MSG_LIDAR_RAW -> {"seq", "flags", "data": bytes}. ValueError without data or with more than LINK_LIDAR_RAW_MAX."""
+    if not 3 <= len(p) <= 2 + LINK_LIDAR_RAW_MAX:
+        raise ValueError("LidarRawFrame: payload %d bytes, expected 3 .. %d" % (len(p), 2 + LINK_LIDAR_RAW_MAX))
+    return {"seq": p[0], "flags": p[1], "data": bytes(p[2:])}
+
+
 DECODERS = {
     MSG_TELEMETRY: decode_telemetry, MSG_RANGE: decode_range, MSG_LOG: decode_log,
     MSG_PARAM_INFO: decode_param_info, MSG_NAV_STATUS: decode_nav_status, MSG_HELLO: decode_hello,
     MSG_HEARTBEAT: decode_heartbeat, MSG_CMD_VEL: decode_cmd_vel, MSG_SET_MODE: decode_set_mode,
     MSG_SET_PARAM: decode_set_param, MSG_GET_PARAMS: lambda p: {}, MSG_GOTO: decode_goto,
-    MSG_EVENT: decode_event, MSG_LIDAR_OBSTACLES: decode_lidar_obstacles,
+    MSG_EVENT: decode_event, MSG_LIDAR_OBSTACLES: decode_lidar_obstacles, MSG_LIDAR_RAW: decode_lidar_raw,
 }
 
 
@@ -439,3 +461,37 @@ def encode_nav_status(d):
 
 def encode_log(text):
     return encode_frame(MSG_LOG, text.encode("utf-8")[:LINK_MAX_PAYLOAD])
+
+
+def encode_lidar_raw(seq, data, flags=0):
+    """One MSG_LIDAR_RAW frame: 1 .. LINK_LIDAR_RAW_MAX raw LD19 bytes."""
+    if not 1 <= len(data) <= LINK_LIDAR_RAW_MAX:
+        raise ValueError("MSG_LIDAR_RAW carries 1 .. %d bytes, got %d" % (LINK_LIDAR_RAW_MAX, len(data)))
+    return encode_frame(MSG_LIDAR_RAW, bytes((seq & 0xFF, flags & 0xFF)) + bytes(data))
+
+
+class LidarRawPacker:
+    """The firmware's chunking (src/lidar_fwd.cpp) for the simulator and tests: bytes in, MSG_LIDAR_RAW frames out.
+    A chunk goes when LINK_LIDAR_RAW_MAX bytes are waiting, or flush_s after the first of fewer arrived."""
+
+    def __init__(self, flush_s=0.012):
+        self.buf = bytearray()
+        self.seq = 0
+        self.first = None
+        self.flush_s = flush_s
+        self.frames = 0
+
+    def feed(self, data, now):
+        if data:
+            if not self.buf:
+                self.first = now
+            self.buf += data
+        out = []
+        while self.buf and (len(self.buf) >= LINK_LIDAR_RAW_MAX or now - self.first >= self.flush_s):
+            chunk = bytes(self.buf[:LINK_LIDAR_RAW_MAX])
+            del self.buf[:LINK_LIDAR_RAW_MAX]
+            out.append(encode_lidar_raw(self.seq, chunk))
+            self.seq = (self.seq + 1) & 0xFF
+            self.frames += 1
+            self.first = now
+        return out

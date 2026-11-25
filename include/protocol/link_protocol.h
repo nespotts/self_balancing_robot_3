@@ -24,7 +24,10 @@
 // v6: link-only event EVT_LINK_STUCK (issue #79): the bridge's LD19 scan matcher saw the wheels turn but the robot
 //     not move (wheel slip, a low obstacle). v5 firmware ignores it (only its own odometry stuck check); a v5 bridge
 //     never sends it. No layout change.
-#define LINK_PROTOCOL_VERSION 6
+// v7: MSG_LIDAR_RAW (Teensy -> Pi, issue #100): the LD19 is wired to the Teensy's Serial7 (the Pi's H618 UART can't make
+//     230400 baud) and its raw bytes are forwarded in chunks. A v6 bridge ignores the message (unknown type: no lidar,
+//     as before); v6 firmware never sends it (the bridge then reads the LD19 from a serial port, if it has one).
+#define LINK_PROTOCOL_VERSION 7
 #define LINK_SYNC1 0xA5
 #define LINK_SYNC2 0x5A
 #define LINK_MAX_PAYLOAD 200
@@ -41,6 +44,7 @@ enum LinkMsgType : uint8_t {
   MSG_PARAM_INFO = 0x04,  // ParamInfoFrame, sent for every param in reply to MSG_GET_PARAMS
   MSG_NAV_STATUS = 0x05,  // NavStatusFrame, at once on a change (state, index, count) + 2 Hz in GOTO/EXPLORE/HOLD
   MSG_HELLO = 0x06,       // HelloFrame, at boot and in reply to MSG_GET_PARAMS
+  MSG_LIDAR_RAW = 0x07,   // LidarRawFrame (v7): raw LD19 bytes from Serial7, ~98 frames/s while the lidar runs
   // Pi -> Teensy
   MSG_HEARTBEAT = 0x80,   // HeartbeatFrame, 10 Hz
   MSG_CMD_VEL = 0x81,     // CmdVelFrame, used in MODE_STATION (and by Pi-side autonomy)
@@ -228,4 +232,26 @@ struct __attribute__((packed)) LidarObstacleFrame {
 #if defined(__cplusplus) && __cplusplus >= 201103L
 static_assert(sizeof(LidarObstacleFrame) == 148, "LidarObstacleFrame size changed - bump LINK_PROTOCOL_VERSION");
 static_assert(4 + 4 * LINK_LIDAR_SECTORS == sizeof(LidarObstacleFrame), "LidarObstacleFrame: 2 x int16 per sector");
+#endif
+
+// MSG_LIDAR_RAW (v7, issue #100): the LD19's own bytes (230400 8N1 on the Teensy's Serial7, D28 = RX7), unparsed, in the
+// order they arrived. Chunks do not follow the LD19's 47-byte packets: the bridge (station/bridge/ld19.py) joins them and
+// finds the packets (0x54 0x2C, CRC8) as it does on a serial port. The packets' own millisecond timestamps time the points,
+// so the link's delivery jitter does not matter.
+//   len = 2 + n, n = 1 .. LINK_LIDAR_RAW_MAX raw bytes (a frame is sent when 180 bytes are waiting, or 12 ms after the
+//   first of fewer arrived).
+//   seq: + 1 per chunk taken from Serial7, also for a chunk dropped because the USB link had no room: a gap = lost bytes.
+//   flags LINK_LIDAR_RAW_OVERFLOW: Serial7's receive buffer (2 KB, ~120 ms of data) filled up or the UART overran since the
+//   previous frame: bytes before this chunk are missing.
+// The firmware sends it only while Serial7 runs (rng.enable 0 at boot: D28 / D29 are also the range sweep's sensor 1 pins).
+#define LINK_LIDAR_RAW_MAX 180
+#define LINK_LIDAR_RAW_OVERFLOW 0x01
+struct __attribute__((packed)) LidarRawFrame {
+  uint8_t seq;
+  uint8_t flags;          // LINK_LIDAR_RAW_* bits
+  uint8_t data[180];      // LINK_LIDAR_RAW_MAX; only n bytes are sent
+};
+
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(2 + LINK_LIDAR_RAW_MAX <= LINK_MAX_PAYLOAD, "LidarRawFrame must fit one link frame");
 #endif

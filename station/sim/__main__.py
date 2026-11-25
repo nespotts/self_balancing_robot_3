@@ -19,6 +19,15 @@ async def shover(robot, every):
             robot.push_robot(800.0)
 
 
+def _lidar_arg(v):
+    if v.strip().lower() == "teensy":
+        return "teensy"
+    try:
+        return int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--lidar PORT (a number) or teensy")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m station.sim", description="SBR3 robot simulator (firmware v4)")
     ap.add_argument("--listen", default="127.0.0.1:5761", help="host:port of the fake Teensy link")
@@ -54,9 +63,11 @@ def main(argv=None):
                     help="maze test room (#70): only the outer walls; the map's virtual walls and mazes are built as "
                          "real walls in the sim (live, as you draw them); starts with a random W x H m maze (default 3x3) "
                          "ahead of the robot. Map > Draw > Maze > Solve drives through it")
-    ap.add_argument("--lidar", nargs="?", const=5762, type=int, default=None, metavar="PORT",
+    ap.add_argument("--lidar", nargs="?", const=5762, type=_lidar_arg, default=None, metavar="PORT|teensy",
                     help="fake LDROBOT LD19 spinning lidar (issue #76): real 47-byte packets on tcp://127.0.0.1:PORT "
-                         "(default 5762); the in-process bridge reads them like the Pi's UART. The map then fills from "
+                         "(default 5762; the in-process bridge reads them like a serial port), or 'teensy': on the fake "
+                         "Teensy's Serial7, forwarded over the robot link as MSG_LIDAR_RAW frames like the real robot "
+                         "(#100; the sim then starts with rng.enable 0, which the firmware needs for it). The map then fills from "
                          "dense 360 degree scans (the two VL53L0X sweep stops drawing into it), and GOTO / EXPLORE / "
                          "STATION stop for obstacles from the bridge's LD19 frames (#77; set rng.enable 0 to drop the "
                          "sweep altogether)")
@@ -87,10 +98,21 @@ def main(argv=None):
             ap.error("--slip RATIO:SECONDS:EVERY, e.g. 1:2:20")
         robot.slip_random(ratio, dur, every, seed=a.seed)
     lidar = None
+    teensy = a.lidar == "teensy"
     if a.lidar is not None:
         from .lidar_sim import LidarSim
         lidar = LidarSim(seed=a.seed)
-    server = SimServer(robot, host or "127.0.0.1", int(port), a.garbage, lidar=lidar, lidar_port=a.lidar or 0)
+    if teensy:                      # the real robot with the LD19 on Serial7: the sweep off (it shares D28 / D29)
+        robot.set_param(robot.pidx["rng.enable"], 0.0)
+        robot.out = []
+    server = SimServer(robot, host or "127.0.0.1", int(port), a.garbage, lidar=lidar,
+                       lidar_port=0 if teensy else (a.lidar or 0), lidar_teensy=teensy)
+    if teensy:
+        lidar_src = "teensy"
+    elif a.lidar is not None:
+        lidar_src = "tcp://%s:%d" % (host or "127.0.0.1", a.lidar)
+    else:
+        lidar_src = None
 
     async def run():
         jobs = [server.run()]
@@ -102,7 +124,7 @@ def main(argv=None):
                        map_dir=os.environ.get("SBR3_MAP_DIR", "~/sbr3-maps"),
                        preset_dir=os.environ.get("SBR3_PRESET_DIR", "~/sbr3-presets"),
                        falls_dir=os.environ.get("SBR3_FALLS_DIR", "~/sbr3-falls"),
-                       lidar_port=("tcp://%s:%d" % (host or "127.0.0.1", a.lidar)) if a.lidar is not None else None)
+                       lidar_port=lidar_src)
             jobs.append(b.run())
             if a.maze:
                 from station.bridge.zones import wall_segments
