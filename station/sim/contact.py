@@ -30,6 +30,16 @@ STALL_STILL_TAU_MS = 200.0
 STALL_BUILD_DEG = 0.08
 STALL_DRIVE_MS = 800
 STALL_DRIVE_MIN_CMD = 60.0
+STALL_DEAD_MMS = 4.0          # dead still (#111): mean |speed| at most ...
+STALL_DEAD_MM = 4.0           # ... travel within +- this ...
+STALL_DEAD_MS = 800           # ... this long ...
+STALL_DEAD_MEAN_MMS = 6.0     # ... (a twitch is fine: the mean |speed| over the window at most this) ...
+STALL_DEAD_BUILD_DEG = 0.1    # ... while the lean builds this much
+STALL_REV_SETTLE_MS = 1000    # reversing: rear rules only this long after the command came ...
+STALL_REV_RATE_DPS = 10.0     # ... the mean |pitch rate| at most this (the rocking died down) ...
+STALL_REV_MS = 800            # ... the stall window ...
+STALL_REV_BUILD_DEG = 0.15    # ... and the lean build-up backwards
+STALL_REV_MEAN = 1.0          # ... the window's mean |speed| at most this x STALL_STILL_MMS (no rocking)
 
 
 class ContactDetector:
@@ -48,6 +58,8 @@ class ContactDetector:
         self.s_d = 1.0
         self.s_on_ms = self.s_a_ms = 0
         self.s_pos = self.s_a_pos = self.s_a_lean = self.s_abs = self.s_sum = 0.0
+        self.d_a_pos = self.d_a_lean = self.d_sum = self.s_rate = 0.0
+        self.d_a_ms = 0
         self.cand_d = self.run_d = 1.0
         self.pos = self.high = 0.0
         self.new_ms = self.run_ms = 0
@@ -58,7 +70,7 @@ class ContactDetector:
         self.bump_peak = 0.0
         self.hold_ms = 0
         self.run = self.moved = False
-        self.s_run = self.s_win = False
+        self.s_run = self.s_win = self.d_win = False
 
     def _fire(self, kind, d, value, flags, stall=False):
         self.dir, self.value, self.flags, self.stall = d, value, flags, stall
@@ -104,7 +116,7 @@ class ContactDetector:
         if not c["watch"] or not c["upright"]:
             self.bump_ms = self.hold_ms = 0
             self.moved = self.run = False
-            self.s_run = self.s_win = False
+            self.s_run = self.s_win = self.d_win = False
             return 0
 
         # bump
@@ -161,10 +173,31 @@ class ContactDetector:
         if cm >= STALL_MIN_CMD and (not self.s_run or d == self.s_d):
             if not self.s_run:
                 self.s_run, self.s_d, self.s_on_ms = True, d, now
-                self.s_pos, self.s_win = 0.0, False
+                self.s_pos, self.s_win, self.d_win = 0.0, False, False
             self.s_pos += v * dt * 0.001
+            self.s_abs += (abs(v) - self.s_abs) * min(1.0, dt / STALL_STILL_TAU_MS)       # mean |speed|, last ~0.2 s
+            self.s_rate += (abs(c["pitch_rate"]) - self.s_rate) * min(1.0, dt / STALL_STILL_TAU_MS)  # mean |pitch rate|
+            # reversing (backing off, after a bounce or from standing): a balancing robot rocks for 0.5-1 s before the
+            # motion shows - the rear rules count only after STALL_REV_SETTLE_MS, with the rocking died down, and a
+            # longer window / build-up (2026-11-25 18:36: ~20 false rear contacts in back-offs)
+            rev = d < 0
+            rev_ok = not rev or (now - self.s_on_ms >= STALL_REV_SETTLE_MS and self.s_rate <= STALL_REV_RATE_DPS)
+            # dead still (#111, any command: slowing for the last point, 40 mm/s, ramping up too): the wheels not turning
+            # at all for STALL_DEAD_MS while the lean builds (a free robot in its dead band creeps or rocks)
+            if now - self.s_on_ms >= STALL_START_MS:
+                self.d_sum += abs(v) * dt * 0.001
+                if (not self.d_win or abs(self.s_pos - self.d_a_pos) > STALL_DEAD_MM
+                        or self.d_sum * 1000.0 > STALL_DEAD_MEAN_MMS * max(STALL_DEAD_MS, now - self.d_a_ms)):
+                    # (starts once it is still; a twitch on the way is fine, travel and the mean speed decide)
+                    self.d_win = self.s_abs <= STALL_DEAD_MMS
+                    self.d_a_pos, self.d_a_ms, self.d_a_lean, self.d_sum = self.s_pos, now, c["vel_out"], 0.0
+                elif (rev_ok and now - self.d_a_ms >= STALL_DEAD_MS
+                      and (d * (c["vel_out"] - self.d_a_lean) >= (STALL_REV_BUILD_DEG if rev else STALL_DEAD_BUILD_DEG)
+                           or c.get("held", False))):
+                    return self._fire(lp.LINK_CONTACT_STUCK, d, float(now - self.d_a_ms),
+                                      lp.LINK_CONTACT_LIDAR if c.get("lidar_stuck") else 0, True)
             drive = c.get("drive", False)
-            # (driving this slowly a balancing robot can stand in its motor dead band: the nav stuck check only)
+            # (driving this slowly a balancing robot can stand in its motor dead band: dead still only)
             if (c.get("ramp", False) or now - self.s_on_ms < STALL_START_MS
                     or (drive and (cm < STALL_DRIVE_MIN_CMD or not c.get("cruise", True)))):
                 self.s_win = False            # leaning in / ramping up: a balancing robot lags there
@@ -173,15 +206,16 @@ class ContactDetector:
                     self.s_win = True         # (it moved: the window starts again here)
                     self.s_a_pos, self.s_a_ms, self.s_a_lean, self.s_sum = self.s_pos, now, c["vel_out"], 0.0
                 self.s_sum += abs(v) * dt * 0.001                                         # |travel| in the window
-                self.s_abs += (abs(v) - self.s_abs) * min(1.0, dt / STALL_STILL_TAU_MS)   # mean |speed|, last ~0.2 s
                 s = now - self.s_a_ms
                 # (driving slowly: a balancing robot can stand in its motor dead band a while)
-                win = STALL_DRIVE_MS if drive and cm < STUCK_MIN_CMD else STALL_MS
+                win = STALL_REV_MS if rev else (STALL_DRIVE_MS if drive and cm < STUCK_MIN_CMD else STALL_MS)
                 # (still now; rocking against it before is fine, up to twice that on average)
-                if (s >= win and self.s_abs <= STALL_STILL_MMS and self.s_sum * 1000.0 <= 2.0 * STALL_STILL_MMS * s
-                        and (d * (c["vel_out"] - self.s_a_lean) >= STALL_BUILD_DEG or c.get("held", False))):
+                if (rev_ok and s >= win and self.s_abs <= STALL_STILL_MMS
+                        and self.s_sum * 1000.0 <= (STALL_REV_MEAN if rev else 2.0) * STALL_STILL_MMS * s
+                        and (d * (c["vel_out"] - self.s_a_lean) >= (STALL_REV_BUILD_DEG if rev else STALL_BUILD_DEG)
+                             or c.get("held", False))):
                     return self._fire(lp.LINK_CONTACT_STUCK, d, float(s),
                                       lp.LINK_CONTACT_LIDAR if c.get("lidar_stuck") else 0, True)
         else:
-            self.s_run = self.s_win = False
+            self.s_run = self.s_win = self.d_win = False
         return 0

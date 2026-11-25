@@ -9,7 +9,7 @@ void ContactDetector::reset() {
   bump_peak_ = 0;
   hold_ms_ = 0;
   run_ = moved_ = false;
-  s_run_ = s_win_ = false;
+  s_run_ = s_win_ = d_win_ = false;
   // (the signal history and was_upright_ stay: they describe the robot, not a detection)
 }
 
@@ -64,7 +64,7 @@ uint8_t ContactDetector::update(const ContactIn& in) {
     bump_ms_ = hold_ms_ = 0;
     moved_ = false;
     run_ = false;
-    s_run_ = s_win_ = false;
+    s_run_ = s_win_ = d_win_ = false;
     return 0;
   }
 
@@ -135,11 +135,37 @@ uint8_t ContactDetector::update(const ContactIn& in) {
       s_d_ = d;
       s_on_ms_ = now;
       s_pos_ = 0;
-      s_win_ = false;
+      s_win_ = d_win_ = false;
     }
     s_pos_ += v * (float)dt * 0.001f;
+    s_abs_ += (fabsf(v) - s_abs_) * fminf(1.0f, (float)dt / kStallStillTauMs);  // mean |speed|, last ~0.2 s
+    s_rate_ += (fabsf(in.pitch_rate) - s_rate_) * fminf(1.0f, (float)dt / kStallStillTauMs);  // mean |pitch rate|
+    // reversing (backing off, after a bounce or from standing): a balancing robot rocks for 0.5-1 s before the motion
+    // shows - the rear rules count only after kStallRevSettleMs, with the rocking died down (kStallRevRateDps), with a
+    // longer window, a stiller one and a bigger build-up (2026-11-25 18:36: ~20 false rear contacts in back-offs)
+    const bool rev = d < 0;
+    const bool rev_ok = !rev || (now - s_on_ms_ >= kStallRevSettleMs && s_rate_ <= kStallRevRateDps);
+    // dead still (#111, any command >= kStallMinCmd: slowing for the last point, 40 mm/s, ramping up too): the wheels
+    // not turning at all (mean |speed| <= kStallDeadMms, travel within +-kStallDeadMm) for kStallDeadMs while the lean
+    // builds. A free balancing robot in its motor dead band creeps or rocks (the sim's: <= ~0.1 s that still)
+    if (now - s_on_ms_ >= kStallStartMs) {
+      d_sum_ += fabsf(v) * (float)dt * 0.001f;
+      const uint32_t age = now - d_a_ms_;
+      if (!d_win_ || fabsf(s_pos_ - d_a_pos_) > kStallDeadMm ||
+          d_sum_ * 1000.0f > kStallDeadMeanMms * (float)(age > kStallDeadMs ? age : kStallDeadMs)) {
+        // (starts once it is still; a twitch on the way is fine: the travel and the mean speed decide)
+        d_win_ = s_abs_ <= kStallDeadMms;
+        d_a_pos_ = s_pos_;
+        d_a_ms_ = now;
+        d_a_lean_ = in.vel_out;
+        d_sum_ = 0;
+      } else if (rev_ok && now - d_a_ms_ >= kStallDeadMs &&
+                 (d * (in.vel_out - d_a_lean_) >= (rev ? kStallRevBuildDeg : kStallDeadBuildDeg) || in.held)) {
+        return fire(LINK_CONTACT_STUCK, d, (float)(now - d_a_ms_), in.lidar_stuck ? LINK_CONTACT_LIDAR : 0, true);
+      }
+    }
     // (driving: not while slowing for a stop - as STUCK - and not this slowly: a balancing robot can stand in its motor
-    // dead band there, the nav stuck check only)
+    // dead band there; the dead-still rule above only)
     if (in.ramp || now - s_on_ms_ < kStallStartMs || (in.drive && (c < kStallDriveMinCmd || !in.cruise))) {
       s_win_ = false;  // leaning in / ramping up: a balancing robot lags there
     } else {
@@ -150,18 +176,18 @@ uint8_t ContactDetector::update(const ContactIn& in) {
         s_a_lean_ = in.vel_out;
         s_sum_ = 0;
       }
-      s_sum_ += fabsf(v) * (float)dt * 0.001f;                                      // |travel| in the window
-      s_abs_ += (fabsf(v) - s_abs_) * fminf(1.0f, (float)dt / kStallStillTauMs);  // mean |speed|, last ~0.2 s
+      s_sum_ += fabsf(v) * (float)dt * 0.001f;  // |travel| in the window
       const uint32_t s = now - s_a_ms_;
       // (driving slowly: a balancing robot can stand in its motor dead band a while)
-      const uint32_t win = in.drive && c < kStuckMinCmd ? kStallDriveMs : kStallMs;
-      // (still now; rocking against it before is fine, up to twice that on average)
-      if (s >= win && s_abs_ <= kStallStillMms && s_sum_ * 1000.0f <= 2.0f * kStallStillMms * (float)s &&
-          (d * (in.vel_out - s_a_lean_) >= kStallBuildDeg || in.held))
+      const uint32_t win = rev ? kStallRevMs : (in.drive && c < kStuckMinCmd ? kStallDriveMs : kStallMs);
+      // (still now; rocking against it before is fine, up to twice that on average - reversing: no rocking)
+      if (rev_ok && s >= win && s_abs_ <= kStallStillMms &&
+          s_sum_ * 1000.0f <= (rev ? kStallRevMean : 2.0f) * kStallStillMms * (float)s &&
+          (d * (in.vel_out - s_a_lean_) >= (rev ? kStallRevBuildDeg : kStallBuildDeg) || in.held))
         return fire(LINK_CONTACT_STUCK, d, (float)s, in.lidar_stuck ? LINK_CONTACT_LIDAR : 0, true);
     }
   } else {
-    s_run_ = s_win_ = false;
+    s_run_ = s_win_ = d_win_ = false;
   }
   return 0;
 }

@@ -73,6 +73,8 @@ void Navigator::listChanged(bool replaced) {
   stuck_ = away_ = away_done_ = false;
   stuck_ms_ = 0;
   contact_ = false;  // (#104) the planner's new route goes round the mark
+  gave_up_ = false;  // (#111)
+  stop_n_ = 0;
 }
 
 // ------------------------------------------------------------------ inputs
@@ -170,7 +172,8 @@ void Navigator::onModeChange(const NavIn& in) {
   stuck_ = away_ = away_done_ = false;
   stuck_ms_ = 0;
   lidar_stuck_ms_ = 0;
-  contact_ = contact_watch_ = launch_ = contact_ramp_ = false;
+  contact_ = contact_watch_ = launch_ = contact_ramp_ = gave_up_ = false;
+  stop_n_ = 0;
   contact_src_ = SRC_NONE;
   cdet_.reset();
   if (in.mode == MODE_GOTO || in.mode == MODE_EXPLORE) {
@@ -355,7 +358,10 @@ void Navigator::startStuck(const NavIn& in, bool turning) {
   // what stopped it can't back away. No contact report: a balancing robot crawling at 40 mm/s - a squeeze through a
   // doorway, a slow zone - can stand in its motor dead band this long with nothing in front of it, and a mark there
   // shuts the doorway. Again and again at one spot: the planner's same-spot rule marks it
-  if (!turning && !stuck_lidar_) unwind_ = true;
+  if (!turning && !stuck_lidar_) {
+    unwind_ = true;
+    noteStop(in);
+  }
   stuck_lidar_ = false;
   back_mm_ = P(P_NAV_STUCK_BACK);
   backing_ = back_mm_ > 0;
@@ -436,9 +442,29 @@ void Navigator::startContact(const NavIn& in, uint8_t kind) {
   back_y_ = contact_hy_ = in.y;
   back_ms_ = in.now_ms;
   unwind_ = true;  // (#111) the controller: command 0, the velocity loop's lean back to its free value
+  if (!hold) noteStop(in);
   speed_ = turn_ = 0;
   state_ = NAV_BLOCKED;
   obst_ = front_;
+}
+
+// #111: GOTO stopped driving toward the same waypoint at the same spot again (a contact or a stuck while driving):
+// after kGiveUpStops it gives up on it - BLOCKED until a new list (18:36: 13 tries in 3 min at a goal next to a low
+// box, the planner idle). A new list, a mode change or getting past the spot starts the count again.
+void Navigator::noteStop(const NavIn& in) {
+  if (stop_n_ && idx_ == stop_idx_ && hypotf(in.x - stop_x_, in.y - stop_y_) < kSameSpotMm) {
+    stop_n_++;
+  } else {
+    stop_n_ = 1;
+    stop_x_ = in.x;
+    stop_y_ = in.y;
+    stop_idx_ = idx_;
+  }
+  if (stop_n_ >= kGiveUpStops && in.mode == MODE_GOTO && !gave_up_) {
+    gave_up_ = latched_ = true;
+    log("nav: gave up on waypoint %u/%u: stopped %u times at %.0f,%.0f - waiting for a new list", (unsigned)idx_ + 1,
+        (unsigned)n_, (unsigned)stop_n_, (double)stop_x_, (double)stop_y_);
+  }
 }
 
 float Navigator::limitSpeed(float v, float vmax, bool apply) {
@@ -811,7 +837,11 @@ void Navigator::updateGoto(const NavIn& in) {
   const bool cruise = cornerCap(in.heading, vmax, true) + kp * to_go >= vmax && !launch_;
   float vl = limitSpeed(v, vmax, true);
   // contact (#104): GOTO waits kContactWaitMs for a new list (the planner's route round the mark), then tries again
-  if (contact_ && in.mode == MODE_GOTO && !backing_ && in.now_ms - contact_ms_ >= kContactWaitMs) latched_ = contact_ = false;
+  if (contact_ && in.mode == MODE_GOTO && !backing_ && !gave_up_ && in.now_ms - contact_ms_ >= kContactWaitMs)
+    latched_ = contact_ = false;
+  if (gave_up_) latched_ = true;  // (#111) waits for a new list
+  // (#111) got well past the spot it kept stopping at: count again
+  if (stop_n_ && !blocked_ && hypotf(in.x - stop_x_, in.y - stop_y_) > 2.0f * kSameSpotMm) stop_n_ = 0;
   if (latched_ || stuck_) obst_flag_ = true;  // EXPLORE: stays blocked until a new list; stuck: backing off
   if (obst_flag_) {
     if (!blocked_) startBlocked(in);

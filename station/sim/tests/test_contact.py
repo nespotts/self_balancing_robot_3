@@ -192,6 +192,7 @@ def simmod_wrap(a):
 
 REPLAY = os.path.join(os.path.dirname(__file__), "data", "contact_replay_20261125.csv")
 # the real robot's session of 2026-11-25 (v8): where it really was blocked while commanded to move (log time, s)
+REPLAY_B = os.path.join(os.path.dirname(__file__), "data", "contact_replay_20261125b.csv")   # 18:36 (push-detect)
 REAL_TRUE = [(358.20, 361.10, True), (386.55, 389.30, True), (389.30, 401.60, False), (413.40, 417.40, False),
              (436.90, 439.70, True), (546.60, 549.20, False)]     # (..., must: a push v8 missed)
 
@@ -212,6 +213,25 @@ class TestRealReplay(unittest.TestCase):
         first = [next(h[0] for h in hits if t0 <= h[0] <= t1) for t0, t1, must in REAL_TRUE if must]
         print("\nreal log replay: the 3 missed pushes found at %s s (%d detections, all in blocked stretches)"
               % (", ".join("%.2f" % t for t in first), len(hits)))
+
+    def test_slow_push_before_the_last_point(self):
+        """18:36 session (push-detect on the robot): GOTO at 40 mm/s into a low box 135 mm before the last point - not
+        cruising, under 60 mm/s: missed. The wheels at 0 from 132.9 s, leaning in for 9 s. Dead still: found in 1.5 s,
+        and nothing anywhere else in that session."""
+        rows = contact_replay.read_csv(REPLAY_B)
+        self.assertGreater(len(rows), 10000)
+        hits = contact_replay.replay(rows)
+        self.assertTrue(hits)
+        near = [h for h in hits if 132.8 <= h[0] <= 150.3]
+        self.assertTrue(near and near[0][0] <= 132.9 + 1.5, hits)
+        self.assertGreater(near[0][2], 0)                               # in front
+        # the rest: real forward contacts in a pocket (drove in at 100-250 mm/s, stopped dead), and ~20 back-offs that
+        # rocked after the bounce which the robot called "rear, holding": no rear contact at all
+        ok = [(132.8, 150.3), (376.0, 420.0), (950.0, 965.0)]
+        self.assertEqual([h for h in hits if not any(a <= h[0] <= b for a, b in ok)], [])
+        self.assertEqual([h for h in hits if h[2] < 0], [])
+        print("\nreal log replay (18:36): the slow push before the last point found at %.2f s (still from 132.9); "
+              "%d front contacts, no rear one (the robot made 21 'rear, holding')" % (near[0][0], len(hits)))
 
 
 class TestSlowAndBackoff(unittest.TestCase):
@@ -238,23 +258,51 @@ class TestSlowAndBackoff(unittest.TestCase):
                                             on_step=lambda rr, bb: fell.append(rr.t) if not rr.ctl.upright else None)
                 face = at["face"]
                 self.assertTrue(r.impacts, speed)
-                # marked at the box: 80 by the stall rule (a contact ~0.9 s after the first touch); 40, 60 by the planner's
-                # same-spot rule after 3 stops there (the 2.5 s stuck check reports no contact: crawling that slowly the
-                # sim's balancer can stand in its dead band with nothing in front of it)
+                # marked at the box: by a contact (80: the stall rule ~0.9 s after the first touch; 40, 60: dead still, once
+                # the sim's robot stops bouncing off it, ~1.4 s), or the planner's same-spot rule after 3 stops there
                 at_box = [z for z in m.zones.bumps() if abs(z["x"] - face) < 50.0 and abs(z["y"] - at["y"]) < 60.0]
                 self.assertTrue(at_box, (speed, m.zones.bumps(), b.robot_logs[-6:]))
+                c = r.contacts[0] if r.contacts else None
                 if speed >= cm.STALL_DRIVE_MIN_CMD + 20.0:
-                    c = r.contacts[0]
                     self.assertEqual(c["kind"], lp.LINK_CONTACT_STUCK, speed)
                     self.assertAlmostEqual(c["x_mm"], face - 90.0 + 50.0, delta=40.0)       # at the box
                     self.assertLess(r.contact_times[0] - r.impacts[0][0], 2.0, speed)
-                else:
-                    self.assertTrue(any("same spot" in l for l in b.lines), (speed, b.lines[-5:]))
                 self.assertEqual(fell, [], speed)                       # never fell over
+                how = ("contact %.1f s after the first touch" % (r.contact_times[0] - r.impacts[0][0]) if c
+                       and abs(c["x_mm"] - (face - 40.0)) < 40.0 else "same-spot rule")
                 print("\n  slow push %3.0f mm/s: marked at the box (%s), %d mark(s), %s" % (
-                    speed, "stall contact" if speed >= 80 else "same-spot rule", len(m.zones.bumps()), b.planner.status))
+                    speed, how, len(m.zones.bumps()), b.planner.status))
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_push_before_the_last_point(self):
+        """The 18:36 miss: GOTO to a point just past a low box (the axle stops 135 mm short of it: still driving, slowing
+        for the stop, 40 mm/s). Dead still -> a contact at the box, not 'arrived' while pinned; never fell."""
+        d = Drive(params=LIVE)
+        r = d.r
+        face = r.X + 90.0 + 400.0
+        r.room.add_low(face + 100.0, r.Y, 200.0, 300.0)
+        d.goto([(face - 90.0 + 135.0, r.Y)])
+        self.assertTrue(d.run(40.0, lambda s: s.r.contacts or s.r.nav.state == lp.NAV_ARRIVED), d.logs[-5:])
+        self.assertTrue(r.impacts)
+        self.assertTrue(r.contacts, d.logs[-5:])
+        c = r.contacts[0]
+        self.assertEqual(c["kind"], lp.LINK_CONTACT_STUCK)
+        self.assertAlmostEqual(c["x_mm"], face - 40.0, delta=40.0)
+        dt = r.contact_times[0] - r.impacts[0][0]
+        self.assertLess(dt, 4.0)        # (the sim's robot bounces off it ~2.3 s first; then still: 0.8 s)
+        self.assertTrue(r.ctl.upright)
+        print("\n  push 135 mm before the last point: contact %.2f s after the first touch" % dt)
+
+    def test_stops_and_arrivals_no_contact(self):
+        """Normal stops: GOTO to single points (short, long, slow), every arrival without a contact."""
+        for seed, speed, pts in ((1, 250.0, [(600.0, 0.0)]), (2, 40.0, [(400.0, 0.0)]), (3, 80.0, [(1500.0, 300.0)]),
+                                 (4, 250.0, [(150.0, 0.0)])):
+            d = Drive(seed=seed, params=dict(LIVE, **{"nav.max_speed": speed}), box=None)
+            d.goto(pts)
+            self.assertTrue(d.run(60.0, lambda s: s.r.nav.state == lp.NAV_ARRIVED), (seed, d.logs[-4:]))
+            d.run(3.0)
+            self.assertEqual(d.r.contacts, [], (seed, speed, [l for l in d.logs if "contact" in l]))
 
     def test_backoff_into_a_box_holds(self):
         """A bump at the box ahead, the back-off hits a low box behind: a rear contact (heading + 180), then it holds
@@ -269,7 +317,8 @@ class TestSlowAndBackoff(unittest.TestCase):
         self.assertAlmostEqual(abs(front["heading_deg"]), 0.0, delta=10.0)
         self.assertAlmostEqual(abs(rear["heading_deg"]), 180.0, delta=10.0)       # behind it
         self.assertLess(rear["x_mm"], r.X)
-        self.assertLess(r.contact_times[1] - r.contact_times[0], 2.5)            # the blocked back-off found in < 1 s
+        # (rear: 1 s settle after the back-off starts, the rocking died down, 0.8 s still)
+        self.assertLess(r.contact_times[1] - r.contact_times[0], 3.5)
         self.assertTrue(any(", rear" in l and "holding" in l for l in d.logs), d.logs[-5:])
         x0 = r.X
         d.run(3.0)                                                               # (GOTO tries again after 4 s)
@@ -292,15 +341,18 @@ class TestSlowAndBackoff(unittest.TestCase):
         h = math.radians(r.TH)
         back = 90.0 + 30.0 + 100.0                                               # its face 30 mm behind the body
         r.room.add_low(r.X - back * math.cos(h), r.Y - back * math.sin(h), 200.0, 200.0)
-        self.assertTrue(n.run(6.0, lambda s: s.r.contacts), n.logs[-5:])
-        c = r.contacts[0]
-        self.assertEqual(c["kind"], lp.LINK_CONTACT_STUCK)
-        self.assertLess(abs(abs(simmod_wrap(c["heading_deg"] - r.odom()[2])) - 180.0), 15.0)   # behind it
-        self.assertTrue(any(", rear" in l and "holding" in l for l in n.logs), n.logs[-4:])
-        self.assertTrue(r.ctl.upright)
+        # (the sim's robot rocks against the box behind for most of the back-off: a rear contact needs it still for
+        # 0.8 s with the rocking died down - 18:36: rocking back-offs were ~20 false rear contacts - so here the
+        # back-off's own 5 s limit may be what stops it. Either way: it stops, no pushing on, upright)
+        n.run(6.0, lambda s: s.r.contacts)
+        for c in r.contacts:
+            self.assertEqual(c["kind"], lp.LINK_CONTACT_STUCK)
+            self.assertLess(abs(abs(simmod_wrap(c["heading_deg"] - r.odom()[2])) - 180.0), 15.0)   # behind it
         n.run(2.0)
-        self.assertEqual(len(r.contacts), 1)
-        self.assertLess(abs(r.nav.speed), 1.0)                                   # holds: no pushing on
+        self.assertTrue(r.ctl.upright)
+        self.assertLessEqual(len(r.contacts), 1)
+        self.assertFalse(r.nav.backing)
+        self.assertLess(abs(r.nav.speed), 1.0)                                   # stopped: no pushing on
         self.assertEqual(r.nav.state, lp.NAV_BLOCKED)
 
 

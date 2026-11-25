@@ -33,6 +33,13 @@
 //          builds (stick-slip: the sim's stands up to ~0.8 s at 60 mm/s, longer at 40-50, where even the 2.5 s nav stuck
 //          check trips in free space). There: the nav stuck check (2.5 s, no mark) and the planner's same-spot rule.
 //          Back-offs and steps (where the 3 missed pushes were) and driving at >= kStuckMinCmd: kStallMs.
+//          DEAD STILL (any command >= kStallMinCmd, after kStallStartMs, ramping / slowing for a stop / 40 mm/s too):
+//          from mean |speed| <= kStallDeadMms, travel within +-kStallDeadMm and <= kStallDeadMeanMms on average for
+//          kStallDeadMs while the lean builds kStallDeadBuildDeg (or held). The wheels not turning at all (a twitch is
+//          fine): a free robot in its dead band creeps or rocks.
+//          REVERSING (rear contacts: back-offs): both only kStallRevSettleMs after the command came, with the rocking died
+//          down (mean |pitch rate| <= kStallRevRateDps), the stall window kStallRevMs, its mean |speed| <= kStallRevMean x
+//          kStallStillMms and a build-up >= kStallRevBuildDeg backwards.
 //   A fall right after (upright lost within kFallMs of a bump candidate, or half the stuck / stall time without new
 //   ground) confirms it too (LINK_CONTACT_FELL): a hard bump throws a balancing robot over before the hold time is up.
 // Speed = the encoders' (80 ms window), lean = vel_out (deg). Tuned on the real session log sbr3-20261125-144651
@@ -82,7 +89,22 @@ class ContactDetector {
   static constexpr float kStallStillTauMs = 200.0f;   // ... "now": over about this long
   static constexpr float kStallBuildDeg = 0.08f;      // lean build-up toward the command (ki x 30 mm/s x 0.4 s = 0.10)
   static constexpr uint32_t kStallDriveMs = 800;      // the window driving below kStuckMinCmd ...
-  static constexpr float kStallDriveMinCmd = 60.0f;   // ... and from this command (below: the nav stuck check)
+  static constexpr float kStallDriveMinCmd = 60.0f;   // ... and from this command (below: dead still only)
+  // dead still: any command >= kStallMinCmd (also slowing for the last point, ramping up), the wheels not turning at
+  // all. 2026-11-25 18:36 log: 40 mm/s into a low box near the last point, the wheels at 0 +- 0.7 mm/s for 9 s; the sim's
+  // free balancer at 30-120 mm/s is never that still for more than ~0.1 s (it creeps / rocks in its dead band)
+  static constexpr float kStallDeadMms = 4.0f;        // mean |speed| (kStallStillTauMs) at most when it starts
+  static constexpr float kStallDeadMm = 4.0f;         // travel within +- this
+  static constexpr float kStallDeadMeanMms = 6.0f;    // mean |speed| over the window at most (a twitch is fine)
+  static constexpr uint32_t kStallDeadMs = 800;       // this long
+  static constexpr float kStallDeadBuildDeg = 0.1f;   // while the lean builds this much (ki x 40 mm/s x 1 s = 0.35)
+  // reversing (rear contacts, back-offs): 18:36 had ~20 false "rear, holding" while it still rocked after the bounce;
+  // the 3 real blocked back-offs of 14:46 stayed still 1-3 s
+  static constexpr uint32_t kStallRevSettleMs = 1000; // only this long after the command came
+  static constexpr float kStallRevRateDps = 10.0f;    // mean |pitch rate| at most (the rocking died down)
+  static constexpr uint32_t kStallRevMs = 800;        // the window
+  static constexpr float kStallRevBuildDeg = 0.15f;   // the lean build-up backwards
+  static constexpr float kStallRevMean = 1.0f;        // the window's mean |speed| <= this x kStallStillMms (no rocking)
 
   void reset();
   // Every control step. Returns LINK_CONTACT_BUMP / LINK_CONTACT_STUCK when a contact is detected (then it starts over),
@@ -123,6 +145,10 @@ class ContactDetector {
   bool s_win_ = false;             // a window is open (since s_a_ms_, at s_a_pos_ / lean s_a_lean_)
   float s_pos_ = 0, s_a_pos_ = 0, s_a_lean_ = 0;  // travel along s_d_ (mm)
   float s_sum_ = 0, s_abs_ = 0;                   // |travel| in the window (mm), mean |speed| (kStallStillTauMs)
+  float s_rate_ = 0;                              // mean |pitch rate| (kStallStillTauMs)
+  bool d_win_ = false;                            // dead still since d_a_ms_ (at d_a_pos_, lean d_a_lean_)
+  float d_a_pos_ = 0, d_a_lean_ = 0, d_sum_ = 0;
+  uint32_t d_a_ms_ = 0;
   uint32_t s_a_ms_ = 0;
   // last detection
   float dir_ = 1, value_ = 0;
