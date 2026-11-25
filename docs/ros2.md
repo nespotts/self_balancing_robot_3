@@ -9,6 +9,7 @@ Issues #96 and #98. ROS 2 Jazzy runs on the Windows PC in WSL2. The robot does n
 | Drive on a saved map | `ros2\run_localize.ps1 -Map room` | [Saved maps](#saved-maps-and-localization) |
 | Go to a place / patrol | `ros2\go_to.ps1 -Place kitchen`, `ros2\patrol.ps1 -Places "A,B"` | [Places](#places-and-patrols) |
 | Keep out of zones | automatic (zones drawn on the phone) | [Keep-out zones](#keep-out-zones) |
+| Map a new place by itself | `ros2\run_explore.ps1`, then **Explore (ROS)** on the Map page | [Explore](#explore) |
 | Drive with a gamepad | `ros2\teleop.ps1` | [Gamepad](#gamepad-optional) |
 | First time with the real robot | | [Checklist](#first-real-robot-session-checklist) |
 
@@ -299,6 +300,85 @@ flowchart LR
 - Slow zones are not keep-out (the bridge still enforces them, and its zone watchdog stays on in STATION mode).
 - Off: `run_localize.ps1 -NoKeepout`.
 
+## Explore
+
+Issue #107. The robot maps a new place by itself: slam_toolbox maps while a frontier explorer sends Nav2 goals until no reachable frontier is left. Then the map is saved.
+
+<p>
+<img src="img/ros2/explore-room-60s.png" width="49%">
+<img src="img/ros2/explore-room-final.png" width="49%">
+</p>
+<p>Sim room. Left, at 60 s: frontiers (magenta: free cells next to the unknown) and the current goal (red star). Right, done: 98 % of the true free area mapped in 153 s.</p>
+
+<p>
+<img src="img/ros2/explore-maze-120s.png" width="49%">
+<img src="img/ros2/explore-maze-final.png" width="49%">
+</p>
+<p>Sim maze (<code>--maze</code>, 0.7 m corridors), at 120 s and done after 395 s. It works down each corridor and back out of the dead ends. The grey slots between the maze and the room walls are 35 cm wide: too narrow for a viewpoint, and the LD19 only sees into them at a glancing angle.</p>
+
+<img src="img/ros2/explore-maze-saved.png" width="45%">
+
+The PNG saved with the map (`<name>.png`): the track (orange) and the goals (green reached, red failed).
+
+| Sim test (`scripts/sim_e2e_explore.sh`) | Room | Maze |
+|---|---|---|
+| Coverage (map free / true free area) | **98 %** (15.0 of 15.2 m²) | **90 %** (13.5 of 15.0 m²) |
+| ... where the robot fits (> 14 cm from walls) | 100 % | 98 % |
+| Time to "done" | 153 s | 395 s |
+| Driven | 11.9 m | 26.6 m |
+| Goals (failed) | 7 (0): 2 reached, 5 ended early (frontier seen on the way) | 23 (1): 7 reached, 14 seen, 1 switched |
+| Plan time (max) | 52 ms | 71 ms |
+| Same spot (< 0.3 m) chosen | once each | up to 4 times (one dead-end corner; then blacklisted) |
+
+**Run it:**
+
+| | Command (PowerShell, repo root) |
+|---|---|
+| The robot | `powershell -File ros2\run_explore.ps1`. Phone: **Arm & Balance**, **Manual**. Station Map page: **Explore (ROS)** |
+| The robot, start at once | `powershell -File ros2\run_explore.ps1 -Start` (it waits until the robot is armed in Manual) |
+| Sim | `powershell -File ros2\run_explore.ps1 -Sim -Start` (web UI http://localhost:8080), `-Maze` for the maze |
+| Options | `-Rviz`, `-ReturnHome` (drive back to the start when done), `-MaxMinutes 10`, `-MapDir ~/maps`, `-NoKeepout` (on by itself with `-Maze`) |
+| Start / stop by hand | `ros2 service call /explore/start std_srvs/srv/Trigger` (`/explore/stop`) |
+| Test | `wsl -d Ubuntu-24.04 -- bash ros2/scripts/sim_e2e_explore.sh ~/e2e room` (or `maze`; `KEEPOUT=false` for the maze) |
+
+The map is saved by itself when exploring ends (done, or stopped after more than 1 m²): `~/maps/explore-<YYYYmmdd-HHMM>` in WSL, the same files as `save_map.ps1` (`.posegraph`/`.data`, `.yaml`/`.pgm`, `.png`) + `.explore.json` (track, goals). Localize on it later: `run_localize.ps1 -Map explore-20261124-2130`.
+
+```mermaid
+flowchart LR
+  M["/map<br>(slam_toolbox)"] --> F["frontiers<br>cluster, min 0.3 m"]
+  C["global costmap"] --> V
+  F --> V["viewpoint<br>reachable free cell,<br>0.3 m from walls"]
+  V --> S["score<br>gain + size + opens up<br>- path length"]
+  S --> N["Nav2<br>NavigateToPose"]
+  N -- "reached: scan 1.5 s<br>frontier seen: next at once" --> F
+  N -- "failed / timeout / stuck 30 s" --> B["blacklist"] --> F
+```
+
+**How it works** (`sbr3_ros/frontier.py`, `explore.py`, `config/explore.yaml`):
+- **Frontiers:** free cells next to unknown cells, clustered; clusters shorter than 0.3 m are ignored, and so are small holes in the floor and 5-20 cm gaps in a sparsely seen wall.
+- **Reachable:** path lengths from the robot through known free space (Dijkstra), at least the robot radius from walls. No path, no goal. Nothing drives into the unknown.
+- **Viewpoint:** the free cell nearest the frontier with 0.3 m clearance and a low global-costmap cost (keep-out zones count). It faces the frontier.
+- **Score:** information gain (unknown share of a 3 x 3 m square) + size - 0.6 x path length, + a bonus when the frontier **opens up** into deep unknown (a doorway into an unseen room, not a shadow strip along a wall; the idea of `planner.py` `_opens_up`).
+- **On the way:** it re-plans every 2 s. When the target frontier is mapped, it goes on to the next one at once (most goals end like this: "seen"). A clearly better frontier also takes over.
+- **Failures:** a goal that Nav2 aborts, that times out, or that makes < 0.2 m progress in 30 s blacklists its frontier and viewpoint. A frontier still there after 2 visits is blacklisted (it cannot be seen from anywhere reachable). Limits: 150 goals, `max_duration_s`.
+- **Done:** no reachable frontier in 3 plans in a row.
+- **Safety:** it only sends Nav2 goals. `/cmd_vel` still goes through the adapter's gate (armed + STATION). It sends no goal unless the robot is armed in Manual without an E-stop; it waits ("waiting") and goes on when that is back.
+
+**Station link (#106):** the adapter passes the explorer's status to the bridge and the station's buttons back:
+
+| Topic | Message (std_msgs/String JSON) |
+|---|---|
+| `/explore/status` (latched, on each change, at least every 1 s) | `{"state", "target": [x_mm, y_mm] (station map frame) or null, "target_map": [x, y] (m), "frontiers", "area_m2", "reason", "running", "goals_ok", "goals_failed", "dist_m", "elapsed_s", "saved", "ok"}`. States: `waiting` `idle` `exploring` `navigating` `dwell` `done` `stopped` `saving` `error` |
+| `/station/explore_cmd` | `{"cmd": "explore", "run": true}` / `false`; `{"cmd": "save_map", "name": "kitchen"}` (no name: `explore-<date>-<time>`) |
+
+On the bridge WebSocket they are `{"t": "ros_explore", ...status}` (adapter to bridge) and `{"t": "ros_cmd", "cmd": "explore" | "save_map", ...}` (bridge to adapter).
+
+**Limits:**
+- The real robot is untested: its LD19 sees less than the sim's (dark / shiny surfaces), so expect more small frontiers; `min_size` and `goal_clear` are the knobs.
+- Mirrors, glass and open doors to outside: frontiers that never close are blacklisted after 2 visits or a failure, so it ends, but it may spend a few goals there.
+- Drawn walls in narrow corridors: in the sim maze the station's maze walls are also keep-out zones (+15 cm lethal + a 30 cm soft band). With them, Regulated Pure Pursuit kept stopping for "collision ahead" at the 0.7 m maze entrance (2 failed goals, 48 % mapped when stopped at 114 s). The maze test therefore runs with `KEEPOUT=false` (the sim's maze walls are real walls). Same at home: keep drawn walls out of narrow passages, or `keepout:=false`.
+- One plan takes ~50 ms in these rooms and ~0.2 s on a 25 x 25 m map (500 x 500 cells), so a whole flat is fine; much bigger maps would want a coarser planning grid.
+
 ## Gamepad (optional)
 
 `teleop_twist_joy` -> `/cmd_vel` -> the adapter's safety gate (armed + STATION only, 0.5 s deadman, 0.25 m/s / 1 rad/s caps, slew).
@@ -384,12 +464,13 @@ Tested in the sim with fake `/joy` messages (no pad here): stick pushed without 
 | `.../loc_monitor.py`, `scanfit.py` | scan fit, global relocalization, kidnap recovery (numpy) |
 | `.../places.py`, `patrol.py` | station places in the map frame, waypoint-follower patrol |
 | `.../keepout_mask.py`, `keepout.py` | station zones -> keepout filter mask, RViz markers |
+| `.../explore.py`, `frontier.py` | frontier explorer (Nav2 goals, status, map save); frontier search (numpy + scipy) |
 | `.../bag_tf_filter.py`, `pose_logger.py` | replay helper; map pose / speed / pitch to CSV |
-| `ros2/sbr3_ros/launch/` | `mapping`, `navigation` (`localization:=slam\|amcl\|bridge`), `localize` (saved map), `replay`, `teleop` |
-| `ros2/sbr3_ros/config/` | `slam_toolbox.yaml` (LD19, 5 cm, loop closure), `nav2.yaml` (controller, smoother, collision monitor, keepout, AMCL), `teleop_joy.yaml` |
+| `ros2/sbr3_ros/launch/` | `mapping`, `navigation` (`localization:=slam\|amcl\|bridge`), `localize` (saved map), `explore`, `replay`, `teleop` |
+| `ros2/sbr3_ros/config/` | `slam_toolbox.yaml` (LD19, 5 cm, loop closure), `nav2.yaml` (controller, smoother, collision monitor, keepout, AMCL), `teleop_joy.yaml`, `explore.yaml` |
 | `ros2/*.ps1`, `ros2/scripts/` | setup / run from PowerShell, build, `sim_e2e_*.sh` tests + their `*_report.py` / `nav_metrics.py`, `map_png.py` |
 
-Tests: `python -m unittest discover -s ros2/sbr3_ros/test` (adapter, scan fit, places, keep-out; Windows or WSL), and `station/bridge/tests/test_ros_stream.py` + `station/sim/tests/test_extras.py` inside the station suite. Sim end-to-end (WSL): `sim_e2e_bag.sh`, `sim_e2e_localize.sh`, `sim_e2e_places.sh`, `sim_e2e_goals.sh`, `sim_e2e_keepout.sh`, `sim_e2e_teleop.sh`.
+Tests: `python -m unittest discover -s ros2/sbr3_ros/test` (adapter, scan fit, places, keep-out, frontiers; Windows or WSL, frontiers need numpy + scipy), and `station/bridge/tests/test_ros_stream.py` + `station/sim/tests/test_extras.py` inside the station suite. Sim end-to-end (WSL): `sim_e2e_bag.sh`, `sim_e2e_localize.sh`, `sim_e2e_places.sh`, `sim_e2e_goals.sh`, `sim_e2e_keepout.sh`, `sim_e2e_teleop.sh`, `sim_e2e_explore.sh` (own ROS_DOMAIN_ID 43, workspace and sim ports: runs next to a live session).
 
 Sim-only options used by these tests (`python -m station.sim --lidar ...`): `--start x,y,deg` (start pose; odometry reads 0 there), `--teleport-file PATH` (kidnap: write `x y deg`), `--truth-log PATH` (true pose CSV), `--box cx,cy,w,h` (an obstacle that is not on the saved map). `ros2/scripts/sim_station.py` saves places / zones in the local sim as the phone would (it refuses any other bridge).
 

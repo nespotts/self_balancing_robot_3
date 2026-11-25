@@ -1,10 +1,11 @@
 #!/bin/bash
 # Start the ROS side in WSL (used by the ros2/*.ps1 scripts):
-#   bash ros2/scripts/run.sh mapping|nav|localize|teleop|adapter [URL|sim] [extra launch args...]
+#   bash ros2/scripts/run.sh mapping|nav|localize|explore|teleop|adapter [URL|sim] [extra launch args...]
 #   bash ros2/scripts/run.sh replay none bag:=... [launch args]
 #   URL "sim": start the simulator inside WSL too (python3 -m station.sim --lidar, port 8080) and use
 #   ws://127.0.0.1:8080/ws; mapping adds --tour (the sim drives a loop by itself). SBR3_SIM_ARGS: more sim options
-#   (e.g. "--start 1200,-400,90"; the PowerShell scripts pass it through WSLENV).
+#   (e.g. "--start 1200,-400,90"; the PowerShell scripts pass it through WSLENV). SBR3_SIM_ARM=1: arm the sim robot.
+#   SBR3_WS: another colcon workspace than ~/sbr3_ws.
 set -eo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -12,7 +13,7 @@ WHAT="${1:-mapping}"; shift || true
 URL="${1:-ws://192.168.0.209:8080/ws}"; shift || true
 bash "$HERE/build.sh" >/dev/null
 source /opt/ros/jazzy/setup.bash
-source "$HOME/sbr3_ws/install/setup.bash"
+source "${SBR3_WS:-$HOME/sbr3_ws}/install/setup.bash"
 # RViz on the GPU (WSLg's Mesa d3d12 driver -> the NVIDIA card) instead of llvmpipe software rendering (~3 CPU cores).
 # SBR3_SOFT_GL=1 keeps software rendering (if the GPU path ever misbehaves).
 if [ -z "$SBR3_SOFT_GL" ]; then
@@ -31,13 +32,16 @@ if [ "$URL" = "sim" ]; then
   echo "sim started (pid $SIM_PID, log /tmp/sbr3_sim.log, options: ${EXTRA:-none}); web UI: http://localhost:8080/ from Windows"
   URL="ws://127.0.0.1:8080/ws"
   sleep 3
+  # SBR3_SIM_ARM=1 (run_explore.ps1 -Sim -Start): arm the SIM robot in Manual once ROS is up, as you would in its web UI
+  if [ -n "$SBR3_SIM_ARM" ]; then (sleep 15; python3 "$HERE/sim_arm.py" "$URL") & fi
 fi
 case "$WHAT" in
   mapping)  ros2 launch sbr3_ros mapping.launch.py url:="$URL" "$@" ;;
   nav)      ros2 launch sbr3_ros navigation.launch.py url:="$URL" "$@" ;;
   localize) ros2 launch sbr3_ros localize.launch.py url:="$URL" "$@" ;;
+  explore)  ros2 launch sbr3_ros explore.launch.py url:="$URL" "$@" ;;
   teleop)   ros2 launch sbr3_ros teleop.launch.py adapter:=true url:="$URL" "$@" ;;
   replay)   ros2 launch sbr3_ros replay.launch.py "$@" ;;
   adapter)  ros2 run sbr3_ros adapter --ros-args -p url:="$URL" ;;
-  *) echo "usage: run.sh mapping|nav|localize|teleop|replay|adapter [URL|sim|none] [launch args]"; exit 2 ;;
+  *) echo "usage: run.sh mapping|nav|localize|explore|teleop|replay|adapter [URL|sim|none] [launch args]"; exit 2 ;;
 esac

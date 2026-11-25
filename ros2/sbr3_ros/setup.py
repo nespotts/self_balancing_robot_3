@@ -31,6 +31,7 @@ setup(
             "go_to = sbr3_ros.goal_test:main",
             "patrol = sbr3_ros.patrol:main",
             "keepout_mask = sbr3_ros.keepout_mask:main",
+            "explore = sbr3_ros.explore:main",
         ],
     },
 )

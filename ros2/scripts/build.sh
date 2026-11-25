@@ -1,10 +1,11 @@
 #!/bin/bash
 # Copy ros2/sbr3_ros into ~/sbr3_ws/src and build it (a copy, so colcon never writes into the Windows checkout).
+# SBR3_WS=/path: another workspace (e.g. the sim tests, next to a live session on ~/sbr3_ws).
 #   bash ros2/scripts/build.sh
 set -eo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PKG="$HERE/../sbr3_ros"
-WS="$HOME/sbr3_ws"
+WS="${SBR3_WS:-$HOME/sbr3_ws}"
 mkdir -p "$WS/src"
 rm -rf "$WS/src/sbr3_ros"
 cp -r "$PKG" "$WS/src/sbr3_ros"
