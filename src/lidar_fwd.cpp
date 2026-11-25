@@ -79,14 +79,17 @@ const char* LidarForwarder::status(uint32_t now_ms) {
     stat_first_ = true;
     return "lidar: LD19 bytes on Serial7 (D28), forwarding them as MSG_LIDAR_RAW";
   }
-  if (flowing_ && now_ms - last_byte_ms_ >= kSilentMs) {
+  // signed: service() may have stamped last_byte_ms_ with a millis() a little newer than this now_ms (the background
+  // loop's), and an unsigned difference would then wrap to "silent for 49 days" (false alarm every ~3 s, seen 2026-11-24)
+  const int32_t quiet_ms = (int32_t)(now_ms - last_byte_ms_);
+  if (flowing_ && quiet_ms >= (int32_t)kSilentMs) {
     flowing_ = false;
     snprintf(text_, sizeof(text_), "lidar: no bytes on Serial7 for %lu s (LD19 power, Tx wire on D28?); usb drop %lu, overflow %lu",
              (unsigned long)(kSilentMs / 1000), (unsigned long)drops_, (unsigned long)overflows_);
     return text_;
   }
   if (!flowing_) {
-    if (now_ms - last_byte_ms_ >= kSilentMs) return nullptr;
+    if (quiet_ms >= (int32_t)kSilentMs) return nullptr;
     flowing_ = true;
     stat_ms_ = now_ms;
     stat_bytes_ = bytes_;
