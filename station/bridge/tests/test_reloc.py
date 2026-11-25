@@ -109,6 +109,26 @@ class TestFind(unittest.TestCase):
             self.assertLess(abs((guess[2] + r["dth"] - true[2] + 180) % 360 - 180), 1.0, (true, r))
             self.assertGreaterEqual(r["margin"], reloc.ACCEPT["margin"])
 
+    def test_low_but_unique_fit_is_taken(self):
+        """#110, real robot: fits of 40-50 % on its own (smeared) map with nothing else near (margin 100 %) were 'no
+        fit' for minutes. A scan jittered by 70 mm here fits ~50 %: taken as unique (LidarMatch confirms it)."""
+        true, guess = (2700, 300, 140), (1234.0, -321.0, 77.0)
+        rng = random.Random(11)
+        pts = seen_from_guess(scan(self.room, *true, self.rng), true, guess)
+        pts = [(x + rng.gauss(0, 70), y + rng.gauss(0, 70)) for x, y in pts]
+        r = reloc.find(self.fz, self.pyr, [pts], guess[0], guess[1])
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r.get("relaxed"), r)
+        self.assertLess(r["score"], reloc.ACCEPT["score"])
+        self.assertGreaterEqual(r["margin"], reloc.UNIQUE["margin"])
+        self.assertLess(math.hypot(r["x"] - true[0], r["y"] - true[1]), 80, r)
+        old = dict(reloc.UNIQUE)
+        try:
+            reloc.UNIQUE["score"] = 2.0                 # without the rule: the #105 verdict
+            self.assertEqual(reloc.find(self.fz, self.pyr, [pts], guess[0], guess[1])["why"], "no fit")
+        finally:
+            reloc.UNIQUE.update(old)
+
     def test_symmetric_room_is_ambiguous(self):
         room = Segs(_box(0, 0, 4000, 3000))
         rng = random.Random(8)

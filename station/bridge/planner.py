@@ -20,6 +20,7 @@ import os
 import time
 
 from . import link_protocol as lp
+from .loopprof import worker_yield as _yield     # (#110) long loops in the worker thread give way to the event loop
 from .occgrid import UNKNOWN, UNIT
 from .places import HOME
 
@@ -154,6 +155,7 @@ class CostMap:
         nb = w * f
         state, part = bytearray(), bytearray()
         for cy in range(self.h):
+            _yield()
             acc = 0
             for k in range(f):
                 j = self.fy0 + cy * f + k
@@ -196,7 +198,9 @@ class CostMap:
         ri = int(math.floor(r))
         spans = [(dy, int(math.floor(math.sqrt(max(0.0, r * r - dy * dy))))) for dy in range(-ri, ri + 1)]
         fill = bytes([val]) * (2 * ri + 3)
+        yl = _yield
         for i in cells:
+            yl()
             cx, cy = i % w, i // w
             for dy, dx in spans:
                 y = cy + dy
@@ -324,8 +328,10 @@ class CostMap:
         best = {s: 0.0}
         parent = {s: None}
         heap = [(0.0, 0.0, s)]
+        yl = _yield
         while heap:
             _, d, i = heapq.heappop(heap)
+            yl()
             if i == g:
                 break
             if d > best.get(i, 1e18):
@@ -437,6 +443,7 @@ class CostMap:
         for (ax, ay), (bx, by) in zip(pts, pts[1:]):
             n = max(1, int(math.hypot(bx - ax, by - ay) / step_mm))
             for k in range(n + 1):
+                _yield()
                 x, y = ax + (bx - ax) * k / n, ay + (by - ay) * k / n
                 i = self.cell(x, y)
                 if i is None:
@@ -775,8 +782,10 @@ class CostMap:
         parent = {s: None}
         heap = [(0.0, s)]
         front = []
+        yl = _yield
         while heap:
             d, i = heapq.heappop(heap)
+            yl()
             if d > dist[i]:
                 continue
             ix = i % w
@@ -809,6 +818,7 @@ class CostMap:
         fset = set(front)
         clusters = []
         while fset:
+            _yield()
             seed = fset.pop()
             comp, q = [seed], [seed]
             while q:

@@ -9,7 +9,9 @@ Line format (one JSON array per line, compact):
 t = seconds since the session started (Pi clock, 3 decimals).
 CSV export of tlm / rng rows: see to_csv().
 """
+import itertools
 import json
+import operator
 import os
 import re
 import time
@@ -19,6 +21,12 @@ from . import link_protocol as lp
 TLM_COLS = list(lp.TELEMETRY_FIELDS)
 RNG_COLS = list(lp.RANGE_FIELDS)
 NAME_RE = re.compile(r"^sbr3-\d{8}-\d{6}(-\d+)?\.jsonl$")
+# (#110) 100 telemetry rows a second: the values in schema order and rounded in C (round(int, 4) is the int), one
+# encoder for all rows (json.dumps with separators= builds a new one per call)
+_TLM_GET = operator.itemgetter(*TLM_COLS)
+_RNG_GET = operator.itemgetter(*RNG_COLS)
+_FOUR = itertools.repeat(4)
+_encode = json.JSONEncoder(separators=(",", ":")).encode
 
 
 def _r(v):
@@ -70,7 +78,7 @@ class SessionLog:
         if not self.f:
             return
         try:
-            self.f.write(json.dumps(row, separators=(",", ":")) + "\n")
+            self.f.write(_encode(row) + "\n")
             now = time.monotonic()
             if now - self.last_flush > 2.0:
                 self.f.flush()
@@ -85,11 +93,15 @@ class SessionLog:
     # -- records --
     def tlm(self, d):
         if self.f:
-            self._w(["tlm", self._t()] + [_r(d[c]) for c in TLM_COLS])
+            row = ["tlm", self._t()]
+            row += map(round, _TLM_GET(d), _FOUR)
+            self._w(row)
 
     def rng(self, d):
         if self.f:
-            self._w(["rng", self._t()] + [_r(d[c]) for c in RNG_COLS])
+            row = ["rng", self._t()]
+            row += map(round, _RNG_GET(d), _FOUR)
+            self._w(row)
 
     def record(self, kind, *vals):
         if self.f:

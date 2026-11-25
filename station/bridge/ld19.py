@@ -56,15 +56,42 @@ def crc8(data):
     return c
 
 
-class Packet:
-    __slots__ = ("speed_dps", "start", "end", "ts_ms", "pts", "t")
+_CRC2 = [None]                 # two bytes at a time: table[(c << 8) ^ (b0 << 8 | b1)] (64 KB, built on first use)
+_WORDS = struct.Struct(">%dH" % ((PKT_LEN - 1) // 2))
 
-    def __init__(self, speed_dps, start, end, ts_ms, pts):
+
+def crc8_packet(frame):
+    """crc8 of a packet's first 46 bytes, a 16-bit word per step (#110: half the Python steps per packet)."""
+    t = _CRC2[0]
+    if t is None:
+        T = CRC_TABLE
+        t = _CRC2[0] = bytes(T[T[i >> 8] ^ (i & 0xFF)] for i in range(65536))
+    c = 0
+    for w in _WORDS.unpack_from(frame):
+        c = t[(c << 8) ^ w]
+    return c
+
+
+class Packet:
+    """One packet. dist / qual: the 12 distances (mm) / intensities as tuples (lidar.py works on these directly, #110);
+    pts: [(angle deg 0..360, distance mm, intensity)] x 12, built on first use."""
+    __slots__ = ("speed_dps", "start", "end", "ts_ms", "dist", "qual", "step", "t", "_pts")
+
+    def __init__(self, speed_dps, start, end, ts_ms, dist, qual):
         self.speed_dps = speed_dps
         self.start, self.end = start, end          # deg, 0 <= start < 360, end may exceed 360 (wrapped)
         self.ts_ms = ts_ms
-        self.pts = pts                              # [(angle deg 0..360, distance mm, intensity)] x 12
+        self.dist, self.qual = dist, qual
+        self.step = (end - start) / (POINTS - 1)    # deg between two points
         self.t = 0.0                                # Pi clock time of the packet's last point (set by Ld19Stream)
+        self._pts = None
+
+    @property
+    def pts(self):
+        if self._pts is None:
+            s, step = self.start, self.step
+            self._pts = [((s + step * i) % 360.0, d, q) for i, (d, q) in enumerate(zip(self.dist, self.qual))]
+        return self._pts
 
 
 def parse_packet(b):
@@ -85,9 +112,9 @@ def _decode(f):
         e += 360.0                                  # the packet crosses 360 -> 0
     if e - s > MAX_SPAN_DEG:
         raise ValueError("LD19 angle span %.1f deg" % (e - s))
-    step = (e - s) / (POINTS - 1)
-    pts = [((s + step * i) % 360.0, f[4 + 2 * i], f[5 + 2 * i]) for i in range(POINTS)]
-    return Packet(speed, s % 360.0, e, ts, pts)
+    p = Packet(speed, s % 360.0, e, ts, f[4:4 + 2 * POINTS:2], f[5:5 + 2 * POINTS:2])
+    p.step = (e - s) / (POINTS - 1)
+    return p
 
 
 def encode_packet(points, start_deg, end_deg, speed_dps=3600, ts_ms=0):
@@ -134,7 +161,7 @@ class Ld19Stream:
                 pos = j
                 continue
             frame = bytes(buf[pos:pos + PKT_LEN])
-            if crc8(frame[:PKT_LEN - 1]) != frame[PKT_LEN - 1]:
+            if crc8_packet(frame) != frame[PKT_LEN - 1]:
                 self.crc_errors += 1
                 self.bytes_dropped += 1
                 pos += 1
@@ -178,11 +205,12 @@ class Ld19Stream:
 
 class Scan:
     """One revolution: packets in rotation order. points() yields (angle deg CW from the sensor front, mm, intensity, t s)."""
-    __slots__ = ("seq", "packets", "speed_dps", "t0", "t1")
+    __slots__ = ("seq", "packets", "speed_dps", "t0", "t1", "turn")
 
     def __init__(self, seq, packets):
         self.seq = seq
         self.packets = packets
+        self.turn = False                 # lidar.Turn once deskewed (None: could not be), False: not yet (#110)
         self.speed_dps = sum(p.speed_dps for p in packets) / max(1, len(packets))
         self.t0 = packets[0].t - POINTS / POINT_RATE
         self.t1 = packets[-1].t
