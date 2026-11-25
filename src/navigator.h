@@ -43,6 +43,13 @@
 //   Lidar stuck (#79, EVT_LINK_STUCK): spinning wheels count as odometry progress, so the bridge's LD19 matcher
 //   reports "wheels turn, robot still"; the next driving stuck check (within 500 ms, while trying to drive) takes it
 //   the same way. Turning in place needs no help: the heading is the gyro's.
+// Contacts (#104, src/contact.h): obstacles below the lidar's scan plane are found by touch. Driving forward in GOTO /
+//   EXPLORE, a BUMP (speed falls far below the command with a pitch-rate spike) or STUCK (no progress for 0.4 s while
+//   the command and the velocity loop's lean push on) -> BLOCKED, log "nav: contact bump|stuck at x,y ...", back off
+//   nav.stuck_backoff_mm (rear corridor checked, as stuck), and MSG_CONTACT to the bridge (contact point on the body's
+//   front edge, pose frame): it marks the spot and its planner replans round it. GOTO waits kContactWaitMs for that
+//   new list, then tries again; EXPLORE waits for a new list. STATION: reported only (someone drives). HOLD: never.
+//   nav.stuck_ms 0 turns these checks off too.
 // No fresh lidar frame and no range readings for 3 s (rng.enable 0, sensor fault): no obstacle stop is possible,
 //   so EXPLORE pauses (stands still, keeps its state) and GOTO drives at most nav.blind_speed (0 = GOTO pauses
 //   too). Without the sweep that is 500 ms after the last lidar frame (lidar silent / stopped, bridge gone).
@@ -51,6 +58,7 @@
 #include <stdint.h>
 
 #include "config.h"
+#include "contact.h"
 #include "protocol/link_protocol.h"
 #include "protocol/radio_protocol.h"
 
@@ -63,6 +71,10 @@ struct NavIn {
   float speed = 0, yaw_rate = 0;      // measured mm/s, deg/s
   float max_speed = 450;              // drv.max_speed x remote speed limit
   float max_turn = 180;               // drv.max_turn
+  // contact detection (#104): the balance loop's last step
+  float pitch_rate = 0;               // deg/s, + = pitching forward
+  float cmd_speed = 0;                // the controller's ramped speed setpoint, mm/s
+  float vel_out = 0;                  // velocity loop lean, deg
 };
 
 class Navigator {
@@ -112,6 +124,11 @@ class Navigator {
   // One queued log line ("nav: ..."), or nullptr.
   const char* peekLog() const { return log_n_ ? log_[log_head_] : nullptr; }
   void popLog();
+  // Contact report (#104): MSG_CONTACT due (the newest one, if two came before it went out).
+  bool contactDue() const { return contact_due_; }
+  const ContactFrame& contactFrame() const { return contact_frame_; }
+  void contactSent() { contact_due_ = false; }
+  bool contact() const { return contact_; }   // BLOCKED after a contact (backing off / waiting)
 
   static bool navMode(uint8_t m) { return m == MODE_GOTO || m == MODE_EXPLORE || m == MODE_HOLD; }
 
@@ -131,6 +148,23 @@ class Navigator {
   void logBlind(uint8_t mode);
   void setTarget(const NavIn& in, float x, float y);
   void log(const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+  void contactCheck(const NavIn& in);                       // #104: the detector, then the reaction
+  void startContact(const NavIn& in, uint8_t kind);
+  void reportContact(const NavIn& in, uint8_t kind, uint8_t flags);
+
+  // contacts (#104)
+  ContactDetector cdet_;
+  bool contact_watch_ = false;        // the last step drove forward (GOTO / EXPLORE): watch for contacts
+  bool contact_cruise_ = false;       // ... not slowing down for the waypoint
+  bool contact_ = false;              // BLOCKED by a contact; GOTO: waiting for a new list
+  uint32_t contact_ms_ = 0;
+  float contact_hx_ = 0, contact_hy_ = 0;  // where it backed off to (held while it waits)
+  bool contact_due_ = false;
+  ContactFrame contact_frame_ = {};
+  uint8_t contact_seq_ = 0;
+  uint32_t report_ms_ = 0;            // STATION: last report (one per kReportGapMs)
+  static constexpr uint32_t kContactWaitMs = 4000, kReportGapMs = 3000;
+  static constexpr float kContactAhead = 50.0f;   // contact point: the body's front edge (45 mm) + 5, from the axle
 
   float wx_[WAYPOINT_MAX] = {}, wy_[WAYPOINT_MAX] = {};
   uint8_t n_ = 0, idx_ = 0;

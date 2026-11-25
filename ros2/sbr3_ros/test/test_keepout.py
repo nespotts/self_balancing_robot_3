@@ -37,6 +37,19 @@ class KeepoutTest(unittest.TestCase):
         self.assertEqual(self.cell(mask, origin, 0.9, 0.0), 100)  # near the fence, inside
         self.assertEqual(self.cell(mask, origin, 1.5, 0.0), 100)  # outside
 
+    def test_bump_marks(self):
+        """#104: the robot's invisible-obstacle marks keep the robot out, like a small no-go zone."""
+        pts = [[2000 + 70 * math.cos(k * math.pi / 6), 70 * math.sin(k * math.pi / 6)] for k in range(12)]
+        items = [{"id": "b1", "kind": "bump", "x": 2000, "y": 0, "r": 70, "pts": pts}]
+        T = (0.0, 0.0, 0.0)
+        origin, w, h = ko.mask_extent(None, items, T)
+        mask, used = ko.build_mask(items, T, origin, self.RES, w, h, inflate=0.15, soft=0)
+        self.assertEqual(used, 1)
+        self.assertEqual(self.cell(mask, origin, 2.0, 0.0), 100)  # inside
+        self.assertEqual(self.cell(mask, origin, 2.2, 0.0), 100)  # within inflate of its edge
+        self.assertEqual(self.cell(mask, origin, 2.4, 0.0), 0)
+        self.assertIn("b1", ko.zones_signature(items))
+
     def test_transform_and_maze(self):
         items = [{"id": "w1", "kind": "wall", "pts": [[1000, 0], [1000, 500]]},
                  {"id": "m2", "kind": "maze", "walls": [[0, 2000, 500, 2000]]}]

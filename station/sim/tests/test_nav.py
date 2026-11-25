@@ -425,8 +425,9 @@ class TestWalls(unittest.TestCase):
     """Issue #62: close to and parallel with a wall (the right wall, x = 4000; the sim's body is a 90 mm circle
     that cannot slide along a wall it touches). old = side check and stuck detection off (the old firmware)."""
 
-    def wall_run(self, start, points, old=False, params=None, seconds=40.0, watch=None):
+    def wall_run(self, start, points, old=False, params=None, seconds=40.0, watch=None, contact=True):
         n = NavRun(seed=21)
+        n.r.nav.contact_on = contact       # sim-only: the contact checks (#104) would take a wall it drives into first
         p = dict(params or {})
         if old:
             p.update({"nav.side_min_mm": 0.0, "nav.stuck_ms": 0.0})
@@ -482,7 +483,7 @@ class TestWalls(unittest.TestCase):
                 seen["min_x"] = min(seen.get("min_x", 1e9), n.r.X)
                 seen.setdefault("states", set()).add(n.r.nav.state)
         n = self.wall_run((3000.0, 1500.0, 0.0), [(4100.0, 1500.0)], seconds=20.0, watch=watch,
-                          params={"rng.obstacle_mm": 0.0, "nav.side_min_mm": 0.0})
+                          params={"rng.obstacle_mm": 0.0, "nav.side_min_mm": 0.0}, contact=False)
         self.assertTrue(any(l.startswith("nav: stuck, no progress driving") for l in n.logs), n.logs)
         self.assertIn("x", seen)
         self.assertGreater(seen["x"], 4000.0 - simmod.ROBOT_RADIUS - 5.0)   # it was at the wall

@@ -162,6 +162,7 @@ class OfflineBridge:
         self.waypoints = []
         self.lines = []
         self.robot_logs = []
+        self.contacts = []            # (MSG_CONTACT dict, bump mark, merged), #104
         self.planner = Planner(self, NAV_STATE_NAMES, clock=lambda: robot.t, sync=True)
 
     def say(self, text):
@@ -181,6 +182,13 @@ class OfflineBridge:
             self.waypoints = pts if replace else self.waypoints + pts
         elif m["t"] == "set_mode":
             r.set_mode(m["mode"], arm=bool(m.get("arm")))
+
+    def on_contact(self, d):
+        """MSG_CONTACT (#104), as Bridge.on_contact: a bump mark on the map, the planner replans round it."""
+        mark, merged = self.mapper.add_contact(d)
+        self.contacts.append((d, mark, merged))
+        self.say("robot: contact %s -> bump mark %s%s" % (d["name"], mark["id"], " (again)" if merged else ""))
+        self.planner.on_contact(mark)
 
     def update(self):
         r = self.robot
@@ -206,6 +214,8 @@ def plan_offline(robot, mapper, command, max_s=300.0, on_step=None):
                 text = lp.decode_log(p)
                 b.robot_logs.append(text)
                 b.planner.on_log(text)            # as Bridge does ("nav: stuck", #62)
+            elif t == lp.MSG_CONTACT:
+                b.on_contact(lp.decode_contact(p))   # a bump mark, the planner replans round it (#104)
 
     robot.set_mode(lp.MODE_BALANCE, arm=True)
     t_end = robot.t + 2.5

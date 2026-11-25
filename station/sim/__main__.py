@@ -85,12 +85,16 @@ def main(argv=None):
                     help="10 Hz CSV of the true pose and the odometry (wall time), for the ROS tests")
     ap.add_argument("--box", action="append", default=[], metavar="CX,CY,W,H",
                     help="an extra box in the room (mm), e.g. an obstacle that is not on a saved map; repeatable")
+    ap.add_argument("--low", action="append", default=[], metavar="CX,CY,W,H[,HEIGHT]",
+                    help="a low box (#104): it stops the robot but the lidar and the range sweep look over it "
+                         "(height mm, default 60); the robot finds it by touch and the map gets a bump mark; repeatable")
     a = ap.parse_args(argv)
     from . import extras
     try:
         start = extras.parse_pose(a.start) if a.start else None
         for b in a.box:
             extras.parse_box(b)
+        lows = [extras.parse_low(b) for b in a.low]
     except ValueError as e:
         ap.error(str(e))
     host, _, port = a.listen.rpartition(":")
@@ -105,6 +109,8 @@ def main(argv=None):
         robot.room = Room(empty=True)
     if a.box:
         extras.add_boxes(robot, a.box)
+    for b in lows:
+        robot.room.add_low(*b)
     if start:
         extras.teleport(robot, *start, reset_odom=True)
     if a.stiction:

@@ -84,9 +84,55 @@ GOTO and EXPLORE follow the list the same way; HOLD holds the spot it started at
 | Pose reset | clears the list, points and hold point (ghosts move into the new frame) |
 | GO_HOME | list = [first waypoint, or the origin], mode GOTO (never arms) |
 | NavStatusFrame | at once on a change of state / index / count, else 2 Hz in GOTO/EXPLORE/HOLD; `obstacle_mm` = blocking range |
-| Log | `nav: blocked, obstacle at 287 mm (waypoint 2/2)`, `nav: clear …`, `nav: reached 1/3, 12 mm off`, `nav: arrived`, `nav: stuck, no progress driving for 2.5 s (waypoint 1/2)`, `nav: stuck, wheels turn but the lidar sees no motion (waypoint 1/2)`, `nav: too close to turn (92 mm), stepping back` |
+| Log | `nav: blocked, obstacle at 287 mm (waypoint 2/2)`, `nav: clear …`, `nav: reached 1/3, 12 mm off`, `nav: arrived`, `nav: stuck, no progress driving for 2.5 s (waypoint 1/2)`, `nav: stuck, wheels turn but the lidar sees no motion (waypoint 1/2)`, `nav: too close to turn (92 mm), stepping back`, `nav: contact bump at 1154,-23 (…)` (below) |
+
+## Contacts: obstacles below the lidar (issue #104)
+
+`src/contact.*`, used by the navigator. The LD19 scans at ~208 mm (the sweep at ~222 mm): shoes, toys, a low box, a step are invisible. The robot finds
+them by touch, backs off, and the bridge marks the spot so the planner goes round it.
+
+```
+  driving at 250 ──┐ wheel stops    BUMP: speed falls far below the command   ──>  BLOCKED, back off
+                   v ■ shoe               + pitch-rate spike (body thrown on)       "nav: contact bump at x,y"
+  pushing at 120 ──> ■             STUCK: no new ground for 0.4 s while the         MSG_CONTACT ──> bridge:
+                     (still)              command + velocity-loop lean push on       orange bump mark ● on the map
+```
+
+| | |
+|---|---|
+| Watched | GOTO / EXPLORE while driving forward; STATION while it commands motion (reported only, the driver keeps control). Never HOLD (pushed by hand), BALANCE, MANUAL, turning in place. `nav.stuck_ms` 0 turns it off |
+| BUMP | command ≥ 100 mm/s and steady; speed was ≥ 0.6 × command in the last 120 ms and fell by ≥ max(70 mm/s, 40 %) to < 0.6 × command, with a pitch rate ≥ 80 °/s toward the motion (normal balancing ~20 °/s RMS, peaks ~65; hard bumps 100–126) → it must stay < 0.5 × command for 80 ms (stopped or bounced back; rolling over a door strip cancels it). A fall within 0.6 s confirms it too (`fell`) |
+| STUCK | command ≥ 100 mm/s and **cruising** (not slowing for the waypoint), it got going (≥ 50 mm/s, 0.5 s after the command came: a start rolls back first), then no new ground (10 mm) for 0.4 s while the velocity-loop lean pushes on (≥ 0.6°). Rocking against it counts. A lidar stuck (`EVT_LINK_STUCK`) waiting confirms it at 0.2 s (`lidar`) |
+| Latency (sim) | bump at 200–250 mm/s: ~0.1 s after the impact; stuck at 100–150 mm/s: ~0.4 s (the odometry stuck check: 2.5 s) |
+| Reaction | BLOCKED, back off `nav.stuck_backoff_mm` (rear corridor checked), then **hold** that spot; GOTO waits 4 s for a new list (the planner's route round the mark) and then tries again; EXPLORE waits for a new list |
+| Report | `MSG_CONTACT` (link v8): kind, contact point (pose frame, on the body's front edge, 50 mm ahead of the axle), heading of travel, peak dps / stalled ms, flags `lidar` / `fell` / `reported only` |
+| Log | `nav: contact bump at 1154,-23 (145 dps, backing off)`, `nav: contact stuck at 1160,-23 (400 ms, backing off)`, `nav: contact stuck at … (… reported only)` |
+| Bridge | a **bump mark**: disc r 70 mm, 35 mm past the contact point, zones kind `bump` (saved in `<map>.zones.json`). Planner: a wall (inflated by radius + margin). Not the watchdog (the robot is standing at it). A contact within 100 mm of a mark moves it (hits + 1). Map ⋯ → **Clear bump marks**; Draw → delete tool removes one; API `{"t": "zones", "action": "clear", "kind": "bump"}` ([api.md](api.md#zones)) |
+| Thresholds | compile-time (`ContactDetector::k*`), no params |
+
+<p>
+<img src="../station/docs/screenshots/phone-bump-mark.png" width="30%">
+<img src="../station/docs/screenshots/phone-bump-menu.png" width="30%">
+</p>
+
+Sim: a route straight through a low box at (1.3, 0) m. It bumped (orange ! mark), backed off, and the replanned route went round.
+
+**Check it on the robot** (Logs tab, map; GOTO on a clear floor first):
+
+| Try | Expect |
+|---|---|
+| GOTO across the room and back, a few times (starts, stops, turns) | no `nav: contact` lines |
+| a shoe in the way at 250 mm/s | `contact bump` (may still fall over: the mark is made), backs off, orange mark, route goes round |
+| a heavy box at `nav.max_speed` 120 | `contact stuck` ~0.4 s after it stops |
+| over the door strip / onto the carpet | no contact (if it does: the session log has the telemetry, report it) |
+| HOLD, push it back by hand and hold it | no contact, no mark |
+| Map ⋯ → Clear bump marks | marks gone, routes go straight again |
+
+Simulator: `--low CX,CY,W,H[,HEIGHT]` puts a low box in the room (the lidar and the sweep look over it; the body stops
+at it with a pitch kick). Tests: `test/host/nav_sim.cpp` (`testContact*`), `station/sim/tests/test_contact.py`,
+`station/bridge/tests/test_contacts.py`.
 
 Simulator: `station/sim/sim.py` `Navigator` is a line-by-line port (same params, states, logs);
-tests `station/sim/tests/test_nav.py`.
+tests `station/sim/tests/test_nav.py`; `station/sim/contact.py` ports `src/contact.cpp`.
 
 Back: [firmware index](firmware.md).

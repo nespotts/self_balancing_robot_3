@@ -63,6 +63,8 @@ SQUEEZE_CHECKS = 400      # explore, squeezing: frontier spots checked (100 mm b
 SCAN_WAIT_S = 6.0         # explore: wait at most this long at a frontier goal for the stop-and-scan (#71)
 SCAN_EVERY_S = 10.0       # explore: a new frontier goal after this long without a scan: stop and scan first
 DRIFT_RESEND_MM = 20.0    # LD19 scan matching (#78): resend the route once its next waypoints moved this much
+CONTACT_REPLAN_S = 2.5    # a contact (#104): replan this long after (the back-off of nav.stuck_backoff_mm is done;
+                          # GOTO waits 4 s for the new route before it tries the old one again)
 
 
 def clean_settings(s, base):
@@ -663,6 +665,17 @@ class Planner:
         self.squeeze = False
         self.replan_at = self.clock() + 5.0       # its back-off ends within 5 s
         self._set_status("robot stuck: backing off, replanning with +%d mm margin" % self.boost)
+
+    def on_contact(self, mark):
+        """The robot touched something the lidar can't see (#104): the bridge put a bump mark there (a wall for the
+        costmap). The robot backs off and waits (GOTO: 4 s, EXPLORE: for a new list): replan round the mark
+        once it has backed off (no extra margin - the mark is the obstacle)."""
+        if self.mode == "idle":
+            return
+        self.squeeze = False
+        self.replan_at = self.clock() + CONTACT_REPLAN_S
+        self.last_check = self.clock()
+        self._set_status("robot touched something the lidar can't see: bump mark %s, replanning" % mark["id"])
 
     def _success(self):
         """A goal reached: the stuck boost decays."""
