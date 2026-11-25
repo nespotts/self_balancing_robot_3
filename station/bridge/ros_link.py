@@ -189,5 +189,5 @@ class RosLink:
         if not self.connected():
             return False
         r = self.command({"t": "ros", "action": "initial_pose", "frame": "station", "x": float(x_mm), "y": float(y_mm),
-                          "yaw": math.radians(float(heading_deg))}, who)
+                          "yaw": math.radians((float(heading_deg) + 180.0) % 360.0 - 180.0)}, who)
         return bool(r and r.get("t") == "ros_sent")
