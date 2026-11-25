@@ -1,0 +1,34 @@
+# Frontier explorer (explore node, issue #107). Distances in m, times in s. See sbr3_ros/frontier.py for the search.
+explore:
+  ros__parameters:
+    autostart: false              # true: start at once (else: station "Explore (ROS)", /explore/start, explore_cmd)
+    require_station: true         # send goals only while the robot is armed in STATION (Manual), no E-stop
+    map_dir: "~/maps"             # saved maps: <map_dir>/explore-<YYYYmmdd-HHMM>.{posegraph,data,yaml,pgm,png,explore.json}
+    auto_save: true               # save when exploring ends (done, or stopped after > 1 m^2)
+    return_home: false            # drive back to the start pose when done
+    # frontiers
+    min_size: 0.30                # ignore frontier clusters shorter than this
+    robot_radius: 0.12            # = nav2.yaml robot_radius
+    goal_clear: 0.30              # viewpoint this far from walls when there is room ...
+    goal_max_cost: 60             # ... and at most this global costmap cost (0..100; 99 inscribed)
+    view_r: 0.80                  # viewpoint within this of its frontier
+    gain_r: 1.50                  # information gain: unknown share of a 3 x 3 m square around the frontier
+    open_look: 0.50               # "opens up": unknown at least open_depth deep within open_look beyond it
+    open_depth: 0.25
+    w_gain: 2.0                   # score = w_gain * gain + w_size * size (<= 3 m) + w_open * opens - w_dist * path m
+    w_size: 0.5
+    w_open: 1.0
+    w_dist: 0.6
+    black_r: 0.40                 # a failed goal blocks frontier cells within this
+    # goals
+    plan_period: 1.0
+    replan_period: 2.0            # while driving: re-plan; the target frontier mapped -> next goal at once
+    switch_margin: 1.0            # ... or a frontier this much better -> switch
+    dwell_s: 1.5                  # stand still at a reached goal (a clean LD19 turn)
+    done_checks: 3                # plans in a row without a reachable frontier -> done
+    progress_s: 30.0              # less than 0.2 m of progress in this long -> give the goal up
+    goal_timeout_min: 40.0        # goal timeout: max(this, 20 + 2.5 x path / speed_est)
+    speed_est: 0.12
+    visits_max: 2                 # reached this often and still a frontier -> blacklisted
+    max_goals: 150
+    max_duration_s: 0.0           # 0 = no limit
