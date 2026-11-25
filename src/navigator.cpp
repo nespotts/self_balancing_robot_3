@@ -72,6 +72,7 @@ void Navigator::listChanged(bool replaced) {
   stop_since_ = 0;
   stuck_ = away_ = away_done_ = false;
   stuck_ms_ = 0;
+  contact_ = false;  // (#104) the planner's new route goes round the mark
 }
 
 // ------------------------------------------------------------------ inputs
@@ -169,6 +170,8 @@ void Navigator::onModeChange(const NavIn& in) {
   stuck_ = away_ = away_done_ = false;
   stuck_ms_ = 0;
   lidar_stuck_ms_ = 0;
+  contact_ = contact_watch_ = launch_ = false;
+  cdet_.reset();
   if (in.mode == MODE_GOTO || in.mode == MODE_EXPLORE) {
     if (idx_ >= n_) idx_ = 0;  // list done (or empty): start over
     phase_ = n_ ? SEEK : DONE;
@@ -358,6 +361,71 @@ void Navigator::startStuck(const NavIn& in, bool turning) {
   obst_ = front_;
 }
 
+// Contacts (#104): obstacles under the lidar's scan plane, found by touch (src/contact.h). Watching: GOTO / EXPLORE
+// when the last step drove forward, STATION while it commands motion (reported only). nav.stuck_ms 0 = off.
+void Navigator::contactCheck(const NavIn& in) {
+  const bool station = in.mode == MODE_STATION;
+  ContactIn c;
+  c.now_ms = in.now_ms;
+  c.upright = in.upright;
+  c.cmd = in.cmd_speed;
+  c.speed = in.speed;
+  c.pitch_rate = in.pitch_rate;
+  c.vel_out = in.vel_out;
+  c.lidar_stuck = lidar_stuck_ms_ != 0;
+  c.cruise = station || contact_cruise_;
+  const bool nav = (in.mode == MODE_GOTO || in.mode == MODE_EXPLORE) && contact_watch_ && state_ == NAV_DRIVING;
+  c.watch = P(P_NAV_STUCK_MS) > 0 && (nav || (station && in.live && in.now_ms - report_ms_ >= kReportGapMs));
+  contact_watch_ = false;  // (the driving branch sets it again)
+  const uint8_t kind = cdet_.update(c);
+  if (!kind) return;
+  if (cdet_.flags() & LINK_CONTACT_LIDAR) lidar_stuck_ms_ = 0;  // used up
+  if (station) {
+    report_ms_ = in.now_ms ? in.now_ms : 1;
+    reportContact(in, kind, cdet_.flags() | LINK_CONTACT_REPORT);
+  } else if (in.mode == MODE_GOTO || in.mode == MODE_EXPLORE) {
+    startContact(in, kind);
+  }
+}
+
+void Navigator::reportContact(const NavIn& in, uint8_t kind, uint8_t flags) {
+  const float h = cdet_.dir() > 0 ? in.heading : in.heading + 180.0f;
+  ContactFrame& f = contact_frame_;
+  f.kind = kind;
+  f.seq = ++contact_seq_;
+  f.mode = in.mode;
+  f.flags = flags;
+  f.x_mm = in.x + kContactAhead * cosf(h * kDeg);
+  f.y_mm = in.y + kContactAhead * sinf(h * kDeg);
+  f.heading_deg = h;
+  f.value = cdet_.value();
+  contact_due_ = true;
+  char why[28];
+  if (kind == LINK_CONTACT_BUMP) snprintf(why, sizeof(why), "%.0f dps", (double)f.value);
+  else snprintf(why, sizeof(why), "%.0f ms", (double)f.value);
+  log("nav: contact %s at %.0f,%.0f (%s%s%s, %s)", kind == LINK_CONTACT_BUMP ? "bump" : "stuck", (double)f.x_mm,
+      (double)f.y_mm, why, flags & LINK_CONTACT_LIDAR ? ", lidar" : "", flags & LINK_CONTACT_FELL ? ", fell" : "",
+      flags & LINK_CONTACT_REPORT ? "reported only" : "backing off");
+}
+
+void Navigator::startContact(const NavIn& in, uint8_t kind) {
+  reportContact(in, kind, cdet_.flags());
+  contact_ = stuck_ = blocked_ = latched_ = true;  // GOTO: latched_ until a new list or kContactWaitMs
+  contact_ms_ = in.now_ms;
+  blk_h_ = in.heading;
+  driving_ = true;  // the BLOCKED branch backs off
+  stuck_ms_ = 0;
+  dead_back_ = away_ = false;
+  back_mm_ = P(P_NAV_STUCK_BACK);  // (always driving forward here: back off backwards, the rear corridor checked)
+  backing_ = back_mm_ > 0;
+  back_x_ = contact_hx_ = in.x;
+  back_y_ = contact_hy_ = in.y;
+  back_ms_ = in.now_ms;
+  speed_ = turn_ = 0;
+  state_ = NAV_BLOCKED;
+  obst_ = front_;
+}
+
 float Navigator::limitSpeed(float v, float vmax, bool apply) {
   obst_flag_ = false;
   if (fabsf(v) < 1e-3f) {
@@ -416,6 +484,7 @@ void Navigator::update(const NavIn& in) {
     if (navMode(in.mode)) log(lidar ? "nav: lidar obstacles on" : "nav: lidar obstacles lost (no scan for 0.5 s)");
   }
   updateObstacles(in);
+  contactCheck(in);  // #104: may start BLOCKED (contact) before the mode's logic runs
   if (in.mode == MODE_GOTO || in.mode == MODE_EXPLORE) {
     updateGoto(in);
   } else if (in.mode == MODE_HOLD) {
@@ -451,14 +520,16 @@ float Navigator::cornerDeg(uint8_t i, float heading) const {
 // Speed cap at the current waypoint: each corner ahead at most vc, reached with at most nav.speed_kp x the leg to
 // spare; 0 at the last point (it stops there). vc: the pursuit (lookahead kLookS x speed) cuts a corner of th by
 // about kLookS x v x tan(th / 4), so v <= kCutMm / tan(th / 4) / kLookS (>= nav.min_speed); 0 sharper than kSharpDeg.
-float Navigator::cornerCap(float heading, float vmax) const {
+// stops_only (#104): only the stops count (the last point, sharp corners), pass-through corners not.
+float Navigator::cornerCap(float heading, float vmax, bool stops_only) const {
   const int top = (int)n_ - 2 < (int)idx_ + kCapAhead ? (int)n_ - 2 : (int)idx_ + kCapAhead;
   const float kp = P(P_NAV_SPEED_KP), vmin = fminf(P(P_NAV_MIN_SPEED), vmax);
   float cap = top == (int)n_ - 2 ? 0.0f : vmax;
   for (int i = top; i >= (int)idx_; i--) {
     const float th = cornerDeg((uint8_t)i, heading);
     const float tq = tanf(0.25f * th * kDeg);
-    const float vc = th > kSharpDeg ? 0.0f : fmaxf(vmin, tq * vmax * kLookS > kCutMm ? kCutMm / (tq * kLookS) : vmax);
+    const float vc = th > kSharpDeg ? 0.0f
+                     : stops_only ? vmax : fmaxf(vmin, tq * vmax * kLookS > kCutMm ? kCutMm / (tq * kLookS) : vmax);
     cap = fminf(vc, cap + kp * hypotf(wx_[i + 1] - wx_[i], wy_[i + 1] - wy_[i]));
   }
   return cap;
@@ -708,8 +779,22 @@ void Navigator::updateGoto(const NavIn& in) {
   const float to_go = last > idx_ ? fmaxf(0.0f, dist_ - L) : dist_;
   float v = fminf(cornerCap(in.heading, vmax) + kp * to_go, vmax) * fmaxf(0.0f, cosf(e * kDeg));
   v = fminf(fmaxf(v, P(P_NAV_MIN_SPEED)), vmax);
-  v = fminf(v, fmaxf(last_v_, P(P_NAV_MIN_SPEED)) + kp * vmax * dt);
+  const float v_rise = fmaxf(last_v_, P(P_NAV_MIN_SPEED)) + kp * vmax * dt;
+  // #104: ramping up from a stop (a start, after turning in place, after BLOCKED) - the rise limit holds the
+  // command low for a while (~1.4 s to 250 mm/s) and a balancing robot still rocks from the stop
+  if (v > v_rise) {
+    if (last_v_ <= P(P_NAV_MIN_SPEED) + 0.5f) launch_ = true;
+  } else {
+    launch_ = false;
+  }
+  v = fminf(v, v_rise);
+  // #104: cruising = not slowing down for a stop (the last point, a sharp corner that turns in place) and not
+  // ramping up from one: the stuck contact rule counts then. Pass-through corner slow-downs (#103) and the ramp
+  // back up after them count as cruising (their caps are >= ~88 mm/s, the robot keeps rolling through them).
+  const bool cruise = cornerCap(in.heading, vmax, true) + kp * to_go >= vmax && !launch_;
   float vl = limitSpeed(v, vmax, true);
+  // contact (#104): GOTO waits kContactWaitMs for a new list (the planner's route round the mark), then tries again
+  if (contact_ && in.mode == MODE_GOTO && !backing_ && in.now_ms - contact_ms_ >= kContactWaitMs) latched_ = contact_ = false;
   if (latched_ || stuck_) obst_flag_ = true;  // EXPLORE: stays blocked until a new list; stuck: backing off
   if (obst_flag_) {
     if (!blocked_) startBlocked(in);
@@ -737,9 +822,17 @@ void Navigator::updateGoto(const NavIn& in) {
         if (back >= back_mm_) dead_back_ = false;  // backed off all the way: again if it is still that close (#99)
         backing_ = false;
         vb = 0;
+        contact_hx_ = in.x;  // (#104) where it waits
+        contact_hy_ = in.y;
       }
       vl = vb;
       obst_ = obst;  // report the obstacle ahead
+      obst_flag_ = true;
+    } else if (contact_) {
+      // contact (#104), backed off: hold that spot while it waits (with the speed only at 0 the velocity loop's wind-up
+      // from pushing against it rolls a balancing robot straight back into it)
+      vl = holdSpeed(in, contact_hx_, contact_hy_);
+      obst_ = obst;
       obst_flag_ = true;
     }
     if (!backing_ && in.mode != MODE_EXPLORE) stuck_ = false;  // GOTO: backed off, try again
@@ -757,6 +850,8 @@ void Navigator::updateGoto(const NavIn& in) {
   turn_ = far ? clampf(P(P_NAV_TURN_KP) * e, tmax) : 0.0f;
   sideAvoid(vmax, tmax);
   state_ = NAV_DRIVING;
+  contact_watch_ = speed_ > 0;  // #104: driving forward - watch for contacts from the next step
+  contact_cruise_ = cruise;
   // (not in the last 3 x arrive_mm: slow there, and a balancing robot rocks to and fro before it moves)
   if (stuckCheck(in, false, dist_ > 3.0f * arrive && speed_ >= fmaxf(20.0f, 0.5f * P(P_NAV_MIN_SPEED))))
     startStuck(in, false);

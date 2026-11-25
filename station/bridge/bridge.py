@@ -457,6 +457,11 @@ class Bridge:
             self.ident["params"][d["name"]] = d["value"]
             self.ident["param_t"] = _now()
             self._check_robot()
+        elif t == lp.MSG_CONTACT:
+            # the navigator touched something below the lidar's scan plane (#104): a bump mark the planner keeps off
+            d = lp.decode_contact(p)
+            self.log.record("contact", d)
+            self.on_contact(d)
         elif t == lp.MSG_NAV_STATUS:
             d = _round_dict(lp.decode_nav_status(p))
             d.pop("reserved", None)
@@ -484,6 +489,20 @@ class Bridge:
                 self.last_get_params = _now()
             if self.estop:                     # Teensy rebooted while latched here: latch it there again
                 self.send(lp.encode_event(lp.EVT_LINK_ESTOP))
+
+    def on_contact(self, d):
+        """MSG_CONTACT (#104): mark the spot on the map (zones kind "bump", saved with it) and let the planner replan
+        round it once the robot has backed off."""
+        mark, merged = self.mapper.add_contact(d)
+        if mark is None:
+            return
+        self.say("robot: %s at %.2f, %.2f m - %s" % (
+            "bumped into something" if d["kind"] == lp.LINK_CONTACT_BUMP else "pushing against something",
+            mark["x"] / 1000.0, mark["y"] / 1000.0,
+            "bump mark %s hit %d times" % (mark["id"], mark["hits"]) if merged else "bump mark %s on the map" % mark["id"]))
+        self.broadcast(json.dumps({"t": "contact", "kind": d["name"], "mark": mark["id"], "merged": merged,
+                                   "x": mark["x"], "y": mark["y"], "flags": d["flags"]}))
+        self.planner.on_contact(mark)
 
     def _add_tune(self, d):
         # robot time (exact step spacing) mapped onto the Pi clock the browser plots use

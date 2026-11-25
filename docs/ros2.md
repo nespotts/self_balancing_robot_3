@@ -133,7 +133,7 @@ If step 5 says `global match not convincing`, give the start: `-InitialPose "x,y
 ```mermaid
 flowchart LR
   subgraph Robot["Robot (or python -m station.sim)"]
-    T["Teensy<br>balance, E-stop,<br>obstacle stop"] -- "link v6" --> B["bridge :8080<br>ros_stream.py"]
+    T["Teensy<br>balance, E-stop,<br>obstacle stop"] -- "link v8" --> B["bridge :8080<br>ros_stream.py"]
     L["LD19"] -- "UART" --> B
   end
   subgraph PC["Windows PC, WSL2 Ubuntu 24.04, ROS 2 Jazzy"]

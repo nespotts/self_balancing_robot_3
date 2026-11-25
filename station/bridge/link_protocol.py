@@ -1,4 +1,4 @@
-"""Link protocol v7 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
+"""Link protocol v8 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
 
 Frame: 0xA5 0x5A | type u8 | len u8 | payload[len] | crc16 u16 LE
 crc16 = CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over type, len and payload.
@@ -8,7 +8,7 @@ Pure Python, 3.8+.
 import binascii
 import struct
 
-LINK_PROTOCOL_VERSION = 7
+LINK_PROTOCOL_VERSION = 8
 LINK_SYNC1 = 0xA5
 LINK_SYNC2 = 0x5A
 LINK_MAX_PAYLOAD = 200
@@ -23,6 +23,7 @@ MSG_PARAM_INFO = 0x04
 MSG_NAV_STATUS = 0x05
 MSG_HELLO = 0x06
 MSG_LIDAR_RAW = 0x07          # v7 (#100): raw LD19 bytes from the Teensy's Serial7
+MSG_CONTACT = 0x08            # v8 (#104): the navigator felt a contact below the lidar's scan plane
 MSG_HEARTBEAT = 0x80
 MSG_CMD_VEL = 0x81
 MSG_SET_MODE = 0x82
@@ -74,6 +75,14 @@ LIDAR_SECTOR_DEG = 360.0 / LINK_LIDAR_SECTORS
 # MSG_LIDAR_RAW (v7, #100): seq u8, flags u8, then 1 .. LINK_LIDAR_RAW_MAX raw LD19 bytes (see LidarRawFrame)
 LINK_LIDAR_RAW_MAX = 180
 LINK_LIDAR_RAW_OVERFLOW = 0x01  # the Teensy's Serial7 buffer filled / overran since the previous frame: bytes missing
+
+# MSG_CONTACT (v8, #104): ContactFrame.kind / flags
+LINK_CONTACT_BUMP = 1           # wheels slowed far more than the command explains + a pitch-rate spike
+LINK_CONTACT_STUCK = 2          # pushing (command, lean, effort) but the speed held ~0
+LINK_CONTACT_LIDAR = 0x01       # flags: the bridge's lidar stuck (EVT_LINK_STUCK) agreed
+LINK_CONTACT_FELL = 0x02        # flags: the robot fell over right after
+LINK_CONTACT_REPORT = 0x04      # flags: STATION, reported only (the motion was not changed)
+CONTACT_KIND_NAMES = {LINK_CONTACT_BUMP: "bump", LINK_CONTACT_STUCK: "stuck"}
 
 # TelemetryFrame.remote_flags (v3)
 LINK_RF_ESTOP = 0x01      # E-stop latched (from the remote)
@@ -136,6 +145,8 @@ LIDAR_OBST_FMT = "<BBH" + "h" * (2 * LINK_LIDAR_SECTORS)      # xy_mm[72] = x0, 
 LIDAR_OBST_FIELDS = ("seq", "sectors", "age_ms", "xy_mm")
 LIDAR_RAW_FMT = "<BB%dB" % LINK_LIDAR_RAW_MAX                  # header + the most data bytes; len = 2 + n
 LIDAR_RAW_FIELDS = ("seq", "flags", "data")
+CONTACT_FMT = "<BBBB4f"
+CONTACT_FIELDS = ("kind", "seq", "mode", "flags", "x_mm", "y_mm", "heading_deg", "value")
 
 STRUCTS = {  # C struct name -> (format, fields); GotoFrame is variable length (see encode_goto)
     "HelloFrame": (HELLO_FMT, HELLO_FIELDS),
@@ -150,6 +161,7 @@ STRUCTS = {  # C struct name -> (format, fields); GotoFrame is variable length (
     "EventFrame": (EVENT_FMT, EVENT_FIELDS),
     "LidarObstacleFrame": (LIDAR_OBST_FMT, LIDAR_OBST_FIELDS),   # xy_mm is an array: encode/decode_lidar_obstacles
     "LidarRawFrame": (LIDAR_RAW_FMT, LIDAR_RAW_FIELDS),          # variable length: encode/decode_lidar_raw
+    "ContactFrame": (CONTACT_FMT, CONTACT_FIELDS),               # v8 (#104)
 }
 
 _S = {name: struct.Struct(fmt) for name, (fmt, _f) in STRUCTS.items()}
@@ -159,6 +171,7 @@ PARAM_INFO_SIZE = _S["ParamInfoFrame"].size     # 38
 HELLO_SIZE = _S["HelloFrame"].size              # 28
 NAV_STATUS_SIZE = _S["NavStatusFrame"].size     # 20
 LIDAR_OBST_SIZE = _S["LidarObstacleFrame"].size  # 148
+CONTACT_SIZE = _S["ContactFrame"].size          # 20
 
 
 # ---- CRC-16/CCITT-FALSE --------------------------------------------------------------------
@@ -341,12 +354,21 @@ def decode_lidar_raw(p):
     return {"seq": p[0], "flags": p[1], "data": bytes(p[2:])}
 
 
+def decode_contact(p):
+    """MSG_CONTACT (v8, #104) -> {"kind", "seq", "mode", "flags", "x_mm", "y_mm", "heading_deg", "value"} + "name"
+    (bump / stuck). Pose frame, like the telemetry."""
+    d = _unpack("ContactFrame", p)
+    d["name"] = CONTACT_KIND_NAMES.get(d["kind"], "contact")
+    return d
+
+
 DECODERS = {
     MSG_TELEMETRY: decode_telemetry, MSG_RANGE: decode_range, MSG_LOG: decode_log,
     MSG_PARAM_INFO: decode_param_info, MSG_NAV_STATUS: decode_nav_status, MSG_HELLO: decode_hello,
     MSG_HEARTBEAT: decode_heartbeat, MSG_CMD_VEL: decode_cmd_vel, MSG_SET_MODE: decode_set_mode,
     MSG_SET_PARAM: decode_set_param, MSG_GET_PARAMS: lambda p: {}, MSG_GOTO: decode_goto,
     MSG_EVENT: decode_event, MSG_LIDAR_OBSTACLES: decode_lidar_obstacles, MSG_LIDAR_RAW: decode_lidar_raw,
+    MSG_CONTACT: decode_contact,
 }
 
 
@@ -461,6 +483,16 @@ def encode_nav_status(d):
 
 def encode_log(text):
     return encode_frame(MSG_LOG, text.encode("utf-8")[:LINK_MAX_PAYLOAD])
+
+
+def encode_contact(d):
+    """MSG_CONTACT (v8, #104): kind, seq, mode, flags, x_mm, y_mm, heading_deg, value."""
+    d = dict(d)
+    for k in ("seq", "mode", "flags"):
+        d.setdefault(k, 0)
+    d.setdefault("value", 0.0)
+    d["seq"] &= 0xFF
+    return encode_frame(MSG_CONTACT, _pack("ContactFrame", d))
 
 
 def encode_lidar_raw(seq, data, flags=0):

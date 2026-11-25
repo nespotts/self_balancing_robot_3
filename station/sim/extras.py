@@ -5,6 +5,7 @@
                                                               there (the odometry does not notice, "kidnapped robot")
   python -m station.sim --lidar --truth-log /tmp/truth.csv    10 Hz: wall time, true X, Y (mm), TH (deg), odometry x, y, th
   python -m station.sim --lidar --box 2200,-300,300,300       a box that is not on any saved map (repeatable)
+  python -m station.sim --lidar --low 1300,0,200,300          a low box (#104): below the scan plane, found by touch
 """
 import asyncio
 import math
@@ -30,6 +31,16 @@ def parse_box(text):
     if len(v) != 4 or v[2] <= 0 or v[3] <= 0:
         raise ValueError("box: cx,cy,w,h in mm")
     return _box(*v)
+
+
+def parse_low(text):
+    """'cx,cy,w,h[,height]' mm -> (cx, cy, w, h, height) for Room.add_low (#104). Raises ValueError."""
+    v = [float(s) for s in str(text).replace(",", " ").split()]
+    if len(v) == 4:
+        v.append(60.0)
+    if len(v) != 5 or v[2] <= 0 or v[3] <= 0 or not 0 < v[4] < 200:
+        raise ValueError("low box: cx,cy,w,h[,height] in mm (height below the lidar, < 200)")
+    return tuple(v)
 
 
 def add_boxes(robot, boxes):

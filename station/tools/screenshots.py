@@ -6,6 +6,7 @@
 --prep drives the simulated robot along a route first so the map has a track and range points.
 --prep-map explores the sim room (occupancy map), then plans a route behind the partition wall;
   shoot the map-* shots after it:  ... --prep-map phone-occmap desktop-occmap phone-map-menu desktop-route
+--prep-bump (sim with --lidar --low 1300,0,200,300): a route through the low box, then phone-bump-mark phone-bump-menu (#104)
 """
 import argparse
 import asyncio
@@ -192,6 +193,9 @@ SHOTS = [  # name, device, view, js to run after the view is shown, extra wait s
     ("phone-wheelslip", PHONE, "map", "", 0.6, until_slip),
     ("phone-scanmatch-settings", PHONE, "map", "document.getElementById('map-more').click();"
      "const s=document.getElementById('map-set');s.open=true;s.scrollIntoView()", 1),
+    # bump marks (issue #104): sim with --lidar --low 1300,0,200,300, run with --prep-bump
+    ("phone-bump-mark", PHONE, "map", "document.getElementById('map-menu').hidden=true", 1.5),
+    ("phone-bump-menu", PHONE, "map", "document.getElementById('map-more').click()", 1),
     # last: disarm, then the first tap of the two-tap "Arm & Balance"
     ("phone-arm", PHONE, "drive", "sbr3.send({t:'set_mode',mode:0});"
      "setTimeout(()=>document.getElementById('arm-btn').click(),1800)", 2.5),
@@ -445,6 +449,34 @@ async def prep_map(url, max_s=150):
     ws.close()
 
 
+async def prep_bump(url, max_s=90):
+    """Plan a route straight through the sim's low box (#104): the robot bumps into it, the bridge marks it and the planner
+    goes round it. Returns when the route is done (or after max_s)."""
+    u = urllib.parse.urlsplit(url)
+    ws = await WsClient.connect(u.hostname, u.port or 80)
+    send = lambda **m: ws.send(json.dumps(m))
+    await asyncio.sleep(2)
+    send(t="set_mode", mode=1, arm=True)              # balance a few s first: the lidar maps the room
+    await asyncio.sleep(8)
+    end = time.monotonic() + max_s
+    send(t="plan", action="goto", points=[[2500, 0]])
+    mode = None
+    while time.monotonic() < end:
+        try:
+            m = json.loads(await asyncio.wait_for(ws.recv(), 1))
+        except asyncio.TimeoutError:
+            continue
+        if m.get("t") == "contact":
+            print("contact:", m)
+        if m.get("t") == "plan":
+            print("plan:", m.get("mode"), m.get("status"))
+            if mode == "goto" and m.get("mode") == "idle":
+                break
+            mode = m.get("mode")
+    await asyncio.sleep(2)
+    ws.close()
+
+
 async def shoot(url, browser, names, port=9333):
     prof = tempfile.mkdtemp(prefix="sbr3-shot-")
     proc = subprocess.Popen([browser, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
@@ -504,6 +536,7 @@ def main():
     ap.add_argument("--prep-tune", action="store_true", help="score runs + motor test first (sim with --remote)")
     ap.add_argument("--prep-balpoint", action="store_true", help="wrong bal.offset_deg + balancing (balance point shots)")
     ap.add_argument("--prep-calib", action="store_true", help="run the odometry calibration steps (sim with --miscal)")
+    ap.add_argument("--prep-bump", action="store_true", help="route through the sim's low box (sim with --lidar --low ...)")
     ap.add_argument("names", nargs="*", help="only these shots (\"tune\" = the Tune tools shots, \"balpoint\")")
     a = ap.parse_args()
     if a.names == ["tune"]:
@@ -534,6 +567,8 @@ def main():
             await prep_calib(a.url)
         if a.prep_map:
             await prep_map(a.url)
+        if a.prep_bump:
+            await prep_bump(a.url)
         await shoot(a.url, a.browser, a.names, a.cdp_port)
     asyncio.run(run())
 

@@ -5,13 +5,14 @@ Zones come in the station's map frame (mm); T = map <- station_map (x m, y m, ya
 Every keep-out shape grows by `inflate` (the robot radius + a margin) and gets a soft cost band around that: Nav2
 costmap filters are applied after the inflation layer, so the mask itself must keep the robot's body out, as the
 station's own planner does.
-Slow zones are not keep-out (left out here).
+Slow zones are not keep-out (left out here). Bump marks (#104: where the robot touched something below the lidar's scan
+plane, a small polygon) are, like no-go zones.
 """
 import math
 
 import numpy as np
 
-KEEPOUT_KINDS = ("wall", "nogo", "fence", "maze")
+KEEPOUT_KINDS = ("wall", "nogo", "fence", "maze", "bump")   # bump: the robot's invisible-obstacle marks (#104)
 
 
 def _xf(pts_mm, T):
@@ -88,7 +89,7 @@ def build_mask(items, T, origin_xy, res, width, height, inflate=0.15, soft=0.30,
         d = np.full((height, width), np.inf)
         for s in segs:
             np.minimum(d, _seg_dist(X, Y, s), out=d)
-        if k == "nogo" and poly and len(poly) >= 3:
+        if k in ("nogo", "bump") and poly and len(poly) >= 3:
             d[_inside(X, Y, poly)] = 0.0
         elif k == "fence" and poly and len(poly) >= 3:
             d[~_inside(X, Y, poly)] = 0.0

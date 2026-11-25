@@ -5,6 +5,8 @@ Stored with the map (<map>.zones.json next to <map>.json, like places), map fram
   wall   polyline: never crossed           nogo   polygon: never entered
   fence  one polygon: never left           slow   polygon + speed cap (mm/s)
   maze   generated wall set (perfect maze, entrance + exit) + metadata
+  bump   "invisible obstacle" mark (#104): where the robot touched something below the lidar's scan plane (a small
+         disc, x / y / r + its polygon pts); the robot adds them (MSG_CONTACT), a person clears them
 
 Who enforces what:
 - planner (CostMap): mark_lines() puts walls / zone edges into the grid as occupied cells BEFORE inflation
@@ -12,16 +14,25 @@ Who enforces what:
   everything outside the fence, and makes slow zones cost more. Frontiers there are never chosen.
 - bridge watchdog: depths() per tick (footprint inside a zone / out of the fence / on or across a wall), and
   manual_filter() on every forwarded cmd_vel. The firmware only knows real range obstacles.
+- bump marks count for the planner only (their edges are walls before inflation, like no-go zones), never for the
+  watchdog: the robot is standing right at one when it is made and has to back away from it.
 """
 import json
 import math
 import os
 import random
+import time
 
 FORMAT = "sbr3-zones-1"
-KINDS = ("wall", "nogo", "fence", "slow", "maze")
-NAMES = {"wall": "virtual wall", "nogo": "no-go zone", "fence": "fence", "slow": "slow zone", "maze": "maze wall"}
-MAX_ITEMS = 100
+KINDS = ("wall", "nogo", "fence", "slow", "maze", "bump")
+NAMES = {"wall": "virtual wall", "nogo": "no-go zone", "fence": "fence", "slow": "slow zone", "maze": "maze wall",
+         "bump": "bump mark"}
+MAX_ITEMS = 100              # drawn zones (bump marks have their own limit)
+BUMP_R_MM = 70.0             # bump mark radius: about the body's half width (76)
+BUMP_AHEAD_MM = 35.0         # its centre: this far past the contact point (the obstacle is beyond the body's edge)
+BUMP_MERGE_MM = 100.0        # a contact this close to a mark is the same obstacle: the mark moves, hits + 1
+BUMP_SIDES = 12              # polygon for the planner / ROS keepout
+MAX_BUMPS = 200              # the oldest go first
 MAX_PTS = 64
 MAX_UNDO = 30
 MIN_AREA_MM2 = 100.0 * 100.0
@@ -232,6 +243,12 @@ def maze_cells_connected(item):
     return len(seen) == rows * cols and goal in seen
 
 
+def bump_pts(x, y, r=BUMP_R_MM):
+    """A bump mark's polygon (BUMP_SIDES corners round (x, y))."""
+    return [[round(x + r * math.cos(2 * math.pi * k / BUMP_SIDES), 1), round(y + r * math.sin(2 * math.pi * k / BUMP_SIDES), 1)]
+            for k in range(BUMP_SIDES)]
+
+
 def wall_segments(items):
     """Every virtual wall and maze wall as (x1, y1, x2, y2): what the simulator builds for real (sim --maze)."""
     out = []
@@ -253,9 +270,12 @@ class ZoneView:
         self.nogo = []         # (key, pts, edges)
         self.fence = None      # (key, pts, edges)
         self.slow = []         # (key, pts, edges, speed)
+        self.bumps = []        # (key, pts, edges): bump marks (#104), planner only
         for it in items:
             k = it["kind"]
-            if k == "wall":
+            if k == "bump":
+                self.bumps.append((it["id"], it["pts"], edges(it["pts"])))
+            elif k == "wall":
                 self.walls.append((it["id"], edges(it["pts"], closed=False), "wall"))
             elif k == "maze":
                 segs = [tuple(s) for s in it["walls"]]
@@ -279,17 +299,18 @@ class ZoneView:
             for s in segs:
                 xs += [s[0], s[2]]
                 ys += [s[1], s[3]]
-        for z in self.nogo + self.slow + ([self.fence] if self.fence else []):
+        for z in self.nogo + self.slow + self.bumps + ([self.fence] if self.fence else []):
             xs += [p[0] for p in z[1]]
             ys += [p[1] for p in z[1]]
         return (min(xs), min(ys), max(xs), max(ys)) if xs else None
 
     def all_lines(self):
-        """Every segment that becomes an occupied cell before inflation."""
+        """Every segment that becomes an occupied cell before inflation (bump marks too: an obstacle the lidar can't
+        see, kept off like a wall)."""
         out = []
         for _k, segs, _kind in self.walls:
             out += segs
-        for z in self.nogo + ([self.fence] if self.fence else []):
+        for z in self.nogo + self.bumps + ([self.fence] if self.fence else []):
             out += z[2]
         return out
 
@@ -448,17 +469,57 @@ class Zones:
         return cached
 
     # ------------------------------------------------------------ changes (raise ValueError)
+    def _drawn(self, items):
+        return sum(1 for x in items if x["kind"] != "bump")
+
     def add(self, kind, pts, speed=None):
-        if kind not in KINDS or kind == "maze":
+        if kind not in KINDS or kind in ("maze", "bump"):
             raise ValueError("unknown zone kind %r" % kind)
         it = {"id": self._id(kind), "kind": kind, "pts": clean_pts(pts, kind)}
         if kind == "slow":
             it["speed"] = round(_num(speed, *SLOW_LIMITS, default=SLOW_DEFAULT))
         items = [x for x in self.items if not (kind == "fence" and x["kind"] == "fence")]   # one fence
-        if len(items) >= MAX_ITEMS:
+        if self._drawn(items) >= MAX_ITEMS:
             raise ValueError("%d zones is the limit" % MAX_ITEMS)
         self._commit(items + [it])
         return it["id"]
+
+    # ------------------------------------------------------------ bump marks (#104)
+    def bumps(self):
+        return [x for x in self.items if x["kind"] == "bump"]
+
+    def add_bump(self, x, y, heading=None, what="bump", when=None, undo=False):
+        """The robot touched something the lidar can't see at (x, y) (map frame), driving toward heading (deg): a mark
+        BUMP_AHEAD_MM past it. Within BUMP_MERGE_MM of a mark it is the same obstacle: that mark moves a third of the
+        way there and counts the hit. undo False (the robot's report): no undo step. -> (id, merged)."""
+        x, y = _num(x, -1e7, 1e7), _num(y, -1e7, 1e7)
+        if heading is not None:
+            h = math.radians(_num(heading, -1e6, 1e6))
+            x, y = x + BUMP_AHEAD_MM * math.cos(h), y + BUMP_AHEAD_MM * math.sin(h)
+        what = what if what in ("bump", "stuck", "manual") else "bump"
+        when = when or time.strftime("%Y-%m-%dT%H:%M:%S")
+        near = min(self.bumps(), key=lambda b: math.hypot(b["x"] - x, b["y"] - y), default=None)
+        if near is not None and math.hypot(near["x"] - x, near["y"] - y) < BUMP_MERGE_MM:
+            nx, ny = near["x"] + (x - near["x"]) / 3.0, near["y"] + (y - near["y"]) / 3.0
+            it = dict(near, x=round(nx, 1), y=round(ny, 1), pts=bump_pts(nx, ny, near.get("r", BUMP_R_MM)),
+                      hits=int(near.get("hits", 1)) + 1, t=when, what=what)
+            items = [it if b is near else b for b in self.items]
+            merged = True
+        else:
+            it = {"id": self._id("bump"), "kind": "bump", "x": round(x, 1), "y": round(y, 1), "r": BUMP_R_MM,
+                  "pts": bump_pts(x, y), "what": what, "hits": 1, "t": when}
+            items = self.items + [it]
+            old = [b for b in items if b["kind"] == "bump"]
+            if len(old) > MAX_BUMPS:                    # the oldest go first
+                drop = {b["id"] for b in old[:len(old) - MAX_BUMPS]}
+                items = [b for b in items if b["id"] not in drop]
+            merged = False
+        if undo:
+            self._commit(items)
+        else:
+            self.items = items
+            self.version += 1
+        return it["id"], merged
 
     def update(self, zid, pts=None, speed=None):
         old = self.find(zid)
@@ -466,6 +527,8 @@ class Zones:
             raise ValueError("no zone %s" % zid)
         if old["kind"] == "maze":
             raise ValueError("a maze is not edited point by point: clear it and generate another")
+        if old["kind"] == "bump":
+            raise ValueError("a bump mark is not edited: delete it")
         it = dict(old)
         if pts is not None:
             it["pts"] = clean_pts(pts, it["kind"])
@@ -486,11 +549,14 @@ class Zones:
     def undo(self):
         if not self.history:
             raise ValueError("nothing to undo")
-        self.items = self.history.pop()
+        snap = self.history.pop()
+        # the robot's bump marks made since that step (no undo steps of their own) stay; a cleared / deleted one is back
+        cur = {b["id"]: b for b in self.bumps()}
+        self.items = [cur.pop(x["id"], x) if x["kind"] == "bump" else x for x in snap] + list(cur.values())
         self.version += 1
 
     def add_maze(self, cx, cy, w=MAZE_SIZE_DEFAULT, h=MAZE_SIZE_DEFAULT, cell=MAZE_CELL_DEFAULT, seed=None, toward=None):
-        if len(self.items) >= MAX_ITEMS:
+        if self._drawn(self.items) >= MAX_ITEMS:
             raise ValueError("%d zones is the limit" % MAX_ITEMS)
         it = make_maze(_num(cx, -1e7, 1e7), _num(cy, -1e7, 1e7), w, h, cell, seed, toward)
         it = dict(it, id=self._id("maze"))
@@ -525,6 +591,12 @@ class Zones:
                         good[key] = [float(v) for v in it[key]][:2]
                     if any(len(s) != 4 for s in good["walls"]) or len(good["exit_gap"]) != 4:
                         continue
+                elif k == "bump":
+                    bx, by = _num(it["x"], -1e7, 1e7), _num(it["y"], -1e7, 1e7)
+                    br = _num(it.get("r"), 20.0, 500.0, default=BUMP_R_MM)
+                    good = {"id": str(it["id"]), "kind": k, "x": bx, "y": by, "r": br, "pts": bump_pts(bx, by, br),
+                            "what": it.get("what") if it.get("what") in ("bump", "stuck", "manual") else "bump",
+                            "hits": max(1, int(_num(it.get("hits"), 1, 1e6, default=1))), "t": str(it.get("t") or "")[:19]}
                 elif k in KINDS:
                     good = {"id": str(it["id"]), "kind": k, "pts": clean_pts(it["pts"], k)}
                     if k == "slow":
@@ -541,7 +613,8 @@ class Zones:
                     pass
             except (KeyError, TypeError, ValueError):
                 continue                      # one bad entry must not lose the others
-        z.items = items[:MAX_ITEMS]
+        drawn = [it for it in items if it["kind"] != "bump"][:MAX_ITEMS]
+        z.items = drawn + [it for it in items if it["kind"] == "bump"][-MAX_BUMPS:]
         return z
 
     @staticmethod

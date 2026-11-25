@@ -9,8 +9,9 @@ import { mapToOdom, cmd, plan } from "./occmap.js";
 export const zones = { items: [], undo: 0 };
 const $ = (id) => document.getElementById(id);
 const COL = { wall: "#a3241c", wallEdge: "#ff8f7a", nogo: "#e0413f", fence: "#4fd1a1", slow: "#e8a317", draft: "#f0efec",
-  entry: "#22a447", exit: "#e8a317" };
-const NAMES = { wall: "Virtual wall", nogo: "No-go zone", fence: "Fence (keep-in)", slow: "Slow zone", maze: "Maze" };
+  entry: "#22a447", exit: "#e8a317", bump: "#ff7a1a" };
+const NAMES = { wall: "Virtual wall", nogo: "No-go zone", fence: "Fence (keep-in)", slow: "Slow zone", maze: "Maze",
+  bump: "Bump mark" };
 const HINT = {
   wall: "Tap points along the wall, then ✓",
   nogo: "Drag a rectangle (▭) or tap corners (✎), then ✓",
@@ -37,8 +38,24 @@ const redraw = () => api && api.redraw();
 on("zones", (m) => {
   zones.items = m.items || []; zones.undo = m.undo || 0;
   if (sel && !byId(sel)) sel = null;
-  renderSheet(); redraw();
+  renderSheet(); redraw(); bumpMenu();
 });
+// bump marks (#104): where the robot touched something below the lidar's scan plane; the planner keeps off them
+const bumpsOf = () => zones.items.filter((z) => z.kind === "bump");
+function bumpMenu() {
+  const b = $("map-bumps"), n = bumpsOf().length;
+  if (!b) return;
+  b.hidden = !n;
+  b.textContent = `Clear bump marks (${n})`;
+}
+$("map-bumps").onclick = () => {
+  const n = bumpsOf().length;
+  if (!n || !confirm(`Clear ${n} bump mark${n > 1 ? "s" : ""}? Routes may go through those spots again (Undo in Draw brings them back).`)) return;
+  cmd({ t: "zones", action: "clear", kind: "bump" });
+  $("map-menu").hidden = true;
+};
+on("contact", (m) => toast(m.kind === "stuck" ? "Pushing against something the lidar can't see - marked on the map"
+  : "Bumped into something the lidar can't see - marked on the map", 3500));
 const byId = (id) => zones.items.find((z) => z.id === id);
 const od = (p) => mapToOdom(p[0], p[1]);
 
@@ -97,6 +114,13 @@ export function drawZones(ctx, sx, sy, s) {
     }
   }
   for (const z of zones.items) {
+    if (z.kind !== "bump") continue;       // orange discs with a "!" (#104)
+    const [cx, cy] = od([z.x, z.y]), R = Math.max(6, z.r * s), X = sx(cx), Y = sy(cy);
+    ctx.beginPath(); ctx.arc(X, Y, R, 0, 7); ctx.fillStyle = "rgba(255,122,26,.35)"; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = COL.bump; ctx.stroke();
+    if (R >= 8) label(ctx, "!", X, Y, COL.bump);
+  }
+  for (const z of zones.items) {
     if (z.kind === "wall") wallLine(ctx, [ptsOf(z)], wW);
     else if (z.kind === "maze") {
       wallLine(ctx, z.walls.map((w) => [od([w[0], w[1]]), od([w[2], w[3]])]), Math.max(3, 25 * s));
@@ -116,7 +140,7 @@ export function drawZones(ctx, sx, sy, s) {
       ctx.setLineDash([6, 5]); ctx.lineWidth = 2; ctx.strokeStyle = "#f0efec";
       ctx.strokeRect(Math.min(sx(a[0]), sx(b[0])) - 6, Math.min(sy(a[1]), sy(b[1])) - 6, Math.abs(sx(b[0]) - sx(a[0])) + 12, Math.abs(sy(b[1]) - sy(a[1])) + 12);
       ctx.setLineDash([]);
-    } else {
+    } else if (z.kind !== "bump") {
       for (const p of ptsOf(z)) handle(ctx, sx(p[0]), sy(p[1]));
     }
   }
@@ -175,7 +199,7 @@ function hitItem(px, py) {
 }
 function hitHandle(px, py) {
   const z = sel && byId(sel);
-  if (!z || z.kind === "maze") return -1;
+  if (!z || z.kind === "maze" || z.kind === "bump") return -1;
   const P = z.pts.map(od);
   let best = -1, bd = 22;
   P.forEach((p, i) => { const d = Math.hypot(px - api.sx(p[0]), py - api.sy(p[1])); if (d < bd) { bd = d; best = i; } });
@@ -300,6 +324,10 @@ function renderSheet() {
       <label>H <input id="zm-h" type="number" min="1" max="8" step="0.5" value="${m.h}"> m</label>
       <label>Cell <input id="zm-cell" type="number" min="400" max="1500" step="50" value="${m.cell}"> mm</label></div>
       <div class="ps-row"><button class="primary" data-x="gen">Generate</button></div>`;
+  } else if (z.kind === "bump") {
+    const how = { bump: "bumped into it", stuck: "pushed against it", manual: "marked by hand" }[z.what] || "touched it";
+    html = `<div class="ps-head"><b>Bump mark</b><small>${esc(how)}${z.hits > 1 ? ` · ${z.hits} times` : ""}${z.t ? " · " + esc(z.t.replace("T", " ").slice(5, 16)) : ""}</small><button class="ghost small" data-x="close">✕</button></div>
+      <div class="ps-row"><small class="zs-note">Something the lidar can't see (below ~20 cm). Routes keep off it.</small><button class="warn" data-x="del">Delete</button></div>`;
   } else if (z.kind === "maze") {
     html = `<div class="ps-head"><b>Maze ${z.cols} × ${z.rows}</b><small>${z.cell} mm cells${z.best_s != null ? " · best " + z.best_s + " s" : ""}</small><button class="ghost small" data-x="close">✕</button></div>
       <div class="ps-row"><button class="primary" data-x="solve">Solve ▶</button><button data-x="regen">New maze</button><button class="warn" data-x="del">Clear</button></div>`;

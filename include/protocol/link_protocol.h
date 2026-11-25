@@ -27,7 +27,10 @@
 // v7: MSG_LIDAR_RAW (Teensy -> Pi, issue #100): the LD19 is wired to the Teensy's Serial7 (the Pi's H618 UART can't make
 //     230400 baud) and its raw bytes are forwarded in chunks. A v6 bridge ignores the message (unknown type: no lidar,
 //     as before); v6 firmware never sends it (the bridge then reads the LD19 from a serial port, if it has one).
-#define LINK_PROTOCOL_VERSION 7
+// v8: MSG_CONTACT (Teensy -> Pi, issue #104): the navigator felt a contact the lidar can't see (a bump, or pushing but
+//     not moving) and tells where. A v7 bridge ignores it (unknown type: no bump marks, the "nav: contact" log line still
+//     shows); v7 firmware never sends it. No other change.
+#define LINK_PROTOCOL_VERSION 8
 #define LINK_SYNC1 0xA5
 #define LINK_SYNC2 0x5A
 #define LINK_MAX_PAYLOAD 200
@@ -45,6 +48,7 @@ enum LinkMsgType : uint8_t {
   MSG_NAV_STATUS = 0x05,  // NavStatusFrame, at once on a change (state, index, count) + 2 Hz in GOTO/EXPLORE/HOLD
   MSG_HELLO = 0x06,       // HelloFrame, at boot and in reply to MSG_GET_PARAMS
   MSG_LIDAR_RAW = 0x07,   // LidarRawFrame (v7): raw LD19 bytes from Serial7, ~98 frames/s while the lidar runs
+  MSG_CONTACT = 0x08,     // ContactFrame (v8): one per contact the navigator detected (bump / stuck, #104)
   // Pi -> Teensy
   MSG_HEARTBEAT = 0x80,   // HeartbeatFrame, 10 Hz
   MSG_CMD_VEL = 0x81,     // CmdVelFrame, used in MODE_STATION (and by Pi-side autonomy)
@@ -254,4 +258,31 @@ struct __attribute__((packed)) LidarRawFrame {
 
 #if defined(__cplusplus) && __cplusplus >= 201103L
 static_assert(2 + LINK_LIDAR_RAW_MAX <= LINK_MAX_PAYLOAD, "LidarRawFrame must fit one link frame");
+#endif
+
+// MSG_CONTACT (v8, issue #104): something below the LD19's scan plane (~208 mm) stopped the robot. The navigator
+// (src/contact.h) saw either
+//   LINK_CONTACT_BUMP   the wheels slowing far more than the command explains, with a pitch-rate spike, while driving;
+//   LINK_CONTACT_STUCK  the speed held ~0 while the command, the velocity loop's lean and the motor effort pushed on.
+// x, y: the contact point in the pose frame (on the body's front edge in the direction of travel), heading_deg: the
+// direction of travel (heading + 180 when it was reversing). value: peak pitch rate (deg/s) for a bump, how long it was
+// stalled (ms) for a stuck. flags LINK_CONTACT_*: what else confirmed it. The bridge marks a small "invisible obstacle"
+// disc there that its planner treats as a wall (station/bridge/zones.py, kind "bump").
+#define LINK_CONTACT_BUMP 1
+#define LINK_CONTACT_STUCK 2
+#define LINK_CONTACT_LIDAR 0x01     // flags: the bridge's lidar stuck (EVT_LINK_STUCK) agreed
+#define LINK_CONTACT_FELL 0x02      // flags: the robot fell over right after (the fall finished the confirmation)
+#define LINK_CONTACT_REPORT 0x04    // flags: STATION (someone drives): reported only, the motion was not changed
+struct __attribute__((packed)) ContactFrame {
+  uint8_t kind;           // LINK_CONTACT_BUMP / LINK_CONTACT_STUCK
+  uint8_t seq;            // + 1 per contact (wraps)
+  uint8_t mode;           // RobotMode it happened in
+  uint8_t flags;          // LINK_CONTACT_LIDAR / _FELL / _REPORT
+  float x_mm, y_mm;       // contact point, pose frame
+  float heading_deg;      // direction of travel
+  float value;            // bump: peak pitch rate deg/s; stuck: stalled ms
+};  // 20 bytes
+
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(ContactFrame) == 20, "ContactFrame size changed - bump LINK_PROTOCOL_VERSION");
 #endif

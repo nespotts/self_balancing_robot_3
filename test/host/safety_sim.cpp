@@ -2,7 +2,7 @@
 // handover / link E-stop / explicit arming, Controller::disengage after an IMU gap, the brake drive mode
 // interlock (motor_model.h), and the Navigator's no-range rule. Build + run (any g++, e.g. on the Pi):
 //   g++ -std=c++17 -O2 -Wall -Wextra -I src -I include test/host/safety_sim.cpp src/mode_manager.cpp
-//     src/controller.cpp src/navigator.cpp -o /tmp/safety && /tmp/safety
+//     src/controller.cpp src/navigator.cpp src/contact.cpp -o /tmp/safety && /tmp/safety
 // (cfg.defaults waiting for motors off is main.cpp wiring; the simulator test covers it: station/sim/tests.)
 #include <math.h>
 #include <stdio.h>

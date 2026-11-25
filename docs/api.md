@@ -52,7 +52,7 @@ rm /tmp/sbr3-bridge.release                   # bridge reconnects
 | `{"t":"ros","action":"subscribe"}` | ROS stream for the ROS 2 adapter (#96, [ros2.md](ros2.md#the-bridge-ros-stream)): `ros_hello` now, then `ros_scan` (10 Hz), `ros_odom` (25 batches/s, 50 rows/s), `ros_state` (2 Hz), only to this client, droppable. `unsubscribe` / `get` |
 | `{"t":"preset"\|"score"\|"motor"\|"balpoint"\|"calib","action":...}` | Tune tools: see the docstring of `bridge/tuning_api.py` |
 
-Receive: `hello`, `status`, `health` (1 Hz: preflight, tiles, battery minutes; also `GET /api/health`), `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`, `map`, `plan`, `places`, `zones`, `scan`,
+Receive: `hello`, `status`, `health` (1 Hz: preflight, tiles, battery minutes; also `GET /api/health`), `tlm` (25 Hz), `params`, `ranges`, `nav`, `waypoints`, `log`, `tune`, `map`, `plan`, `places`, `zones`, `contact` (#104, see **Zones**), `scan`,
 and for the Tune tools `presets`, `score_state`, `score_runs`, `motor_state`, `motor_fit`, `balpoint_state`, `calib_state`.
 `ranges.pts` rows (every reading, batched at 25 Hz): `[i, hit_x, hit_y, sensor_x, sensor_y, valid, tilt, pi_ms, sensor_id, sensor_angle_deg, range_mm]`
 (sensor 0 = front / XSHUT 34, 1 = rear / XSHUT 28; angle in the robot frame, + = CCW; raw mm as sent). `status.rng_hz` = readings/s per sensor.
@@ -104,12 +104,20 @@ Virtual walls, no-go zones, the keep-in fence, slow zones and mazes, stored with
 
 | `zones` action | |
 |---|---|
-| `add` | `kind` `wall` (polyline, 2+ points) / `nogo` / `fence` / `slow` (polygons, 3+ points, at least 0.01 mÂ²), `pts`; `slow`: `speed` mm/s (30-500, default 120). A new fence replaces the old one. Max 100 items, 64 points each |
-| `update` | `id`, `pts` and / or `speed` (mazes: no) |
-| `delete` / `clear` / `undo` | `id` / optional `kind` (none = all) / the last change (30 kept) |
+| `add` | `kind` `wall` (polyline, 2+ points) / `nogo` / `fence` / `slow` (polygons, 3+ points, at least 0.01 mÂ²), `pts`; `slow`: `speed` mm/s (30-500, default 120). A new fence replaces the old one. Max 100 items, 64 points each. `kind` `bump`, `x`, `y`: a bump mark by hand |
+| `update` | `id`, `pts` and / or `speed` (mazes, bump marks: no) |
+| `delete` / `clear` / `undo` | `id` / optional `kind` (none = all; `bump` = **Clear bump marks**) / the last change (30 kept; the robot's own bump marks stay) |
 | `maze` | `x`, `y` centre, `w`, `h` mm (default 3000), `cell` mm (400-1500, default 700), `seed` (optional). Random perfect maze, 2-12 cells a side, entrance on the side facing the robot, exit opposite |
 | `list` | send the layers again |
 | reply | `{"t":"zones","map":"name","undo":3,"items":[{"id":"n2","kind":"nogo","pts":[[x,y],...]},{"id":"s3","kind":"slow","pts":[...],"speed":100},{"id":"m4","kind":"maze","x0":..,"y0":..,"cols":4,"rows":4,"cell":700,"seed":..,"walls":[[x1,y1,x2,y2],...],"entry":[x,y],"entry_in":[x,y],"exit":[x,y],"exit_out":[x,y],"exit_gap":[x1,y1,x2,y2],"best_s":51.1}]}` to every browser after a change and on connect; errors: `{"t":"error","text":"zones: ..."}` |
+
+**Bump marks** (#104, kind `bump`): where the robot touched something below the lidar's scan plane (`MSG_CONTACT`, [range-nav.md](range-nav.md#contacts-obstacles-below-the-lidar-issue-104)).
+`{"id":"b7","kind":"bump","x":1189.6,"y":-27.3,"r":70,"pts":[12 corners],"what":"bump|stuck|manual","hits":2,"t":"2026-11-24T10:31:05"}`
+(map frame). The planner treats one as a wall (radius + margin round it); the watchdog ignores them. A contact within 100 mm of a
+mark moves it a third of the way and counts the hit; 200 kept (the oldest go first); no undo step of their own. Each new contact
+also sends every browser `{"t":"contact","kind":"bump|stuck","mark":"b7","merged":false,"x":..,"y":..,"flags":0}` (the Map
+shows a toast; marks are orange discs; Map ⋯ → **Clear bump marks (n)**; in Draw the delete tool removes one) and the planner
+replans 2.5 s later, once the robot has backed off. Also in the ROS keepout mask.
 
 `plan` `solve` (`maze` id): a goto to the maze's exit cell with its exit gap counted as a wall, so the route goes in at the entrance.
 `plan` messages carry `"solve":{"maze":"m4","elapsed":12.3}` meanwhile; at the end `status` = "maze solved in 51.1 s" and the best time is
@@ -199,7 +207,23 @@ blocked for more than 0.2 s the Logs tab says so.
 ## Link messages to the robot
 
 The bridge <-> Teensy link itself (framed binary, CRC16) is defined in
-[include/protocol/link_protocol.h](../include/protocol/link_protocol.h) (link v7), mirrored in `station/bridge/link_protocol.py`.
+[include/protocol/link_protocol.h](../include/protocol/link_protocol.h) (link v8), mirrored in `station/bridge/link_protocol.py`.
+
+New in v8: **`MSG_CONTACT`** (0x08, **Teensy -> Pi**, issue #104): the navigator touched something the lidar can't see
+([range-nav.md](range-nav.md#contacts-obstacles-below-the-lidar-issue-104)). One frame per contact, 20 bytes:
+
+| Byte | Field | |
+|---|---|---|
+| 0 | `kind` u8 | `LINK_CONTACT_BUMP` 1 (a bump: speed fell far below the command + pitch-rate spike) / `LINK_CONTACT_STUCK` 2 (pushing, no progress) |
+| 1 | `seq` u8 | + 1 per contact |
+| 2 | `mode` u8 | the mode it happened in (GOTO / EXPLORE; STATION = reported only) |
+| 3 | `flags` u8 | 0x01 `LIDAR` (the bridge's `EVT_LINK_STUCK` agreed), 0x02 `FELL` (it fell over right after), 0x04 `REPORT` (STATION: motion not changed) |
+| 4 .. 11 | `x_mm`, `y_mm` f32 | contact point, pose (odometry) frame: the body's front edge, 50 mm ahead of the axle in the direction of travel |
+| 12 | `heading_deg` f32 | direction of travel |
+| 16 | `value` f32 | bump: peak pitch rate deg/s; stuck: ms without progress |
+
+The bridge turns it into a bump mark (above). A v7 bridge ignores it (unknown type; the `nav: contact ...` log line still shows);
+v7 firmware never sends it. No params, no other layout change.
 
 New in v7: **`MSG_LIDAR_RAW`** (0x07, **Teensy -> Pi**, issue #100): the LD19 is wired to the Teensy's Serial7 (the Pi's H618 UART
 can't make 230400 baud) and the Teensy forwards its raw bytes ([ld19.md](ld19.md#wiring-the-pcbs-rplidar-c1-header-100)).

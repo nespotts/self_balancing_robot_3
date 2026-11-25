@@ -17,6 +17,7 @@ import random
 import time
 
 from station.bridge import link_protocol as lp
+from station.sim.contact import ContactDetector
 from station.sim.motor_test import MM_PER_COUNT, SimMotorTest, TTWheel
 
 # Geometry and mass from the Fusion CAD (cad/robot_model.json on master)
@@ -44,6 +45,7 @@ MOTOR_VMAX = 1100.0       # mm/s at full PWM and 12.4 V
 MOTOR_TAU = 0.045         # s, wheel speed lag
 LEFT_STRONGER = 1.0 / 0.95  # the left motor is a bit stronger (why mot.left_scale defaults to 0.95)
 VEL_LOOP_DT = 0.01        # firmware: velocity loop at 100 Hz
+IMPACT_KICK = 0.8         # #104: share of the wheels' sudden stop that goes into the body's pitch rate
 
 # (name, default, min, max): copy of the v4 firmware table (src/params.h); ids = row order.
 # The UI never hardcodes these; it builds everything from ParamInfoFrames.
@@ -138,6 +140,9 @@ CUT_MM = 30.0             # kCutMm: corner speed: the pursuit cuts a corner by a
 LOOK_FAR = 0.5            # kLookFar: pursuit lookahead up to this x the distance to the waypoint
 CAP_AHEAD = 8             # kCapAhead: corners ahead that limit the speed
 PURSUE_AHEAD = 3          # kPursueAhead: waypoints ahead the pursuit point may be on
+CONTACT_WAIT_MS = 4000    # Navigator::kContactWaitMs (#104)
+REPORT_GAP_MS = 3000      # Navigator::kReportGapMs
+CONTACT_AHEAD_MM = 50.0   # Navigator::kContactAhead: the body's front edge + 5, from the axle
 
 
 def _box(cx, cy, w, h):
@@ -160,6 +165,18 @@ class Room:
             s.append((-1000, 1200, -300, 2000))       # angled corner cabinet
         self.base = s
         self.segs = list(s)
+        self.low = []             # low obstacles (#104): [(cx, cy, w, h, height_mm, segs)]; below the scan plane
+
+    def add_low(self, cx, cy, w, h, height=60.0):
+        """A low box (#104): it stops the body but the lidar (~208 mm) and the range sweep (~222 mm) look over it."""
+        self.low.append((float(cx), float(cy), float(w), float(h), float(height), _box(cx, cy, w, h)))
+
+    def body_clearance(self, x, y):
+        """Like clearance(), with the low boxes too: what the body hits."""
+        best = self.clearance(x, y)
+        for *_b, segs in self.low:
+            best = min(best, self._seg_clearance(x, y, segs))
+        return best
 
     def set_extra(self, segs):
         """Extra real walls on top of the room: the map's virtual walls and mazes (sim --maze, #70)."""
@@ -180,8 +197,12 @@ class Room:
         return best if best is not None and best <= max_d else None
 
     def clearance(self, x, y):
+        return self._seg_clearance(x, y, self.segs)
+
+    @staticmethod
+    def _seg_clearance(x, y, segs):
         best = 1e9
-        for x1, y1, x2, y2 in self.segs:
+        for x1, y1, x2, y2 in segs:
             ex, ey = x2 - x1, y2 - y1
             L2 = ex * ex + ey * ey
             u = max(0.0, min(1.0, ((x - x1) * ex + (y - y1) * ey) / L2)) if L2 else 0.0
@@ -406,6 +427,18 @@ class Navigator:
         self.warned_no_range = False
         self.sent = None
         self.sent_ms = 0
+        # contacts (#104, src/contact.h; port in contact.py)
+        self.cdet = ContactDetector()
+        self.contact_watch = False    # the last step drove forward (GOTO / EXPLORE): watch for contacts
+        self.contact_cruise = False   # ... not slowing down for a stop (pass-through corners #103 count as cruising)
+        self.launch = False           # ramping up from a stop (the speed rise limit, #103): not cruising
+        self.contact = False          # BLOCKED by a contact; GOTO: waiting for a new list
+        self.contact_ms = 0
+        self.contact_hold = (0.0, 0.0)  # where it backed off to (held while it waits)
+        self.contact_due = None       # MSG_CONTACT to send (dict for lp.encode_contact)
+        self.contact_seq = 0
+        self.report_ms = 0            # STATION: last report
+        self.contact_on = True        # sim-only switch (tests of the older checks); firmware: nav.stuck_ms 0
 
     # ---- list
     def clear_list(self):
@@ -436,6 +469,7 @@ class Navigator:
         self.stop_since = 0
         self.stuck = self.away = self.away_done = False
         self.stuck_ms = 0
+        self.contact = False                  # (#104) the planner's new route goes round the mark
 
     # ---- inputs
     def add_range(self, f, now_ms):
@@ -506,6 +540,8 @@ class Navigator:
         self.stuck = self.away = self.away_done = False
         self.stuck_ms = 0
         self.lidar_stuck_ms = 0
+        self.contact = self.contact_watch = self.launch = False
+        self.cdet.reset()
         n = len(self.wp)
         if i["mode"] in (lp.MODE_GOTO, lp.MODE_EXPLORE):
             if self.idx >= n:
@@ -669,6 +705,59 @@ class Navigator:
         self.state = NAV_BLOCKED
         self.obst = self.front
 
+    def _contact_check(self, i):
+        """Contacts (#104): obstacles under the lidar's scan plane, found by touch (contact.py). Watching: GOTO /
+        EXPLORE when the last step drove forward, STATION while it commands motion (reported only). nav.stuck_ms 0 = off."""
+        station = i["mode"] == lp.MODE_STATION
+        nav = i["mode"] in (lp.MODE_GOTO, lp.MODE_EXPLORE) and self.contact_watch and self.state == NAV_DRIVING
+        watch = self.contact_on and self.P("nav.stuck_ms") > 0 and (
+            nav or (station and i["live"] and i["now_ms"] - self.report_ms >= REPORT_GAP_MS))
+        self.contact_watch = False            # (the driving branch sets it again)
+        kind = self.cdet.update({"now_ms": i["now_ms"], "watch": watch, "upright": i["upright"],
+                                 "cmd": i.get("cmd_speed", 0.0), "speed": i["speed"],
+                                 "pitch_rate": i.get("pitch_rate", 0.0), "vel_out": i.get("vel_out", 0.0),
+                                 "lidar_stuck": self.lidar_stuck_ms != 0,
+                                 "cruise": station or self.contact_cruise})
+        if not kind:
+            return
+        if self.cdet.flags & lp.LINK_CONTACT_LIDAR:
+            self.lidar_stuck_ms = 0           # used up
+        if station:
+            self.report_ms = i["now_ms"] or 1
+            self._report_contact(i, kind, self.cdet.flags | lp.LINK_CONTACT_REPORT)
+        elif i["mode"] in (lp.MODE_GOTO, lp.MODE_EXPLORE):
+            self._start_contact(i, kind)
+
+    def _report_contact(self, i, kind, flags):
+        h = i["heading"] if self.cdet.dir > 0 else i["heading"] + 180.0
+        self.contact_seq = (self.contact_seq + 1) & 0xFF
+        f = {"kind": kind, "seq": self.contact_seq, "mode": i["mode"], "flags": flags,
+             "x_mm": i["x"] + CONTACT_AHEAD_MM * math.cos(math.radians(h)),
+             "y_mm": i["y"] + CONTACT_AHEAD_MM * math.sin(math.radians(h)), "heading_deg": h,
+             "value": self.cdet.value}
+        self.contact_due = f
+        why = ("%.0f dps" if kind == lp.LINK_CONTACT_BUMP else "%.0f ms") % f["value"]
+        self.log("nav: contact %s at %.0f,%.0f (%s%s%s, %s)" % (
+            "bump" if kind == lp.LINK_CONTACT_BUMP else "stuck", f["x_mm"], f["y_mm"], why,
+            ", lidar" if flags & lp.LINK_CONTACT_LIDAR else "", ", fell" if flags & lp.LINK_CONTACT_FELL else "",
+            "reported only" if flags & lp.LINK_CONTACT_REPORT else "backing off"))
+
+    def _start_contact(self, i, kind):
+        self._report_contact(i, kind, self.cdet.flags)
+        self.contact = self.stuck = self.blocked = self.latched = True   # GOTO: latched until a new list / CONTACT_WAIT_MS
+        self.contact_ms = i["now_ms"]
+        self.blk_h = i["heading"]
+        self.driving = True                   # the BLOCKED branch backs off
+        self.stuck_ms = 0
+        self.dead_back = self.away = False
+        self.back_mm = self.P("nav.stuck_backoff_mm")   # (always driving forward here: backwards, rear corridor checked)
+        self.backing = self.back_mm > 0
+        self.back = (i["x"], i["y"], i["now_ms"])
+        self.contact_hold = (i["x"], i["y"])
+        self.speed = self.turn = 0.0
+        self.state = NAV_BLOCKED
+        self.obst = self.front
+
     def limit_speed(self, v, vmax, apply):
         P = self.P
         self.obst_flag = False
@@ -730,6 +819,7 @@ class Navigator:
             if i["mode"] in NAV_MODES:
                 self.log("nav: lidar obstacles on" if lidar else "nav: lidar obstacles lost (no scan for 0.5 s)")
         self._update_obstacles(i)
+        self._contact_check(i)            # #104: may start BLOCKED (contact) before the mode's logic runs
         if i["mode"] in (lp.MODE_GOTO, lp.MODE_EXPLORE):
             self._update_goto(i)
         elif i["mode"] == lp.MODE_HOLD:
@@ -762,10 +852,11 @@ class Navigator:
         a_in = heading if ix * ix + iy * iy < 1.0 else math.degrees(math.atan2(iy, ix))
         return abs(_wrap180(math.degrees(math.atan2(oy, ox)) - a_in))
 
-    def _corner_cap(self, heading, vmax):
+    def _corner_cap(self, heading, vmax, stops_only=False):
         """Speed cap at the current waypoint: each corner ahead at most vc, reached with at most nav.speed_kp x the
         leg to spare; 0 at the last point. vc: the pursuit (lookahead LOOK_S x speed) cuts a corner of th by about
-        LOOK_S x v x tan(th / 4), so v <= CUT_MM / tan(th / 4) / LOOK_S (>= nav.min_speed); 0 sharper than SHARP_DEG."""
+        LOOK_S x v x tan(th / 4), so v <= CUT_MM / tan(th / 4) / LOOK_S (>= nav.min_speed); 0 sharper than SHARP_DEG.
+        stops_only (#104): only the stops count (the last point, sharp corners), pass-through corners not."""
         n = len(self.wp)
         top = min(n - 2, self.idx + CAP_AHEAD)
         kp, vmin = self.P("nav.speed_kp"), min(self.P("nav.min_speed"), vmax)
@@ -773,7 +864,8 @@ class Navigator:
         for k in range(top, self.idx - 1, -1):
             th = self._corner_deg(k, heading)
             tq = math.tan(math.radians(0.25 * th))
-            vc = 0.0 if th > SHARP_DEG else max(vmin, CUT_MM / (tq * LOOK_S) if tq * vmax * LOOK_S > CUT_MM else vmax)
+            vc = (0.0 if th > SHARP_DEG else
+                  vmax if stops_only else max(vmin, CUT_MM / (tq * LOOK_S) if tq * vmax * LOOK_S > CUT_MM else vmax))
             (x0, y0), (x1, y1) = self.wp[k], self.wp[k + 1]
             cap = min(vc, cap + kp * math.hypot(x1 - x0, y1 - y0))
         return cap
@@ -975,8 +1067,24 @@ class Navigator:
         to_go = max(0.0, self.dist - L) if last > self.idx else self.dist
         v = min(self._corner_cap(i["heading"], vmax) + kp * to_go, vmax) * max(0.0, math.cos(math.radians(e)))
         v = min(max(v, P("nav.min_speed")), vmax)
-        v = min(v,max(self.last_v, P("nav.min_speed")) + kp * vmax * dt)
+        v_rise = max(self.last_v, P("nav.min_speed")) + kp * vmax * dt
+        # #104: ramping up from a stop (a start, after turning in place, after BLOCKED) - the rise limit holds the
+        # command low for a while (~1.4 s to 250 mm/s) and a balancing robot still rocks from the stop
+        if v > v_rise:
+            if self.last_v <= P("nav.min_speed") + 0.5:
+                self.launch = True
+        else:
+            self.launch = False
+        v = min(v, v_rise)
+        # #104: cruising = not slowing down for a stop (the last point, a sharp corner that turns in place) and not
+        # ramping up from one: the stuck contact rule counts then. Pass-through corner slow-downs (#103) and the ramp
+        # back up after them count as cruising (their caps are >= ~88 mm/s, the robot keeps rolling through them).
+        cruise = self._corner_cap(i["heading"], vmax, True) + kp * to_go >= vmax and not self.launch
         vl = self.limit_speed(v, vmax, True)
+        # contact (#104): GOTO waits CONTACT_WAIT_MS for a new list (the planner's route round the mark), then tries again
+        if (self.contact and i["mode"] == lp.MODE_GOTO and not self.backing
+                and i["now_ms"] - self.contact_ms >= CONTACT_WAIT_MS):
+            self.latched = self.contact = False
         if self.latched or self.stuck:        # EXPLORE: stays blocked until a new list; stuck: backing off
             self.obst_flag = True
         if self.obst_flag:
@@ -1006,7 +1114,14 @@ class Navigator:
                         self.dead_back = False   # backed off all the way: again if it is still that close (#99)
                     self.backing = False
                     vb = 0.0
+                    self.contact_hold = (i["x"], i["y"])   # (#104) where it waits
                 vl = vb
+                self.obst = obst
+                self.obst_flag = True
+            elif self.contact:
+                # contact (#104), backed off: hold that spot while it waits (with the speed only at 0 the velocity
+                # loop's wind-up from pushing against it rolls a balancing robot straight back into it)
+                vl = self._hold_speed(i, *self.contact_hold)
                 self.obst = obst
                 self.obst_flag = True
             if not self.backing and i["mode"] != lp.MODE_EXPLORE:
@@ -1024,6 +1139,8 @@ class Navigator:
         self.turn = _clamp(P("nav.turn_kp") * e, tmax) if far else 0.0
         self._side_avoid(vmax, tmax)
         self.state = NAV_DRIVING
+        self.contact_watch = self.speed > 0   # #104: driving forward - watch for contacts from the next step
+        self.contact_cruise = cruise
         # (not in the last 3 x arrive_mm: slow there, and a balancing robot rocks to and fro before it moves)
         if self._stuck_check(i, False, self.dist > 3.0 * arrive and self.speed >= max(20.0, 0.5 * P("nav.min_speed"))):
             self._start_stuck(i, False)
@@ -1248,6 +1365,14 @@ class SimRobot:
         self.slip_rand = None         # random episodes: (ratio, dur_s, every_s, Random), see slip_random()
         self.slip_ds = 0.0            # wheel travel of the last step the body did not make, mm
         self.slip_mm = 0.0            # ... all of it so far
+        self.in_contact = False       # #104: touching a wall / low box (the body could not move this step)
+        self.impacts = []             # (sim time, wheel speed mm/s) of every impact
+        self.floor_noise = 6.0        # rad/s^2 of random pitch acceleration (floor, backlash)
+        self.wiggle = None            # (rad/s^2, Hz): a pitch wiggle like the real robot's (~1 deg, ~20 deg/s RMS at
+                                      # 2 Hz; the sim alone balances far more calmly, ~4 deg/s RMS)
+        self.pitch_rate_meas = 0.0    # this step's IMU pitch rate (the navigator's contact check reads it)
+        self.contacts = []            # MSG_CONTACT frames sent (decoded dicts, #104)
+        self.contact_times = []       # ... their sim times
         self.enc_ring = []
         self.out = []                 # frames to send
         self.log("boot sim v4, params DEFAULTS, imu ok, radio %s" % ("ok" if remote else "ok (no remote)"))
@@ -1493,7 +1618,9 @@ class SimRobot:
         return {"now_ms": int(now * 1000.0), "mode": self.mode, "upright": bool(self.ctl.out.get("upright")),
                 "live": self.supervised(), "x": x, "y": y, "heading": th, "speed": self.speed_f,
                 "yaw_rate": self._wheel_turn_rate(),
-                "max_speed": self.P("drv.max_speed"), "max_turn": self.P("drv.max_turn")}
+                "max_speed": self.P("drv.max_speed"), "max_turn": self.P("drv.max_turn"),
+                # contact detection (#104): the balance loop's last step (main.cpp navIn)
+                "pitch_rate": self.pitch_rate_meas, "cmd_speed": self.ctl.speed_sp, "vel_out": self.ctl.vel_out}
 
     def _targets(self, now):
         """controlStep() order: ModeManager::update (navigator command from the previous step), then
@@ -1572,12 +1699,13 @@ class SimRobot:
             self.pi_link = False
             self.log("pi link lost: station commands stopped")
         self._update_mode()
+        # sensors (what the firmware sees; this step's IMU sample comes before the navigator, as in controlStep)
+        pitch = math.degrees(self.theta) + IMU_MOUNT_DEG + rng.gauss(0, 0.015)
+        pitch_rate = math.degrees(self.theta_rate) + rng.gauss(0, 0.4)
+        self.pitch_rate_meas = pitch_rate
         v_t, w_t = self._targets(now)
         grip = 1.0 - self._slip_step(now, dt) if (self.slip_eps or self.slip_rand) else 1.0   # sim-only (#79)
 
-        # sensors (what the firmware sees)
-        pitch = math.degrees(self.theta) + IMU_MOUNT_DEG + rng.gauss(0, 0.015)
-        pitch_rate = math.degrees(self.theta_rate) + rng.gauss(0, 0.4)
         yaw_rate = math.degrees((self.vr - self.vl) / self.track_mm()) * grip    # the gyro: the body's rotation
         ctl_in = {"dt": dt, "now": now, "pitch": pitch, "pitch_rate": pitch_rate, "roll": rng.gauss(0, 0.2),
                   "heading": self.TH - self.oth + self.gdrift, "yaw_rate": yaw_rate + rng.gauss(0, 0.3),
@@ -1619,13 +1747,14 @@ class SimRobot:
         acc = (v - self.v_prev) / dt / 1000.0    # m/s^2
         self.v_prev = v
         sl, sr = self.wheel_scale()
-        self.speed_f += ((self.vl * sl + self.vr * sr) / 2 - self.speed_f) * min(1.0, dt / 0.04)
 
         # inverted pendulum + a hand that stands the robot up when it is armed but lying down
         lying = abs(self.theta) >= math.radians(LIE_DEG) - 1e-6
         hand = self.mode != lp.MODE_IDLE and (not o["active"] or now - self.engaged_at < 0.35)
         th_acc = PEND_G * math.sin(self.theta) - PEND_A * acc * math.cos(self.theta)
-        th_acc += rng.gauss(0, 6.0)               # floor bumps, backlash, air
+        th_acc += rng.gauss(0, self.floor_noise)  # floor bumps, backlash, air
+        if self.wiggle:                           # sim-only: the real robot's ~2 Hz wiggle (#104 false-positive tests)
+            th_acc += self.wiggle[0] * math.sin(2.0 * math.pi * self.wiggle[1] * now)
         if hand:
             th_acc = -60.0 * self.theta - 14.0 * self.theta_rate
         elif lying and not o["active"]:
@@ -1646,7 +1775,8 @@ class SimRobot:
         nx = self.X + v * grip * math.cos(math.radians(self.TH)) * dt
         ny = self.Y + v * grip * math.sin(math.radians(self.TH)) * dt
         self.slip_ds = 0.0
-        if abs(v) < 1e-3 or self.room.clearance(nx, ny) > ROBOT_RADIUS:
+        if abs(v) < 1e-3 or self.room.body_clearance(nx, ny) > ROBOT_RADIUS:
+            self.in_contact = False
             self.X, self.Y = nx, ny
             if grip < 1.0:
                 self.slip_ds = v * (1.0 - grip) * dt
@@ -1657,9 +1787,18 @@ class SimRobot:
                 self.odx += dd * math.cos(hh)
                 self.ody += dd * math.sin(hh)
         else:
+            # it hit something (a wall, or a low box under the scan plane, #104): the wheels stop, and on the first
+            # step of the contact the body pitches on (the wheels' deceleration, a mostly plastic impact: ~0.4 deg/s
+            # per mm/s; a hard bump at 250 mm/s ~100 deg/s, like the real robot's fall records)
+            if not self.in_contact and abs(v) > 20.0:
+                self.theta_rate += PEND_A * (v / 1000.0) * math.cos(self.theta) * IMPACT_KICK
+                self.impacts.append((now, v))
+            self.in_contact = True
             self.vl = self.vr = self.v_prev = 0.0
             for fw in self.floor or ():
                 fw.v, fw.moving = 0.0, False
+        # encoder speed (80 ms window in the firmware; a 40 ms lag here), after the move: stalled wheels read 0
+        self.speed_f += ((self.vl * sl + self.vr * sr) / 2 - self.speed_f) * min(1.0, dt / 0.04)
 
         self._motor_test_step(now, dt, pitch, pitch_rate, stand_pose)
 
@@ -1710,6 +1849,11 @@ class SimRobot:
         if self.nav.status_due(now_ms):
             self.out.append(lp.encode_nav_status(self.nav.status()))
             self.nav.status_sent(now_ms)
+        if self.nav.contact_due:                      # MSG_CONTACT (#104)
+            self.contacts.append(dict(self.nav.contact_due))
+            self.contact_times.append(now)            # (sim time, for the tests: was there an impact?)
+            self.out.append(lp.encode_contact(self.nav.contact_due))
+            self.nav.contact_due = None
 
     def _slip_step(self, now, dt):
         """Slip ratio for this step; starts random episodes (slip_random) while driving."""

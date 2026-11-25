@@ -30,7 +30,7 @@ from . import keepout as ko
 from .places import tf_pose
 
 ZONE_RGB = {"wall": (1.0, 0.2, 0.2), "nogo": (1.0, 0.2, 0.2), "fence": (1.0, 0.6, 0.0), "maze": (0.8, 0.3, 0.8),
-            "slow": (1.0, 0.85, 0.0)}
+            "slow": (1.0, 0.85, 0.0), "bump": (1.0, 0.55, 0.1)}
 
 
 class KeepoutMask(Node):

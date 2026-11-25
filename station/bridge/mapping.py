@@ -657,10 +657,20 @@ class Mapper:
         return json.dumps({"t": "zones", "map": self.name, "items": self.zones.items,
                            "undo": len(self.zones.history)}, separators=(",", ":"))
 
+    def add_contact(self, d):
+        """MSG_CONTACT (#104, link_protocol.decode_contact): the robot touched something below the lidar's scan plane.
+        -> the bump mark (zones item, map frame) and whether an old one took it (merged); saved with the map."""
+        x, y, h = self.map_pose(d["x_mm"], d["y_mm"], d["heading_deg"])
+        zid, merged = self.zones.add_bump(x, y, h, what=d.get("name", "bump"))
+        self.zones_changed()
+        return self.zones.find(zid), merged
+
     def zones_command(self, m, who="?", robot_xy=None):
         """{"t": "zones", "action": ...}, points in the odometry frame (like places / goto), stored in the map frame:
           add     kind wall|nogo|fence|slow, pts [[x, y], ...], speed (slow, mm/s)   (a new fence replaces the old)
+                  kind bump, x, y: a bump mark by hand (#104; the robot adds its own with MSG_CONTACT)
           update  id, pts and / or speed            delete  id          clear  [kind]        undo
+                  (clear kind bump = "Clear bump marks": only the robot's invisible-obstacle marks)
           maze    x, y (centre), w, h (mm), cell (mm), seed (optional): a random maze, entrance facing the robot
           list    (everyone gets the layers again)
         robot_xy: the robot's odometry position (the maze entrance faces it).
@@ -674,7 +684,11 @@ class Mapper:
             return [list(self.map_pose(float(p[0]), float(p[1]), 0.0)[:2]) if isinstance(p, (list, tuple)) and len(p) >= 2
                     else None for p in pts]
         try:
-            if act == "add":
+            if act == "add" and m.get("kind") == "bump":     # a mark by hand (#104): x, y (the obstacle's centre)
+                x, y = self.map_pose(float(m.get("x")), float(m.get("y")), 0.0)[:2]
+                zid, _ = Z.add_bump(x, y, what="manual", undo=True)
+                self.say("%s: added bump mark %s" % (who, zid))
+            elif act == "add":
                 zid = Z.add(m.get("kind"), to_map(m.get("pts")), m.get("speed"))
                 self.say("%s: added %s %s" % (who, m.get("kind"), zid))
             elif act == "update":
@@ -683,7 +697,7 @@ class Mapper:
                 self.say("%s: deleted zone %s" % (who, Z.delete(str(m.get("id")))))
             elif act == "clear":
                 Z.clear(m.get("kind") or None)
-                self.say("%s: cleared %s" % (who, m.get("kind") or "all zones"))
+                self.say("%s: cleared %s" % (who, "bump marks" if m.get("kind") == "bump" else (m.get("kind") or "all zones")))
             elif act == "undo":
                 Z.undo()
             elif act == "maze":

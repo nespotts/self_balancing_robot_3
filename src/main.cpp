@@ -106,6 +106,11 @@ static NavIn navIn(uint32_t now_ms) {
   n.yaw_rate = imu.sample().yaw_rate_dps;
   n.max_speed = P(P_DRV_MAX_SPEED) * modes.speedScale(now_ms);
   n.max_turn = P(P_DRV_MAX_TURN);
+  // contact detection (#104): the balance loop's last step
+  const CtlOut& o = ctl.last();
+  n.pitch_rate = imu.sample().pitch_rate_dps;
+  n.cmd_speed = o.speed_sp;
+  n.vel_out = o.vel_out;
   return n;
 }
 
@@ -508,6 +513,7 @@ static void sendOutput(uint32_t now_us) {
 
   const uint32_t now_ms = millis();
   if (nav.statusDue(now_ms) && sendNavStatus()) nav.statusSent(now_ms);
+  if (nav.contactDue() && link.send(MSG_CONTACT, &nav.contactFrame(), sizeof(ContactFrame))) nav.contactSent();  // #104
   for (const char* l; (l = nav.peekLog()) != nullptr && link.log("%s", l);) nav.popLog();
   if (const char* r = radio.stats(now_ms)) link.log("%s", r);
   // LD19 bytes last: the telemetry above goes first, and the forwarder leaves it USB room (LidarForwarder::kReserve)
