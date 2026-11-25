@@ -2,7 +2,7 @@
 import { state, on, send, modeName, flag } from "./conn.js";
 import { toast } from "./ui.js";
 import { SENS_RGB, SENS_NEW } from "./chart.js";
-import { drawOccMap, drawPlan, planActive, plan, onChange, routeOn, hasMap, matchLine } from "./occmap.js";
+import { drawOccMap, drawPlan, planActive, plan, onChange, routeOn, hasMap, matchLine, cmd } from "./occmap.js";
 import { drawPlaces, hitPlace, openSheet, openPlaceMenu, onPlacesChange } from "./places.js";
 import { drawZones, zoneDraw, zoneDrawing, bindZones } from "./zones.js";
 
@@ -162,23 +162,66 @@ function drawWaypoints() {
   ctx.textAlign = "start"; ctx.textBaseline = "alphabetic";
 }
 
-function drawRobot() {
-  const t = state.tlm;
-  if (!t) return;
-  const x = sx(t.x_mm), y = sy(t.y_mm), h = -t.heading_deg * Math.PI / 180;
+// the robot's footprint at screen (x, y), heading hdeg; ghost: the Set position preview (dashed, orange)
+function drawFootprint(x, y, hdeg, arrow, ghost) {
+  const h = -hdeg * Math.PI / 180;
   // real footprint (CAD): 90 mm long x 152 mm wide, wheels 66 mm on a 126.8 mm track; never under ~30 px wide
-  const k = Math.max(view.s, 30 / ROBOT.w);
+  const k = Math.max(view.s, (ghost ? 40 : 30) / ROBOT.w);
   const L = ROBOT.l * k, Wd = ROBOT.w * k, tr = ROBOT.track * k, wd = ROBOT.wheel * k, ww = Math.max(3, (ROBOT.w - ROBOT.track) * k);
+  const body = ghost ? C.target : C.robot;
   ctx.save();
   ctx.translate(x, y); ctx.rotate(h);
-  ctx.fillStyle = "rgba(240,239,236,0.16)"; ctx.strokeStyle = C.robot; ctx.lineWidth = 2;
+  ctx.fillStyle = ghost ? "rgba(217,89,38,0.22)" : "rgba(240,239,236,0.16)"; ctx.strokeStyle = body; ctx.lineWidth = 2;
+  if (ghost) ctx.setLineDash([5, 4]);
   ctx.beginPath(); ctx.rect(-L / 2, -(tr - ww) / 2, L, tr - ww); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = C.robot;   // wheels
+  ctx.setLineDash([]);
+  ctx.fillStyle = body;   // wheels
   ctx.fillRect(-wd / 2, -Wd / 2, wd, ww); ctx.fillRect(-wd / 2, Wd / 2 - ww, wd, ww);
-  ctx.fillStyle = flag("obstacle") ? C.target : C.heading;   // heading arrow
+  ctx.fillStyle = arrow;   // heading arrow
   const a = Math.max(10, L * 0.55);
   ctx.beginPath(); ctx.moveTo(L / 2 + a, 0); ctx.lineTo(L / 2, -a * 0.6); ctx.lineTo(L / 2, a * 0.6); ctx.closePath(); ctx.fill();
   ctx.restore();
+}
+
+function drawRobot() {
+  const t = state.tlm;
+  if (!t) return;
+  drawFootprint(sx(t.x_mm), sy(t.y_mm), t.heading_deg, flag("obstacle") ? C.target : C.heading, false);
+}
+
+// ---------- Set position (#105): press where the robot really is, drag toward its front ----------
+const setPos = { on: false, a: null, b: null };     // a: press point, b: drag point (screen px)
+const spBar = document.getElementById("setpos-bar");
+const TURN_PX = 14;                                  // a shorter drag is a tap: the heading stays as it is
+function setPosMode(on) {
+  setPos.on = on; setPos.a = setPos.b = null;
+  spBar.hidden = !on;
+  document.body.classList.toggle("setpos", on);
+  if (on) { menu.hidden = true; if (view.follow) setFollow(false); }
+  dirty = true;
+}
+function setPosPose() {   // the gesture -> [x, y (odometry mm, what the canvas draws), heading deg, turned?]
+  const [ax, ay] = setPos.a, [bx, by] = setPos.b || setPos.a;
+  const turned = Math.hypot(bx - ax, by - ay) >= TURN_PX;
+  const h = turned ? Math.atan2(-(by - ay), bx - ax) * 180 / Math.PI : (state.tlm ? state.tlm.heading_deg : 0);
+  return [wx(ax), wy(ay), h, turned];
+}
+function drawSetPos() {
+  if (!setPos.on || !setPos.a) return;
+  const [x, y, h, turned] = setPosPose();
+  if (turned) {   // the drag line
+    ctx.strokeStyle = C.target; ctx.lineWidth = 2; ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(setPos.a[0], setPos.a[1]); ctx.lineTo(setPos.b[0], setPos.b[1]); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  drawFootprint(sx(x), sy(y), h, C.target, true);
+}
+function finishSetPos() {
+  const [x, y, h] = setPosPose();
+  cmd({ t: "map", action: "set_pose", x: Math.round(x), y: Math.round(y), th: Math.round(h * 10) / 10, frame: "odom" });
+  toast("Position set · matching the scan…", 2500);
+  setPosMode(false);
+  setFollow(true);
 }
 
 function draw() {
@@ -198,6 +241,7 @@ function draw() {
   drawWaypoints();
   drawPlaces(ctx, sx, sy);
   drawRobot();
+  drawSetPos();
 }
 requestAnimationFrame(draw);
 
@@ -295,12 +339,20 @@ function setFollow(v) { view.follow = v; document.getElementById("map-follow").c
 const LONG_MS = 550;
 let pressTimer = 0;
 // long-press (or right-click): save a place here (places.js)
-function placeMenuAt(px, py) { if (!zoneDrawing()) openPlaceMenu(px, py, wx(px), wy(py), W, H); }
+function placeMenuAt(px, py) { if (!zoneDrawing() && !setPos.on) openPlaceMenu(px, py, wx(px), wy(py), W, H); }
 canvas.addEventListener("pointerdown", (e) => {
   if (e.pointerType === "mouse" && e.button !== 0) return;   // right-click: contextmenu below
   canvas.setPointerCapture(e.pointerId);
   ptrs.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
   clearTimeout(pressTimer);
+  if (setPos.on) {                              // Set position (#105): press = where, drag = which way it faces
+    if (ptrs.size === 1) {
+      setPos.a = [e.offsetX, e.offsetY]; setPos.b = null;
+      gesture = { x: e.offsetX, y: e.offsetY, t: performance.now(), moved: 0, multi: false, long: false, setpos: true };
+    } else if (gesture) { gesture.setpos = false; gesture.multi = true; setPos.a = null; }   // two fingers: pan / zoom
+    dirty = true;
+    return;
+  }
   if (ptrs.size === 1 && zoneDrawing() && zoneDraw.down(e.offsetX, e.offsetY)) {
     gesture = { x: e.offsetX, y: e.offsetY, t: performance.now(), moved: 0, multi: false, long: false, zone: true };
     return;                                     // drawing a rectangle / dragging a handle (zones.js)
@@ -318,6 +370,8 @@ canvas.addEventListener("pointermove", (e) => {
   const p = ptrs.get(e.pointerId);
   if (!p) return;
   if (ptrs.size === 1 && gesture && gesture.zone) { zoneDraw.move(e.offsetX, e.offsetY); p.x = e.offsetX; p.y = e.offsetY; return; }
+  if (ptrs.size === 1 && gesture && gesture.setpos) { setPos.b = [e.offsetX, e.offsetY]; p.x = e.offsetX; p.y = e.offsetY; dirty = true; return; }
+  if (ptrs.size === 1 && setPos.on) { p.x = e.offsetX; p.y = e.offsetY; return; }   // the finger left of a pinch
   if (ptrs.size === 1) {
     const dx = e.offsetX - p.x, dy = e.offsetY - p.y;
     if (gesture) gesture.moved += Math.abs(dx) + Math.abs(dy);
@@ -346,6 +400,14 @@ function endPtr(e) {
     if (ptrs.size === 0) { if (e.type === "pointerup") zoneDraw.up(e.offsetX, e.offsetY); else zoneDraw.cancel(); gesture = null; }
     return;
   }
+  if (setPos.on) {
+    if (ptrs.size === 0) {
+      if (gesture && gesture.setpos && e.type === "pointerup") finishSetPos();
+      else { setPos.a = setPos.b = null; dirty = true; }
+      gesture = null;
+    }
+    return;
+  }
   if (ptrs.size === 0 && gesture) {
     clearTimeout(pressTimer);
     if (!gesture.multi && !gesture.long && gesture.moved <= 8 && performance.now() - gesture.t < 600 && e.type === "pointerup") {
@@ -370,7 +432,13 @@ document.addEventListener("pointerdown", (e) => { if (!menu.hidden && !menu.cont
 for (const k of ["ranges", "lidar", "track", "grid"]) {
   document.getElementById("lay-" + k).onchange = (e) => { layers[k] = e.target.checked; dirty = true; };
 }
-document.getElementById("map-clear-track").onclick = () => { state.track = []; state.ranges = []; menu.hidden = true; dirty = true; };
+document.getElementById("map-setpos").onclick = () => {
+  if (!state.tlm) return toast("No robot pose yet");
+  setPosMode(true);
+};
+document.getElementById("setpos-cancel").onclick = () => setPosMode(false);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && setPos.on) setPosMode(false); });
+document.getElementById("map-clear-track").onclick =() => { state.track = []; state.ranges = []; menu.hidden = true; dirty = true; };
 document.getElementById("map-reset-pose").onclick = () => {
   if (!confirm("Reset the robot's pose to 0,0 heading 0? Waypoints are cleared.")) return;
   send({ t: "event", event: state.hello.events.indexOf("RESET_POSE") });
@@ -385,4 +453,4 @@ on("conn", updateInfo);
 setInterval(() => { dirty = true; }, 500);   // keep fading even when the robot is silent
 updateBar(); updateInfo();
 
-export function mapDebug() { return { view, pending }; }
+export function mapDebug() { return { view, pending, setPos }; }

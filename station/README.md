@@ -137,5 +137,6 @@ Health (preflight checklist, battery minutes, tiles; it only looks, it never arm
 LD19 spinning lidar (dense 360 degree map input, Health tile, Map layer): [wiring (Teensy Serial7), sources, settings](../docs/ld19.md); try it with `python -m station.sim --lidar teensy`.
 With it the bridge matches the turns to the map and corrects the drifting pose ([scan matching](../docs/ld19.md#scan-matching-78)): `python -m station.sim --lidar --tour --drift 3`; numbers: `python -m station.sim.lidar_eval`.
 Wheel slip ([#79](../docs/ld19.md#wheel-slip-79)): `python -m station.sim --lidar --tour --slip 1:2:20` (random 2 s spin-outs, about one per 20 s of driving); numbers: `python -m station.sim.lidar_eval --slip 0.5 2 5`.
+Relocalisation ([#105](../docs/ld19.md#relocalisation-105): Set position, the whole-map search after a kidnap / Teensy reboot): `python -m station.sim --lidar --tour --teleport-file tp` (write `x y deg` into `tp`); numbers: `python -m station.sim.reloc_eval`, `python -m station.sim.lidar_eval --reloc`.
 
 More: [Android app](android/README.md) | [features in detail](../docs/station-features.md) | [API, install, flashing contract](../docs/api.md)

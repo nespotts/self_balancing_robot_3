@@ -1056,8 +1056,9 @@ class Bridge:
             self.say("%s: event %s" % (who, lp.EVENT_NAMES[ev]))
         elif t in ("preset", "score", "motor", "balpoint", "calib"):
             return self.tools.handle(m, who)
-        elif t == "map":       # occupancy grid: reset / save / load / list / delete / set (#12)
-            return self.mapper.command(m, who)
+        elif t == "map":       # occupancy grid: reset / save / load / list / delete / set (#12), set_pose (#105)
+            tl = self.tlm
+            return self.mapper.command(m, who, (tl["x_mm"], tl["y_mm"], tl["heading_deg"]) if tl else None)
         elif t == "places":    # saved places on the map: add / rename / delete / list (#53)
             return self.mapper.places_command(m, who)
         elif t == "zones":     # virtual walls / no-go / fence / slow zones / mazes (#70)

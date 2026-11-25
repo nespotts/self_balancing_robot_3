@@ -78,6 +78,85 @@ async def until_slip(cdp, limit=300.0):
     return None
 
 
+async def js(cdp, expr):
+    r = await cdp.call("Runtime.evaluate", expression=expr, awaitPromise=True, returnByValue=True)
+    return (r.get("result") or {}).get("value")
+
+
+def until_info(text, limit=40.0):
+    """An action: wait until the map info line contains text (the shot is taken then)."""
+    async def act(cdp):
+        end = time.monotonic() + limit
+        while time.monotonic() < end:
+            if text in (await js(cdp, "(document.getElementById('map-info')||{}).textContent||''") or ""):
+                return None
+            await asyncio.sleep(0.1)
+        print("  (info line never said %r)" % text)
+        return None
+    return act
+
+
+def kidnap(x, y, deg, then=None):
+    """An action (sim --teleport-file $SBR3_TELEPORT_FILE): carry the robot to x, y, deg, then run `then`."""
+    async def act(cdp):
+        with open(os.environ["SBR3_TELEPORT_FILE"], "w") as f:
+            f.write("%.0f %.0f %.1f" % (x, y, deg))
+        await asyncio.sleep(0.6)
+        return await then(cdp) if then else None
+    return act
+
+
+# the Set position tool (#105): centre the view on (x, y) (map frame), press there, drag toward deg
+SETPOS_JS = """(async () => {
+  const m = await import('/js/occmap.js');
+  document.getElementById('map-setpos').click();
+  const v = sbr3.map().view, c = document.getElementById('map'), r = c.getBoundingClientRect();
+  const h = %f * Math.PI / 180, [ox, oy] = m.mapToOdom(%f, %f), [qx, qy] = m.mapToOdom(%f + 450 * Math.cos(h), %f + 450 * Math.sin(h));
+  v.cx = ox; v.cy = oy;
+  const px = (x) => r.left + c.clientWidth / 2 + (x - v.cx) * v.s, py = (y) => r.top + c.clientHeight / 2 - (y - v.cy) * v.s;
+  return [px(ox), py(oy), px(qx), py(qy)];
+})()"""
+
+
+def act_setpos(x, y, deg, mouse=False, wait_lost=1.5):
+    async def act(cdp):
+        await asyncio.sleep(wait_lost)
+        ax, ay, bx, by = await js(cdp, SETPOS_JS % (deg, x, y, x, y))
+        await asyncio.sleep(0.3)
+        if mouse:
+            ev = lambda kind, px, py, **kw: cdp.call("Input.dispatchMouseEvent", type=kind, x=px, y=py, button="left", **kw)
+            await ev("mousePressed", ax, ay, clickCount=1, buttons=1)
+            for i in range(1, 11):
+                await ev("mouseMoved", ax + (bx - ax) * i / 10, ay + (by - ay) * i / 10, buttons=1)
+                await asyncio.sleep(0.03)
+            return lambda: ev("mouseReleased", bx, by, clickCount=1)
+        await touch(cdp, "touchStart", ax, ay)
+        for i in range(1, 11):
+            await touch(cdp, "touchMove", ax + (bx - ax) * i / 10, ay + (by - ay) * i / 10)
+            await asyncio.sleep(0.03)
+        return lambda: touch(cdp, "touchEnd", 0, 0)
+    return act
+
+
+# Relocalisation (#105): the sim with --lidar teensy --teleport-file, after --prep-map (the room explored):
+#   SBR3_TELEPORT_FILE=... python -m station.tools.screenshots --url http://localhost:8090/ --prep-map reloc
+# (the whole-map search takes ~50 ms on a PC: run the sim with reloc.PAUSE_S raised so "searching" is on screen ~2 s)
+MENU = "document.getElementById('map-more').click()"
+SHOTS_RELOC = [
+    ("phone-reloc-menu", PHONE, "map", MENU, 1),
+    ("phone-setpos", PHONE, "map", "document.getElementById('map-menu').hidden=true",
+     0.3, kidnap(3150, 1350, 200, act_setpos(3150, 1350, 200))),
+    ("phone-setpos-confirmed", PHONE, "map", "", 0.3, until_info("position confirmed")),
+    ("phone-reloc-searching", PHONE, "map", "", 0, kidnap(-350, -600, 70, until_info("searching the whole map"))),
+    ("phone-reloc-found", PHONE, "map", "", 0.3, until_info("found on the map")),
+    ("desktop-setpos", DESKTOP, "map", "", 0.3, kidnap(600, 1300, -30, act_setpos(600, 1300, -30, mouse=True))),
+    ("desktop-setpos-confirmed", DESKTOP, "map", "", 0.3, until_info("position confirmed")),
+]
+# ... and in a symmetric room (the sim's Room(empty=True), the robot mapped it standing at the start): carried off
+SHOTS_RELOC_SYM = [
+    ("phone-reloc-ambiguous", PHONE, "map", "", 0.3, kidnap(2600, 1100, 150, until_info("Ambiguous", 60))),
+]
+
 FULL_RATE = "document.getElementById('tc-full').classList.contains('on')||document.getElementById('tc-full').click()"
 
 SHOTS = [  # name, device, view, js to run after the view is shown, extra wait s[, action]
@@ -384,7 +463,7 @@ async def shoot(url, browser, names, port=9333):
         await cdp.call("Page.enable")
         os.makedirs(OUT, exist_ok=True)
         current = None
-        for name, (w, h, dpr, mobile), view, js, wait, *action in SHOTS + SHOTS_TUNE + SHOTS_BALPOINT + SHOTS_CALIB + SHOTS_FALLS + SHOTS_ROBOT:
+        for name, (w, h, dpr, mobile), view, js, wait, *action in SHOTS + SHOTS_TUNE + SHOTS_BALPOINT + SHOTS_CALIB + SHOTS_FALLS + SHOTS_ROBOT + SHOTS_RELOC + SHOTS_RELOC_SYM:
             if names and name not in names:
                 continue
             if current != (w, h, dpr, mobile):
@@ -437,6 +516,10 @@ def main():
         a.names = [s[0] for s in SHOTS_CALIB]
     if a.names == ["balpoint"]:
         a.names = [s[0] for s in SHOTS_BALPOINT]
+    if a.names == ["reloc"]:
+        a.names = [s[0] for s in SHOTS_RELOC]
+    if a.names == ["reloc-sym"]:
+        a.names = [s[0] for s in SHOTS_RELOC_SYM]
 
     async def run():
         if a.prep:

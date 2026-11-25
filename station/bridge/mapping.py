@@ -86,6 +86,8 @@ DEFAULTS = {
     "match_wide_mm": 400.0,     # lost: the search widens up to this ...
     "match_wide_deg": 6.0,      # ... (the gyro heading does not slip: the heading window grows less)
     "match_stuck_s": 2.5,       # slipping in GOTO / EXPLORE, the lidar pose still this long: the robot is stuck (0 = off)
+    # relocalisation (#105, reloc.py): lost > 5 s, a Teensy reboot / pose reset, a map loaded -> search the whole map
+    "match_global": True,
 }
 LIMITS = {"pitch_limit_deg": (0.5, 45), "no_target_mm": (0, 4000), "max_hit_mm": (100, 8000),
           "min_mm": (0, 500), "cone_deg": (0, 30), "hit_arc_deg": (0, 30), "body_free_mm": (0, 150),
@@ -450,8 +452,9 @@ class Mapper:
                     match=self.matcher.last, lmatch=self.lmatch.stats())
 
     # ------------------------------------------------------------ commands
-    def command(self, m, who="?"):
-        """{"t": "map", "action": "reset" | "save" | "load" | "list" | "delete" | "set", ...} -> reply."""
+    def command(self, m, who="?", odom=None):
+        """{"t": "map", "action": "reset" | "save" | "load" | "list" | "delete" | "set" | "trust_pose" | "scan" |
+        "set_pose" | "relocalize", ...} -> reply. odom: the robot's odometry pose (x, y, heading) now (set_pose)."""
         act = m.get("action")
         if act == "reset":
             self.reset()
@@ -491,6 +494,21 @@ class Mapper:
                 return {"t": "error", "text": "the scan matcher is not lost"}
             self.full_pending = True
             return None
+        if act == "set_pose":               # Set position (#105): the robot is at x, y (mm), heading th (deg) on the map
+            try:
+                x, y, th = float(m.get("x")), float(m.get("y")), float(m.get("th", m.get("heading_deg", 0.0)))
+            except (TypeError, ValueError):
+                return {"t": "error", "text": "set_pose: x, y (mm) and th (deg) needed"}
+            if m.get("frame") == "odom":    # given in the odometry frame (what goto / places use): to the map frame
+                x, y, th = self.map_pose(x, y, th)
+            err = self.lmatch.set_pose(x, y, th, who, odom)
+            if err:
+                return {"t": "error", "text": err}
+            self.full_pending = True        # browsers get the new correction now
+            return None
+        if act == "relocalize":             # "Find myself" (#105): search the whole map for the robot
+            err = self.lmatch.relocalize(who)
+            return {"t": "error", "text": err} if err else None
         if act == "scan":                   # "Scan & correct" (#71): match the next scan taken standing still
             if not self.n["used"]:
                 return {"t": "error", "text": "no map yet to match against"}
@@ -776,6 +794,10 @@ class Mapper:
         self.stopscan.reset()
         self.lmatch.reset()
         self.lmatch.turns = 10 ** 6          # a loaded map is there to match against: no map-only warm-up
+        if self.lidar is not None and self.settings.get("match_global", True):
+            # where the robot is on it is not known (the saved correction is from another session's odometry): find it
+            # (#105); nothing is mapped until it is found and confirmed
+            self.lmatch.request_global("map %s loaded" % name, by="load")
         self.scan_sent = -1
         self.name = name
         self.version += 1

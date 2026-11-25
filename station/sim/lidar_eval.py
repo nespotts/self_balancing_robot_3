@@ -9,6 +9,10 @@ matcher off and on, odometry drift / miscalibration, real LD19 packets (lidar_si
                                                         wheel slip (#79): one tour loop with one spin-out of each
                                                         length on the first leg, #78 alone vs the #79 handling
                                                         (--ratio 0.5: half slip; --lidar-off: no LD19 data meanwhile)
+  python -m station.sim.lidar_eval --reloc --seeds 1 2 3 --kidnaps 4
+                                                        relocalisation (#105): after 3 tour legs the robot is carried
+                                                        to random poses / headings, and a Teensy reboot (odometry back
+                                                        to 0, 0, 0): found?, time to find, pose error after
 
 Per run: stand up, drive the TOUR loop as planner gotos (map frame, a short stop at every corner) --loops times, then
 go to the saved places (Home = start, "Far" = (3500, 1400)) and measure where the robot really is.
@@ -287,6 +291,58 @@ def run_slip(seed, dur, ratio=1.0, recover=True, drift=3.0, scale=0.02, leg=0, a
         e.close()
 
 
+def run_kidnap(seed, kind="kidnap", to=None, legs=3, wait_s=14.0, drift=3.0, scale=0.02, gap_s=3.0, quiet=True,
+               settings=None):
+    """Relocalisation (#105): drive the first `legs` TOUR legs (the map), then
+      kind "kidnap": carry the robot to `to` = (x, y, deg) (world; odometry does not notice), or
+      kind "reboot": the odometry resets to 0, 0, 0 where it stands, after gap_s s without LD19 data (the Teensy
+                     forwards them: a reboot stops them too);
+    then stand for wait_s. Found = the pose error < 50 mm (and heading < 2 deg) for 1 s; time from the event."""
+    from station.sim import extras
+    e = Run(seed, True, drift, scale, settings=settings, sample_s=0.1)
+    try:
+        e.stand_up()
+        for p in TOUR[:legs]:
+            e.drive(lambda b, p=p: b.planner._begin_goto([tuple(p)], None, False), max_s=60.0)
+            e.settle(0.5)
+        r, lm = e.r, e.m.lmatch
+        t_ev = r.t
+        if kind == "kidnap":
+            x, y, h = to or (-300.0, 1200.0, r.TH + 150.0)
+            extras.teleport(r, x, y, h)
+        else:
+            e.lidar_off = True
+            e.settle(gap_s)
+            extras.teleport(r, r.X, r.Y, r.TH, reset_odom=True)
+            e.lidar_off = False
+        herr = []
+        t_end = r.t + wait_s
+        found = ok_since = None
+        while r.t < t_end:
+            e.settle(0.1)
+            pe, he = e.pose_error()
+            herr.append(he)
+            if pe < 50.0 and he < 2.0:
+                ok_since = r.t if ok_since is None else ok_since
+                if found is None and r.t - ok_since >= 1.0:
+                    found = ok_since - t_ev
+            else:
+                ok_since = None
+        pe, he = e.pose_error()
+        g = lm.last_global or {}
+        out = {"seed": seed, "kind": kind, "found_s": None if found is None else round(found, 1),
+               "err_end_mm": round(pe), "head_end_deg": round(he, 2), "mode": lm.mode,
+               "global": lm.n["global"], "relocated": lm.n["relocated"], "lost": lm.n["lost"],
+               "search_ms": g.get("ms"), "nodes": g.get("nodes"), "fit": g.get("score"), "margin": g.get("margin"),
+               "phase": (lm._reloc_stats(lm._now()) or {}).get("phase"), "t_s": round(r.t),
+               "wall_fit": round(wall_stats(e.m, r.room, e.F)[0], 3)}
+        if not quiet:
+            print(out, flush=True)
+        return out
+    finally:
+        e.close()
+
+
 KEYS = ("err_mean_mm", "err_max_mm", "err_end_mm", "head_mean_deg", "head_max_deg", "head_end_deg", "far_mm", "home_mm",
         "wall_fit", "occ_cells", "occ_mm", "scan_ms", "match_ms", "match_ms_p95", "slips", "lost", "stuck")
 
@@ -306,7 +362,28 @@ def main(argv=None):
     ap.add_argument("--ratio", type=float, default=1.0, help="--slip: 1 = wheels spin, body still; 0.5 = half")
     ap.add_argument("--lever", type=float, default=0.0, help="lidar this far above the axle (lean moves it)")
     ap.add_argument("--lidar-off", action="store_true", help="--slip: no LD19 data during the episode (lost + wide search)")
+    ap.add_argument("--reloc", action="store_true", help="relocalisation runs (#105): kidnaps + a reboot per seed")
+    ap.add_argument("--kidnaps", type=int, default=3, help="--reloc: random kidnaps per seed")
     a = ap.parse_args(argv)
+    if a.reloc:
+        import random
+        from .reloc_eval import free_pose
+        from .sim import Room
+        rows = []
+        for seed in a.seeds:
+            rng = random.Random(seed)
+            for _ in range(a.kidnaps):
+                rows.append(run_kidnap(seed, "kidnap", free_pose(Room(), (-1000, -1500, 4000, 2000), rng, 300.0)))
+                print(rows[-1], flush=True)
+            rows.append(run_kidnap(seed, "reboot"))
+            print(rows[-1], flush=True)
+        for kind in ("kidnap", "reboot"):
+            rs = [o for o in rows if o["kind"] == kind]
+            ok = sorted(o["found_s"] for o in rs if o["found_s"] is not None)
+            print("%s: found %d of %d, time to find median %s s, max %s s; wrong poses accepted: %d" % (
+                kind, len(ok), len(rs), ok[len(ok) // 2] if ok else "-", ok[-1] if ok else "-",
+                sum(1 for o in rs if o["mode"] == "track" and o["err_end_mm"] > 100)))
+        return
     if a.slip:
         rows = []
         for dur in a.slip:

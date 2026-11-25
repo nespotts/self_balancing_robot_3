@@ -162,6 +162,7 @@ $("set-stopscan").onchange = (e) => cmd({ t: "map", action: "set", settings: { s
 $("set-lmatch").onchange = (e) => cmd({ t: "map", action: "set", settings: { lidar_match: e.target.checked } });
 $("set-lslip").onchange = (e) => cmd({ t: "map", action: "set", settings: { match_slip: e.target.checked } });
 $("map-trust").onclick = () => { cmd({ t: "map", action: "trust_pose" }); toast("Pose trusted: mapping from here", 2500); $("map-menu").hidden = true; };
+$("map-find").onclick = () => { cmd({ t: "map", action: "relocalize" }); toast("Searching the whole map…", 2500); $("map-menu").hidden = true; };
 $("set-scanpause").onchange = (e) => cmd({ t: "plan", action: "set", settings: { scan_pause: e.target.checked } });
 
 // LD19 scan matching (#78): one line for the map info box ("" when there is no lidar / it is off)
@@ -170,10 +171,27 @@ export function matchLine() {
   if (!L || !L.lidar || !L.on || !L.state || L.state === "off") return "";
   // wheel slip / lost (#79): the pose is held / searched for, nothing goes into the map meanwhile
   if (L.mode === "slip") return `⚠ Wheel slip · holding position · grip ${Math.round(100 * (L.grip || 0))} %`;
+  // relocalisation (#105): the whole-map search, Set position
+  const R = L.reloc, pct = (v) => Math.round(100 * (v || 0)) + " %";
+  if (R && L.mode === "lost") {
+    const set = R.by === "set";
+    if (R.running || R.phase === "pending" || R.phase === "searching")
+      return set ? "Set position: matching the scan…" : "⚠ Pose lost · searching the whole map…";
+    if (R.phase === "set") return "Set position: matching the scan…";
+    if (R.phase === "confirming")
+      return `${set ? "Set position: fits" : "Found on the map"} · fit ${pct(R.score)} · margin ${pct(R.margin)} · confirming…`;
+    if (R.phase === "ambiguous") return `⚠ Ambiguous: ${R.cands > 1 ? R.cands + " places fit" : "the room looks alike"} · use Set position (⋯)`;
+    if (R.phase === "none") return "⚠ Pose lost · not found on the map · use Set position (⋯)";
+    if (R.phase === "set_poor") return `⚠ Set position: poor fit (${pct(R.score)}) · not mapping · drive a little or set it again`;
+    if (R.phase === "unconfirmed") return "⚠ Found pose not confirmed · not mapping · searching again…";
+  }
+  if (R && R.phase === "found" && L.mode === "track")
+    return R.by === "set" ? "Scan match ✓ position confirmed · mapping again"
+      : `Scan match ✓ found on the map · fit ${pct(R.score)} · margin ${pct(R.margin)}`;
   if (L.mode === "lost" && L.checking) return "Scan match: checking the pose after a lidar gap…";
   if (L.mode === "lost") {
     const w = L.window ? ` ±${Math.round(L.window[0] / 10)} cm` : "";
-    return `⚠ Pose lost ${Math.round(L.lost_s || 0)} s · searching${w} · not mapping` + (L.lost_s > 20 ? " (⋯ Trust pose)" : "");
+    return `⚠ Pose lost ${Math.round(L.lost_s || 0)} s · searching${w} · not mapping` + (L.lost_s > 20 ? " (⋯ Set position)" : "");
   }
   if (L.state.startsWith("matched")) {
     const a = L.applied, fix = a && (a[0] || a[1] || a[2])
@@ -215,7 +233,9 @@ function syncSettings() {
   $("set-lmatch-row").hidden = !(occ.stats && occ.stats.lmatch && occ.stats.lmatch.lidar);
   if (occ.settings && "match_slip" in occ.settings) $("set-lslip").checked = occ.settings.match_slip;
   $("set-lslip-row").hidden = $("set-lmatch-row").hidden || !(occ.settings && occ.settings.lidar_match);
-  $("map-trust").hidden = !(occ.stats && occ.stats.lmatch && occ.stats.lmatch.mode === "lost");
+  const lmt = occ.stats && occ.stats.lmatch;
+  $("map-trust").hidden = !(lmt && lmt.mode === "lost");
+  $("map-find").hidden = !(lmt && lmt.lidar && lmt.on && occ.tiles.size);
   if (plan.settings && "scan_pause" in plan.settings) $("set-scanpause").checked = plan.settings.scan_pause;
   if (plan.settings && "zones_block_manual" in plan.settings) $("set-zblock").checked = plan.settings.zones_block_manual;
   const st = occ.stats || {};
