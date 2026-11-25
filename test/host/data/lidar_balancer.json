@@ -1,0 +1,22 @@
+{
+ "enabled": true,
+ "x_mm": 0.0,
+ "y_mm": 0.0,
+ "yaw_deg": -90.0,
+ "flip": false,
+ "height_mm": 208.0,
+ "min_range_mm": 60.0,
+ "max_range_mm": 8000.0,
+ "min_intensity": 15.0,
+ "mask": [],
+ "pitch_limit_deg": 2.5,
+ "tilt_mode": "skip",
+ "pitch_max_deg": 6.0,
+ "pitch_auto_ref": true,
+ "pitch_ref_deg": 0.0,
+ "floor_clip": true,
+ "deskew": true,
+ "time_offset_ms": 0.0,
+ "every_n": 1,
+ "ray_step": 1
+}

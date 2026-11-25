@@ -74,17 +74,18 @@ def expected_sectors(room, x, y, th, mask=((87.0, 93.0), (267.0, 273.0)), rmin=1
 class Feed:
     """Rig + LidarObstacles; frames decoded as sent."""
 
-    def __init__(self, tmp, link=True, params=None, ready=None, **kw):
+    def __init__(self, tmp, link=True, params=None, ready=None, teensy=None, **kw):
         self.rig = Rig(tmp, **kw)
         self.frames = []
         self.link = link
-        self.obst = LidarObstacles(self.rig.lidar, self.send, clock=lambda: self.rig.r.t, params=params, ready=ready)
+        self.obst = LidarObstacles(self.rig.lidar, self.send, clock=lambda: self.rig.r.t, params=params, ready=ready,
+                                   teensy=teensy)
 
     def send(self, frame):
         if not self.link:
             return False
         (t, p), = lp.FrameParser().feed(frame)
-        self.frames.append((self.rig.r.t, lp.decode(t, p)))
+        self.frames.append((self.rig.r.t, lp.decode(t, p)) if t == lp.MSG_LIDAR_OBSTACLES else (self.rig.r.t, (t, p)))
         return True
 
 
@@ -338,5 +339,68 @@ class TestCorridorPoint(unittest.TestCase):
         self.assertAlmostEqual(front, 400.0 - 38.9, delta=25.0)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestTeensyComputes(unittest.TestCase):
+    """Link v10 (#113): firmware with LINK_CAP_LIDAR_SECTORS gets the lidar settings (MSG_LIDAR_CONFIG), not frames."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def configs(self, f):
+        return [(t, lp.decode_lidar_config(p)) for t, (k, p) in
+                ((t, d) for t, d in f.frames if isinstance(d, tuple)) if k == lp.MSG_LIDAR_CONFIG]
+
+    def test_no_frames_settings_instead(self):
+        on = {"teensy": True, "ready": False}
+        f = Feed(self.tmp, teensy=lambda: on["teensy"], ready=lambda: on["ready"], yaw_deg=-90.0, min_range_mm=60.0)
+        f.rig.run(1.0)
+        f.obst.tick()
+        self.assertEqual(f.frames, [])                         # profile not bound: nothing at all
+        self.assertGreater(f.obst.n["teensy"], 5)
+        on["ready"] = True
+        self.assertTrue(f.obst.tick())
+        self.assertFalse(f.obst.tick())                        # once, then every CONFIG_RESEND_S
+        (t, c), = self.configs(f)
+        self.assertEqual((c["yaw_deg"], c["min_range_mm"], c["pitch_gate_deg"]), (-90.0, 60.0, 6.0))
+        self.assertEqual(c["mask"], [[87.0, 93.0], [267.0, 273.0]])
+        self.assertTrue(c["flags"] & lp.LINK_LCFG_ENABLED and c["flags"] & lp.LINK_LCFG_DESKEW)
+        f.rig.run(1.0)
+        self.assertFalse(f.obst.tick())
+        f.rig.run(1.1)
+        self.assertTrue(f.obst.tick())                         # 2 s later: again (a lost frame, a Teensy reboot)
+        f.rig.lidar.apply_settings({"yaw_deg": -88.0}, save=False)
+        self.assertTrue(f.obst.tick())                         # changed: at once
+        self.assertEqual(self.configs(f)[-1][1]["yaw_deg"], -88.0)
+        f.obst.config_reset()                                  # a HELLO: at once
+        self.assertTrue(f.obst.tick())
+        st = f.obst.status()
+        self.assertTrue(st["on_teensy"])
+        self.assertEqual(st["config_sent"], 4)
+        self.assertEqual([d for _t, d in f.frames if not isinstance(d, tuple)], [])   # never an obstacle frame
+        on["teensy"] = False                                   # older firmware (no caps): frames, no settings
+        n = len(f.frames)
+        f.rig.run(1.0)
+        self.assertFalse(f.obst.tick())
+        self.assertGreater(len(f.frames) - n, 5)
+        self.assertEqual(len(self.configs(f)), 4)
+
+    def test_firmware_line_with_the_sectors(self):
+        f = Feed(self.tmp)
+        f.rig.lidar.on_robot_log("lidar: 17.6 kB/s, 98 frames/s, usb drop 2, overflow 0, max 180 B / 12.0 us per pass; "
+                                 "sectors 9.9/s, skip tilt 2 pose 0 stale 0 few 0 busy 0, max 41 us/slice 380 us/turn")
+        self.assertEqual(f.rig.lidar.reader.fw, {"usb_drop": 2, "overflow": 0, "sectors_hz": 9.9, "sectors_slice_us": 41,
+                                                 "sectors_turn_us": 380})
+        f.rig.lidar.on_robot_log("lidar: 17.6 kB/s, 98 frames/s, usb drop 3, overflow 1, max 180 B / 12.0 us per pass")
+        self.assertEqual(f.rig.lidar.reader.fw, {"usb_drop": 3, "overflow": 1})       # v9 firmware's line
+
+    def test_older_firmware_by_default(self):
+        f = Feed(self.tmp)
+        f.rig.run(1.0)
+        self.assertFalse(f.obst.tick())
+        self.assertGreater(len(f.frames), 5)
+        self.assertFalse(f.obst.status()["on_teensy"])
+
+
+if __name__ == "__main__":    unittest.main()

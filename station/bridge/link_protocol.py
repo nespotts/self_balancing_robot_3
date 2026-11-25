@@ -1,4 +1,4 @@
-"""Link protocol v9 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
+"""Link protocol v10 (Teensy <-> Orange Pi). Mirror of include/protocol/link_protocol.h.
 
 Frame: 0xA5 0x5A | type u8 | len u8 | payload[len] | crc16 u16 LE
 crc16 = CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over type, len and payload.
@@ -8,7 +8,7 @@ Pure Python, 3.8+.
 import binascii
 import struct
 
-LINK_PROTOCOL_VERSION = 9
+LINK_PROTOCOL_VERSION = 10
 LINK_SYNC1 = 0xA5
 LINK_SYNC2 = 0x5A
 LINK_MAX_PAYLOAD = 200
@@ -32,6 +32,7 @@ MSG_GET_PARAMS = 0x84
 MSG_GOTO = 0x85
 MSG_EVENT = 0x86
 MSG_LIDAR_OBSTACLES = 0x87    # v5 (#77): LD19 obstacle sectors for the navigator
+MSG_LIDAR_CONFIG = 0x88       # v10 (#113): the lidar mount settings for the Teensy's own obstacle sectors
 
 MSG_NAMES = {v: k for k, v in globals().items() if k.startswith("MSG_") and isinstance(v, int)}
 
@@ -71,6 +72,16 @@ LINK_LIDAR_SECTORS = 36
 LINK_LIDAR_FRESH_MS = 500       # firmware: no frame for this long -> no lidar (sweep or blind)
 LINK_LIDAR_MAX_AGE_MS = 300     # firmware drops frames whose pose is older (bridge: does not send them)
 LIDAR_SECTOR_DEG = 360.0 / LINK_LIDAR_SECTORS
+
+# HelloFrame.caps (v10, #113)
+LINK_CAP_LIDAR_SECTORS = 0x01   # the firmware computes the LD19 sectors: send it MSG_LIDAR_CONFIG, not obstacle frames
+# MSG_LIDAR_CONFIG (v10, #113): LidarConfigFrame.flags
+LINK_LCFG_ENABLED = 0x01
+LINK_LCFG_FLIP = 0x02
+LINK_LCFG_PITCH_AUTO = 0x04
+LINK_LCFG_FLOOR_CLIP = 0x08
+LINK_LCFG_DESKEW = 0x10
+LINK_LIDAR_MASK_MAX = 8
 
 # MSG_LIDAR_RAW (v7, #100): seq u8, flags u8, then 1 .. LINK_LIDAR_RAW_MAX raw LD19 bytes (see LidarRawFrame)
 LINK_LIDAR_RAW_MAX = 180
@@ -126,11 +137,13 @@ NAV_STATE_COUNT = 6
 NAV_STATE_NAMES = ["idle", "turning", "driving", "blocked", "arrived", "holding"]
 
 # ---- struct layouts: (format, field names in C order) ------------------------------------
-HELLO_FMT = "<BBH24sBBHIII"
+HELLO_FMT = "<BBH24sBBHIIII"
 HELLO_FIELDS = ("link_version", "radio_version", "param_count", "firmware",
                 # v9 (#109): why the Teensy last reset
-                "reset_cause", "reset_flags", "srsr", "prev_uptime_s", "off_s", "uptime_ms")
+                "reset_cause", "reset_flags", "srsr", "prev_uptime_s", "off_s", "uptime_ms",
+                "caps")                  # v10 (#113): LINK_CAP_* bits
 HELLO_V8_SIZE = 28       # v8 and older: no reset cause (decoded as 0 = unknown)
+HELLO_V9_SIZE = 44       # v9: no caps (decoded as 0)
 
 TELEMETRY_FMT = "<IBBBB23fIBBBB"
 TELEMETRY_FIELDS = (
@@ -175,6 +188,9 @@ LIDAR_OBST_FMT = "<BBH" + "h" * (2 * LINK_LIDAR_SECTORS)      # xy_mm[72] = x0, 
 LIDAR_OBST_FIELDS = ("seq", "sectors", "age_ms", "xy_mm")
 LIDAR_RAW_FMT = "<BB%dB" % LINK_LIDAR_RAW_MAX                  # header + the most data bytes; len = 2 + n
 LIDAR_RAW_FIELDS = ("seq", "flags", "data")
+LIDAR_CONFIG_FMT = "<BBH10f" + "H" * (2 * LINK_LIDAR_MASK_MAX)    # mask_cdeg[16] = from0, to0, from1, to1, ...
+LIDAR_CONFIG_FIELDS = ("flags", "mask_n", "reserved", "x_mm", "y_mm", "yaw_deg", "height_mm", "min_range_mm",
+                       "max_range_mm", "min_intensity", "pitch_gate_deg", "pitch_ref_deg", "time_offset_ms", "mask_cdeg")
 CONTACT_FMT = "<BBBB4f"
 CONTACT_FIELDS = ("kind", "seq", "mode", "flags", "x_mm", "y_mm", "heading_deg", "value")
 
@@ -192,16 +208,18 @@ STRUCTS = {  # C struct name -> (format, fields); GotoFrame is variable length (
     "LidarObstacleFrame": (LIDAR_OBST_FMT, LIDAR_OBST_FIELDS),   # xy_mm is an array: encode/decode_lidar_obstacles
     "LidarRawFrame": (LIDAR_RAW_FMT, LIDAR_RAW_FIELDS),          # variable length: encode/decode_lidar_raw
     "ContactFrame": (CONTACT_FMT, CONTACT_FIELDS),               # v8 (#104)
+    "LidarConfigFrame": (LIDAR_CONFIG_FMT, LIDAR_CONFIG_FIELDS),  # v10 (#113); mask_cdeg is an array: encode_lidar_config
 }
 
 _S = {name: struct.Struct(fmt) for name, (fmt, _f) in STRUCTS.items()}
 TELEMETRY_SIZE = _S["TelemetryFrame"].size      # 108
 RANGE_SIZE = _S["RangeFrame"].size              # 28
 PARAM_INFO_SIZE = _S["ParamInfoFrame"].size     # 38
-HELLO_SIZE = _S["HelloFrame"].size              # 44 (v9)
+HELLO_SIZE = _S["HelloFrame"].size              # 48 (v10)
 NAV_STATUS_SIZE = _S["NavStatusFrame"].size     # 20
 LIDAR_OBST_SIZE = _S["LidarObstacleFrame"].size  # 148
 CONTACT_SIZE = _S["ContactFrame"].size          # 20
+LIDAR_CONFIG_SIZE = _S["LidarConfigFrame"].size  # 76
 
 
 # ---- CRC-16/CCITT-FALSE --------------------------------------------------------------------
@@ -306,8 +324,8 @@ def _unpack(name, payload):
 
 
 def decode_hello(p):
-    d = _unpack("HelloFrame", _pad(p, (HELLO_V8_SIZE,), HELLO_SIZE))   # v8 firmware: no reset fields (0)
-    if len(p) < HELLO_SIZE:
+    d = _unpack("HelloFrame", _pad(p, (HELLO_V9_SIZE, HELLO_V8_SIZE), HELLO_SIZE))   # v9: caps 0; v8: no reset fields
+    if len(p) < HELLO_V9_SIZE:
         d["off_s"] = 0xFFFFFFFF
     d["firmware"] = _cstr(d["firmware"])
     return d
@@ -391,6 +409,39 @@ def decode_lidar_raw(p):
     return {"seq": p[0], "flags": p[1], "data": bytes(p[2:])}
 
 
+def decode_lidar_config(p):
+    """MSG_LIDAR_CONFIG (v10, #113) -> the LidarConfigFrame fields, "mask": [[from, to] deg] (mask_n of them)."""
+    if len(p) != LIDAR_CONFIG_SIZE:
+        raise ValueError("LidarConfigFrame: payload %d != %d bytes" % (len(p), LIDAR_CONFIG_SIZE))
+    v = _S["LidarConfigFrame"].unpack_from(p)
+    d = dict(zip(LIDAR_CONFIG_FIELDS[:-1], v[:13]))
+    m = v[13:]
+    d["mask"] = [[m[2 * i] / 100.0, m[2 * i + 1] / 100.0] for i in range(min(d["mask_n"], LINK_LIDAR_MASK_MAX))]
+    return d
+
+
+def lidar_config_payload(s):
+    """lidar.json settings (station/bridge/lidar.py DEFAULTS keys) -> the LidarConfigFrame payload (#113)."""
+    flags = ((LINK_LCFG_ENABLED if s["enabled"] else 0) | (LINK_LCFG_FLIP if s["flip"] else 0)
+             | (LINK_LCFG_PITCH_AUTO if s["pitch_auto_ref"] else 0) | (LINK_LCFG_FLOOR_CLIP if s["floor_clip"] else 0)
+             | (LINK_LCFG_DESKEW if s["deskew"] else 0))
+    mask = list(s.get("mask") or [])[:LINK_LIDAR_MASK_MAX]
+    cd = []
+    for a, b in mask:
+        cd += (int(round((float(a) % 360.0) * 100)) % 36000, int(round((float(b) % 360.0) * 100)) % 36000)
+    cd += [0] * (2 * LINK_LIDAR_MASK_MAX - len(cd))
+    gate = max(float(s["pitch_limit_deg"]), float(s["pitch_max_deg"]))   # the navigator's gate (lidar.Lidar.deskew)
+    return _S["LidarConfigFrame"].pack(
+        flags, len(mask), 0, float(s["x_mm"]), float(s["y_mm"]), float(s["yaw_deg"]), float(s["height_mm"]),
+        float(s["min_range_mm"]), float(s["max_range_mm"]), float(s["min_intensity"]), gate,
+        float(s["pitch_ref_deg"]), float(s["time_offset_ms"]), *cd)
+
+
+def encode_lidar_config(s):
+    """One MSG_LIDAR_CONFIG frame from the lidar settings (#113)."""
+    return encode_frame(MSG_LIDAR_CONFIG, lidar_config_payload(s))
+
+
 def decode_contact(p):
     """MSG_CONTACT (v8, #104) -> {"kind", "seq", "mode", "flags", "x_mm", "y_mm", "heading_deg", "value"} + "name"
     (bump / stuck). Pose frame, like the telemetry."""
@@ -405,7 +456,7 @@ DECODERS = {
     MSG_HEARTBEAT: decode_heartbeat, MSG_CMD_VEL: decode_cmd_vel, MSG_SET_MODE: decode_set_mode,
     MSG_SET_PARAM: decode_set_param, MSG_GET_PARAMS: lambda p: {}, MSG_GOTO: decode_goto,
     MSG_EVENT: decode_event, MSG_LIDAR_OBSTACLES: decode_lidar_obstacles, MSG_LIDAR_RAW: decode_lidar_raw,
-    MSG_CONTACT: decode_contact,
+    MSG_CONTACT: decode_contact, MSG_LIDAR_CONFIG: decode_lidar_config,
 }
 
 
@@ -492,7 +543,7 @@ def encode_lidar_obstacles(seq, age_ms, pts):
 # Teensy -> Pi encoders (used by the simulator and tests)
 def encode_hello(link_version=LINK_PROTOCOL_VERSION, radio_version=RADIO_PROTOCOL_VERSION,
                  param_count=0, firmware="", reset_cause=0, reset_flags=0, srsr=0, prev_uptime_s=0,
-                 off_s=0xFFFFFFFF, uptime_ms=0):
+                 off_s=0xFFFFFFFF, uptime_ms=0, caps=0):
     return encode_frame(MSG_HELLO, _pack("HelloFrame", locals()))
 
 

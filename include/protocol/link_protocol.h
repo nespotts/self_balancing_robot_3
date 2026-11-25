@@ -34,7 +34,12 @@
 //     28 bytes as before, a v9 bridge pads a v8 HELLO with 0 = unknown). TelemetryFrame.reserved2 is now fault_flags
 //     (LINK_FAULT_* bits, same layout: a v8 bridge ignores it). New rules: a latched encoder fault refuses arming and the
 //     GOTO / EXPLORE / HOLD / STATION modes (SET_MODE logs "ignored: encoder fault").
-#define LINK_PROTOCOL_VERSION 9
+// v10 (#113): the Teensy computes the LD19 obstacle sectors itself. HelloFrame gained caps (48 bytes; a v9 bridge reads
+//     the first 44 as before, a v10 bridge pads a v9 HELLO with caps 0). With LINK_CAP_LIDAR_SECTORS the bridge sends the
+//     robot profile's lidar mount settings (MSG_LIDAR_CONFIG, Pi -> Teensy) instead of MSG_LIDAR_OBSTACLES frames. A v9
+//     bridge never sends MSG_LIDAR_CONFIG: the v10 firmware then takes its MSG_LIDAR_OBSTACLES as before. v9 firmware has
+//     no caps: a v10 bridge keeps sending it MSG_LIDAR_OBSTACLES.
+#define LINK_PROTOCOL_VERSION 10
 #define LINK_SYNC1 0xA5
 #define LINK_SYNC2 0x5A
 #define LINK_MAX_PAYLOAD 200
@@ -70,6 +75,7 @@ enum LinkMsgType : uint8_t {
                           // a new list while BLOCKED resumes.
   MSG_EVENT = 0x86,       // EventFrame: same events as RadioEvent, plus the link-only LinkEvent values
   MSG_LIDAR_OBSTACLES = 0x87,  // LidarObstacleFrame (v5): one per LD19 scan that passed the bridge's checks, ~10 Hz
+  MSG_LIDAR_CONFIG = 0x88,     // LidarConfigFrame (v10): the lidar mount settings for the Teensy's own sectors (#113)
 };
 
 // Link-only EventFrame.event values (never sent by the remote; RadioEvent values stay < EVT_COUNT).
@@ -104,11 +110,15 @@ struct __attribute__((packed)) HelloFrame {
   uint32_t prev_uptime_s; // how long the previous run lasted, s (0 = unknown)
   uint32_t off_s;         // s from the previous run's last second to this boot (0xFFFFFFFF = unknown)
   uint32_t uptime_ms;     // millis() when this HELLO was sent: a smaller value than before = the Teensy rebooted
-};  // 44 bytes
+  uint32_t caps;          // v10 (#113): LINK_CAP_* bits, what this firmware can do
+};  // 48 bytes
 
 #if defined(__cplusplus) && __cplusplus >= 201103L
-static_assert(sizeof(HelloFrame) == 44, "HelloFrame size changed - bump LINK_PROTOCOL_VERSION");
+static_assert(sizeof(HelloFrame) == 48, "HelloFrame size changed - bump LINK_PROTOCOL_VERSION");
 #endif
+
+// HelloFrame.caps (v10)
+#define LINK_CAP_LIDAR_SECTORS 0x01  // computes the LD19 obstacle sectors itself: wants MSG_LIDAR_CONFIG, not the frames
 
 // HelloFrame.reset_cause (v9). The i.MX RT1062 has no brownout flag: a power dip shows as a power-on reset; it is told
 // from a real power cycle by the SNVS domain (its RTC and 4 general-purpose registers) surviving the dip.
@@ -279,6 +289,36 @@ struct __attribute__((packed)) LidarObstacleFrame {
 #if defined(__cplusplus) && __cplusplus >= 201103L
 static_assert(sizeof(LidarObstacleFrame) == 148, "LidarObstacleFrame size changed - bump LINK_PROTOCOL_VERSION");
 static_assert(4 + 4 * LINK_LIDAR_SECTORS == sizeof(LidarObstacleFrame), "LidarObstacleFrame: 2 x int16 per sector");
+#endif
+
+// MSG_LIDAR_CONFIG (v10, issue #113, Pi -> Teensy): the robot profile's LD19 settings (the bridge's lidar.json, the source
+// of truth) for the firmware's own obstacle sectors (src/lidar_sectors.h), which then replace MSG_LIDAR_OBSTACLES. The
+// bridge sends it to firmware whose HELLO has LINK_CAP_LIDAR_SECTORS once the robot profile is bound, again whenever the
+// settings change, and every 2 s (a lost frame, a Teensy reboot). Until the first one the firmware computes nothing (the
+// navigator then has no lidar: blind rules). Same meaning as lidar.json (station/bridge/lidar.py DEFAULTS):
+//   flags LINK_LCFG_*; x / y / yaw / height: the mount; range window, intensity floor; pitch_gate_deg: packets leaning
+//   more than this from the typical pitch (median of 3 s, or pitch_ref_deg without LINK_LCFG_PITCH_AUTO) or > 30 deg
+//   absolute make the whole scan "tilted" (no frame) = max(pitch_limit_deg, pitch_max_deg); time_offset_ms: + = the lidar's
+//   points are this much later than its clock says; mask: mask_n sectors [from, to] in 0.01 deg, robot frame CCW from
+//   forward, a sector runs CCW from "from" to "to".
+#define LINK_LCFG_ENABLED 0x01
+#define LINK_LCFG_FLIP 0x02         // mounted upside down: the angles run counter-clockwise seen from above
+#define LINK_LCFG_PITCH_AUTO 0x04   // typical pitch = median of the last 3 s (else pitch_ref_deg)
+#define LINK_LCFG_FLOOR_CLIP 0x08   // drop points beyond 0.9 x height / tan(beam elevation)
+#define LINK_LCFG_DESKEW 0x10       // a pose per packet (else the pose at the end of the scan)
+#define LINK_LIDAR_MASK_MAX 8
+struct __attribute__((packed)) LidarConfigFrame {
+  uint8_t flags;          // LINK_LCFG_* bits
+  uint8_t mask_n;         // 0 .. LINK_LIDAR_MASK_MAX
+  uint16_t reserved;
+  float x_mm, y_mm, yaw_deg, height_mm;
+  float min_range_mm, max_range_mm, min_intensity;
+  float pitch_gate_deg, pitch_ref_deg, time_offset_ms;
+  uint16_t mask_cdeg[16]; // from0, to0, from1, to1, ... (2 x LINK_LIDAR_MASK_MAX)
+};  // 76 bytes
+
+#if defined(__cplusplus) && __cplusplus >= 201103L
+static_assert(sizeof(LidarConfigFrame) == 76, "LidarConfigFrame size changed - bump LINK_PROTOCOL_VERSION");
 #endif
 
 // MSG_LIDAR_RAW (v7, issue #100): the LD19's own bytes (230400 8N1 on the Teensy's Serial7, D28 = RX7), unparsed, in the
