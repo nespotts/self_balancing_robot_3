@@ -1005,7 +1005,7 @@ static void testContactSlow() {
     contactStart(b, sp);
     uint32_t stall_ms = 0;
     const bool stall = sp >= ContactDetector::kStallDriveMinCmd;
-    for (int i = 0; i < 8000 && !g_contacts && !b.nav.stuck(); i++) {
+    for (int i = 0; i < 8000 && !g_contacts; i++) {
       runC(b, 0.005f);
       if (b.stalled && !stall_ms) stall_ms = b.ms;
     }
@@ -1013,22 +1013,66 @@ static void testContactSlow() {
            stall_ms / 1000.0, b.ms / 1000.0, (unsigned)(b.ms - stall_ms), b.nav.contact() ? "contact" : "stuck check",
            g_last.x_mm, g_last.y_mm, b.unwinds);
     // driving below 100 mm/s: kStallDriveMs (a free balancing robot can stand in its dead band a while there); below
-    // 60 mm/s only the nav stuck check (nav.stuck_ms 2.5 s): it stands up and backs off, no contact report
-    if (stall) {
-      CHECK(g_contacts == 1);
-      CHECK(g_last.kind == LINK_CONTACT_STUCK);
+    // 60 mm/s dead still (kStallDeadMs once the encoder speed has settled to ~0)
+    CHECK(g_contacts == 1);
+    CHECK(g_last.kind == LINK_CONTACT_STUCK);
+    if (stall)
       CHECK(stall_ms && b.ms - stall_ms >= 600 && b.ms - stall_ms <= 1300);
-      CHECK(fabsf(g_last.x_mm - 1200) < 25 && fabsf(g_last.heading_deg) < 2);  // the front edge
-    } else {
-      CHECK(g_contacts == 0);
-      CHECK(b.nav.stuck() && b.nav.state() == NAV_BLOCKED);
-      CHECK(stall_ms && b.ms - stall_ms >= 1500 && b.ms - stall_ms <= 3000);
-    }
+    else
+      CHECK(stall_ms && b.ms - stall_ms >= 800 && b.ms - stall_ms <= 1600);
+    CHECK(fabsf(g_last.x_mm - 1200) < 25 && fabsf(g_last.heading_deg) < 2);  // the front edge
     CHECK(b.unwinds == 1);         // the controller stood it up
     CHECK(fabsf(b.vt_ramp) < 10);  // (its command zeroed: the back-off ramps from 0)
     runC(b, 0.6f);
     CHECK(b.v < 0);                // backing off
   }
+}
+
+static void testContactBeforeLastPoint() {
+  printf("goto: a low box 135 mm before the last point (slowing for the stop, 40-80 mm/s, not cruising) -> contact "
+         "(dead still), not 'arrived' (18:36 miss)\n");
+  for (int k = 0; k < 2; k++) {
+    reset();
+    Bot b;
+    g_param[P_NAV_MAX_SPEED] = k ? 250 : 60;
+    b.dyn = true;
+    b.low_x = 1200;
+    b.nav.add(1200 - 45 + 135, 0);
+    b.nav.listChanged(true);
+    b.nav.onModeChange(b.in());
+    g_contacts = 0;
+    uint32_t stall_ms = 0;
+    for (int i = 0; i < 8000 && !g_contacts && b.nav.state() != NAV_ARRIVED; i++) {
+      runC(b, 0.005f);
+      if (b.stalled && !stall_ms) stall_ms = b.ms;
+    }
+    printf("  max %.0f mm/s: stalled %.3f s at %.0f mm/s command, detected +%u ms, distance %.0f\n", P(P_NAV_MAX_SPEED),
+           stall_ms / 1000.0, b.vt_ramp, (unsigned)(b.ms - stall_ms), b.nav.distance());
+    CHECK(g_contacts == 1);
+    CHECK(g_last.kind == LINK_CONTACT_STUCK && fabsf(g_last.x_mm - 1200) < 25);
+    CHECK(stall_ms && b.ms - stall_ms <= 1600);
+    CHECK(b.nav.state() == NAV_BLOCKED);
+  }
+}
+
+static void testContactGiveUp() {
+  printf("goto: a low box at the goal's way, no new list: contact, back off, try again ... gives up at the 3rd (#111)\n");
+  reset();
+  Bot b;
+  contactStart(b, 250);
+  runC(b, 40);
+  printf("  %d contacts, gave up %d, state %d\n", g_contacts, b.nav.gaveUp(), b.nav.state());
+  CHECK(g_contacts == 3);
+  CHECK(b.nav.gaveUp() && b.nav.state() == NAV_BLOCKED);
+  CHECK(fabsf(b.nav.speed()) < 1);
+  runC(b, 20);
+  CHECK(g_contacts == 3);  // no 4th try
+  b.nav.clearList();       // a new list: going again
+  b.nav.add(b.x, 600);
+  b.nav.listChanged(true);
+  CHECK(!b.nav.gaveUp());
+  runC(b, 20);
+  CHECK(b.nav.state() == NAV_ARRIVED);
 }
 
 static void testContactBackoffBlocked() {
@@ -1292,6 +1336,8 @@ int main() {
   testContactBump();
   testContactStuck();
   testContactSlow();
+  testContactBeforeLastPoint();
+  testContactGiveUp();
   testContactBackoffBlocked();
   testContactSlowNone();
   testContactFell();

@@ -7,7 +7,8 @@ of src/contact.cpp).
 The telemetry (100 Hz) has what the navigator feeds the detector: the controller's ramped command (cmd_speed_mms),
 the encoders' speed, the pitch rate, the velocity loop's lean (vel_out_deg). What the navigator decides itself is
 rebuilt from the nav state, the 2 Hz nav status and the command:
-  watch   GOTO / EXPLORE, upright, DRIVING (not the stop at the last point: nav index = last, < 2 x arrive_mm),
+  watch   GOTO / EXPLORE, upright, DRIVING (not the stop at the last point: nav index = last, from < arrive_mm until
+          past 2 x arrive_mm, as the navigator's STOPPING phase),
           or BLOCKED while backing off (the command is a back-off speed: nav.min_speed 40 or twice that)
   ramp    DRIVING and the command rose >= 10 mm/s in the last 150 ms (the nav speed rise limit)
   drive   DRIVING (not backing off)
@@ -45,7 +46,7 @@ def extract(path):
     nav_modes = (lp.MODE_GOTO, lp.MODE_EXPLORE, lp.MODE_STATION)
     on = [r[1] for r in tlm if r[ix["mode"]] in nav_modes]
     out, hist = [], []
-    launch = False
+    launch = stopping = False
     for r in tlm:
         t = r[1]
         k = bisect.bisect_left(on, t - 1.0)
@@ -56,7 +57,10 @@ def extract(path):
         j = bisect.bisect_right(nav_t, t) - 1
         st = nav[j][1] if j >= 0 else {}
         n = st.get("waypoint_count", 0)
-        stopping = n > 0 and st.get("nav_index", 0) >= n - 1 and st.get("distance_mm", 1e9) < 2 * ARRIVE_MM
+        # (the navigator's STOPPING phase: from < arrive_mm at the last point until pushed out past 2 x arrive_mm)
+        last_pt = n > 0 and st.get("nav_index", 0) >= n - 1 and ns == lp.NAV_DRIVING
+        dist = st.get("distance_mm", 1e9)
+        stopping = last_pt and (dist < ARRIVE_MM or (stopping and dist <= 2 * ARRIVE_MM))
         backing = ns == lp.NAV_BLOCKED and any(abs(abs(cmd) - b) < 0.6 for b in BACK_SPEEDS)
         driving = ns == lp.NAV_DRIVING and not stopping
         hist.append((t, cmd))

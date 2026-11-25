@@ -150,6 +150,7 @@ class Navigator {
   const ContactFrame& contactFrame() const { return contact_frame_; }
   void contactSent() { contact_due_ = false; }
   bool contact() const { return contact_; }   // BLOCKED after a contact (backing off / waiting)
+  bool gaveUp() const { return gave_up_; }    // GOTO gave up on its waypoint (#111): BLOCKED until a new list
   // A contact it acts on (GOTO / EXPLORE, #111): the controller's contactReset() is due (once).
   bool takeUnwind() {
     const bool u = unwind_;
@@ -183,6 +184,7 @@ class Navigator {
   void log(const char* fmt, ...) __attribute__((format(printf, 2, 3)));
   void contactCheck(const NavIn& in);                       // #104: the detector, then the reaction
   void startContact(const NavIn& in, uint8_t kind);
+  void noteStop(const NavIn& in);  // #111: the same spot again? (GOTO gives up after kGiveUpStops)
   void reportContact(const NavIn& in, uint8_t kind, uint8_t flags, bool hold, float dir, float value);
   void contactWatch(uint8_t src, bool on, bool cruise, bool ramp) {  // this step's motion, watched from the next step
     contact_watch_ = on;
@@ -208,6 +210,13 @@ class Navigator {
   uint8_t contact_seq_ = 0;
   uint32_t report_ms_ = 0;            // STATION: last report (one per kReportGapMs)
   static constexpr uint32_t kContactWaitMs = 4000, kReportGapMs = 3000;
+  // #111: GOTO stopped at the same spot driving to the same waypoint this often (contacts / stucks while driving):
+  // it gives up on it (BLOCKED until a new list)
+  static constexpr uint8_t kGiveUpStops = 3;
+  static constexpr float kSameSpotMm = 150.0f;
+  uint8_t stop_n_ = 0, stop_idx_ = 0;
+  float stop_x_ = 0, stop_y_ = 0;
+  bool gave_up_ = false;
   static constexpr float kContactAhead = 50.0f;   // contact point: the body's front edge (45 mm) + 5, from the axle
 
   float wx_[WAYPOINT_MAX] = {}, wy_[WAYPOINT_MAX] = {};

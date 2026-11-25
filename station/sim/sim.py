@@ -145,6 +145,8 @@ CONTACT_WAIT_MS = 4000    # Navigator::kContactWaitMs (#104)
 REPORT_GAP_MS = 3000      # Navigator::kReportGapMs
 CONTACT_AHEAD_MM = 50.0   # Navigator::kContactAhead: the body's front edge + 5, from the axle
 SRC_NONE, SRC_DRIVE, SRC_BACK, SRC_AWAY = range(4)   # Navigator::Src: the watched motion (#111)
+GIVE_UP_STOPS = 3         # Navigator::kGiveUpStops (#111)
+SAME_SPOT_MM = 150.0      # Navigator::kSameSpotMm
 BLK_MIN_CMD = 30.0        # Controller::kBlkMinCmd: anti-windup (#111)
 BLK_STILL_MMS = 15.0      # Controller::kBlkStillMms
 BLK_TAU_S = 0.2           # Controller::kBlkTauS
@@ -444,6 +446,8 @@ class Navigator:
         self.contact_ramp = False     # ... the command held by its rise limit (#111: the stall rule waits)
         self.launch = False           # ramping up from a stop (the speed rise limit, #103): not cruising
         self.unwind = False           # a contact it acts on: the controller's contact_reset() due (#111)
+        self.stop_n, self.stop_idx, self.stop_xy = 0, 0, (0.0, 0.0)   # the same spot again (#111, Navigator::noteStop)
+        self.gave_up = False          # GOTO gave up on its waypoint: BLOCKED until a new list
         self.contact = False          # BLOCKED by a contact; GOTO: waiting for a new list
         self.contact_ms = 0
         self.contact_hold = (0.0, 0.0)  # where it backed off to (held while it waits)
@@ -482,6 +486,7 @@ class Navigator:
         self.stuck = self.away = self.away_done = False
         self.stuck_ms = 0
         self.contact = False                  # (#104) the planner's new route goes round the mark
+        self.gave_up, self.stop_n = False, 0  # (#111)
 
     # ---- inputs
     def add_range(self, f, now_ms):
@@ -552,7 +557,8 @@ class Navigator:
         self.stuck = self.away = self.away_done = False
         self.stuck_ms = 0
         self.lidar_stuck_ms = 0
-        self.contact = self.contact_watch = self.launch = self.contact_ramp = False
+        self.contact = self.contact_watch = self.launch = self.contact_ramp = self.gave_up = False
+        self.stop_n = 0
         self.contact_src = SRC_NONE
         self.cdet.reset()
         n = len(self.wp)
@@ -713,8 +719,10 @@ class Navigator:
         # #111: driving, the wheels not getting anywhere: stand up (contact_reset) before backing off. No contact report
         # (a balancing robot crawling at 40 mm/s can stand in its dead band this long with nothing in front of it, and
         # a mark there shuts a doorway); again and again at one spot: the planner's same-spot rule marks it
-        if not turning and not self.stuck_lidar and self.contact_on:
-            self.unwind = True
+        if not turning and not self.stuck_lidar:
+            if self.contact_on:
+                self.unwind = True
+            self._note_stop(i)
         self.stuck_lidar = False
         self.back_mm = P("nav.stuck_backoff_mm")
         self.backing = self.back_mm > 0
@@ -795,9 +803,24 @@ class Navigator:
         self.back = (i["x"], i["y"], i["now_ms"])
         self.contact_hold = (i["x"], i["y"])
         self.unwind = True                    # (#111) the controller: command 0, the velocity loop's lean back
+        if not hold:
+            self._note_stop(i)
         self.speed = self.turn = 0.0
         self.state = NAV_BLOCKED
         self.obst = self.front
+
+    def _note_stop(self, i):
+        """Navigator::noteStop (#111): the same spot again, driving to the same waypoint? GOTO gives up after
+        GIVE_UP_STOPS (BLOCKED until a new list)."""
+        if (self.stop_n and self.idx == self.stop_idx
+                and math.hypot(i["x"] - self.stop_xy[0], i["y"] - self.stop_xy[1]) < SAME_SPOT_MM):
+            self.stop_n += 1
+        else:
+            self.stop_n, self.stop_xy, self.stop_idx = 1, (i["x"], i["y"]), self.idx
+        if self.stop_n >= GIVE_UP_STOPS and i["mode"] == lp.MODE_GOTO and not self.gave_up:
+            self.gave_up = self.latched = True
+            self.log("nav: gave up on waypoint %u/%u: stopped %u times at %.0f,%.0f - waiting for a new list" % (
+                self.idx + 1, len(self.wp), self.stop_n, self.stop_xy[0], self.stop_xy[1]))
 
     def limit_speed(self, v, vmax, apply):
         P = self.P
@@ -1125,9 +1148,15 @@ class Navigator:
         cruise = self._corner_cap(i["heading"], vmax, True) + kp * to_go >= vmax and not self.launch
         vl = self.limit_speed(v, vmax, True)
         # contact (#104): GOTO waits CONTACT_WAIT_MS for a new list (the planner's route round the mark), then tries again
-        if (self.contact and i["mode"] == lp.MODE_GOTO and not self.backing
+        if (self.contact and i["mode"] == lp.MODE_GOTO and not self.backing and not self.gave_up
                 and i["now_ms"] - self.contact_ms >= CONTACT_WAIT_MS):
             self.latched = self.contact = False
+        if self.gave_up:
+            self.latched = True               # (#111) waits for a new list
+        # (#111) got well past the spot it kept stopping at: count again
+        if (self.stop_n and not self.blocked
+                and math.hypot(i["x"] - self.stop_xy[0], i["y"] - self.stop_xy[1]) > 2.0 * SAME_SPOT_MM):
+            self.stop_n = 0
         if self.latched or self.stuck:        # EXPLORE: stays blocked until a new list; stuck: backing off
             self.obst_flag = True
         if self.obst_flag:

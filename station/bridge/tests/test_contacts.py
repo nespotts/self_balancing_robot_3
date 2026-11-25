@@ -258,6 +258,43 @@ class TestLoop(unittest.TestCase):
         p.on_log("nav: stuck, no progress driving for 2.5 s (waypoint 1/5)")   # 2 blocks + a stuck: 3
         self.assertEqual(p.loop_marks, 2)
 
+    def test_goto_gives_up_on_the_same_goal(self):
+        """18:36: a goto goal next to something low - stuck, back off, try again, 13 times. The 2nd same-spot loop of the
+        job (or the 1st with the goal by a bump mark) ends the goto, and the robot holds where it is."""
+        p, b = self.p, self.b
+        sent = []
+        b.handle_command = lambda m, who="?": sent.append(m)
+        p.mode, p.goals = "goto", [(5000.0, 5000.0)]
+        for k in range(3):
+            p.on_log("nav: stuck, no progress driving for 2.5 s (waypoint 4/4)")
+            self.later()
+        self.assertEqual((p.mode, p.loop_marks), ("goto", 1))             # the 1st loop: mark, plan another way
+        for k in range(3):
+            p.on_log("nav: stuck, no progress driving for 2.5 s (waypoint 4/4)")
+            self.later()
+        self.assertEqual(p.mode, "idle")                                   # the 2nd: gave up
+        self.assertIn("can't reach the goal", p.status)
+        self.assertEqual(sent[-1]["points"], [[-200.0, 250.0]])            # it holds where it is
+
+        p.mode, p.goals, p.loop_marks, p.spots = "goto", [(-150.0, 180.0)], 0, []   # the goal by a bump mark already
+        b.mapper.zones.add_bump(-140.0, 200.0)
+        for k in range(3):
+            p.on_log("nav: blocked, obstacle at 60 mm (waypoint 1/1)")
+            self.later()
+        self.assertEqual(p.mode, "idle")
+        self.assertIn("can't reach the goal", p.status)
+
+    def test_robot_gave_up(self):
+        p, b = self.p, self.b
+        b.handle_command = lambda m, who="?": None
+        p.on_log("nav: gave up on waypoint 4/4: stopped 3 times at 900,-2210 - waiting for a new list")
+        self.assertEqual(p.blacklist, [(1500.0, 900.0)])                  # explore: that frontier is given up
+        self.assertIsNotNone(p.replan_at)
+        p.mode, p.goals = "goto", [(5000.0, 5000.0)]
+        p.on_log("nav: gave up on waypoint 4/4: stopped 3 times at 900,-2210 - waiting for a new list")
+        self.assertEqual(p.mode, "idle")
+        self.assertIn("can't reach the goal", p.status)
+
     def test_doorway_squeeze_blocks_do_not_count(self):
         """Squeezing through a narrow doorway it stops in front of it a few times while the route is recentred (the
         jambs 260-300 mm ahead, mapped): no mark, no blacklist - that would shut the doorway."""

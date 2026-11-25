@@ -106,7 +106,9 @@ LOOP_AHEAD_MM = 39.0      # a block's obstacle: its distance (from the sensor he
 LOOP_BLOCK_MM = 160.0     # a block counts only at this distance or closer (the stop distance, live rng.obstacle_mm;
                           # 2026-11-25 loop: 44-152 mm, a doorway squeeze: 260-300)
 LOOP_REPLAN_S = 1.0
-LOOP_SAME_S = 0.3         # reports this close in time (and 50 mm) are one stop (a stuck that is also a contact)
+LOOP_GIVE_UP = 2         # goto: the 2nd same-spot loop of the job ends it (#111: "can't reach the goal")
+GOAL_MARK_MM = 250.0      # ... or at the 1st, when the goal is this close to a bump mark (mark r 70 + robot 80 + 100)
+LOOP_SAME_S = 0.3        # reports this close in time (and 50 mm) are one stop (a stuck that is also a contact)
 BLOCKED_RE = re.compile(r"nav: blocked, obstacle at (\d+) mm")
 # stale routes: a plan starts from the pose when the job began, and on the Pi a plan takes seconds (the worker gives
 # way to the loop, #110) - meanwhile the robot drives on along the old route. The new route goes from where it is now:
@@ -1174,6 +1176,15 @@ class Planner:
             if float(m.group(1)) <= LOOP_BLOCK_MM:
                 self._spot("block", float(m.group(1)) + LOOP_AHEAD_MM)
             return
+        if text.startswith("nav: gave up on waypoint"):
+            # (#111) the robot stopped 3 times at one spot driving to it: goto ends; explore gives that frontier up
+            if self.mode == "goto":
+                self._give_up_goto("can't reach the goal: something low there (the robot gave up after 3 stops)")
+            else:
+                if self.goal is not None:
+                    self.blacklist.append(self.goal)
+                self.replan_at = self.clock() + LOOP_REPLAN_S
+            return
         if not text.startswith("nav: stuck"):
             return
         self.boost = min(STUCK_BOOST_MAX, self.boost + STUCK_BOOST_MM)
@@ -1236,12 +1247,32 @@ class Planner:
         if self.mode == "explore" and self.goal is not None:
             self.blacklist.append(self.goal)                     # that frontier: not through here again
         self.loop_marks += 1
+        # (#111) goto: the goal itself sits by something low (a bump mark next to it), or this is the 2nd loop of the
+        # job - the same goal keeps leading it into it (18:36: 13 tries in 3 min at a goal next to mark b26): give up
+        if self.mode == "goto" and (self.loop_marks >= LOOP_GIVE_UP or self._goal_by_mark()):
+            self._give_up_goto("can't reach the goal: something low there (stopped %d times at %.2f, %.2f m)"
+                               % (n, mx / 1000.0, my / 1000.0))
+            return
         self.boost = min(STUCK_BOOST_MAX, self.boost + STUCK_BOOST_MM)
         self.squeeze = False
         self.replan_at = now + LOOP_REPLAN_S
         self.last_check = now
         self._set_status("stopped %d times at the same spot (%.2f, %.2f m)%s: planning another way (+%d mm margin)" % (
             n, mx / 1000.0, my / 1000.0, " - bump mark %s" % mark["id"] if mark else "", self.boost))
+
+    def _goal_by_mark(self):
+        """#111: the goto's last goal within GOAL_MARK_MM of a bump mark (map frame)."""
+        if not self.goals or not hasattr(self.b.mapper, "zones"):
+            return False
+        gx, gy = self.goals[-1]
+        return any(math.hypot(z["x"] - gx, z["y"] - gy) < GOAL_MARK_MM for z in self.b.mapper.zones.bumps())
+
+    def _give_up_goto(self, why):
+        """#111: end the goto - the robot holds where it is (a one-point route at its pose), the job stops."""
+        t = self.b.tlm
+        if t:
+            self.b.handle_command({"t": "goto", "points": [[t["x_mm"], t["y_mm"]]], "replace": True}, "planner")
+        self.stop(why)
 
     def _success(self):
         """A goal reached: the stuck boost decays."""
