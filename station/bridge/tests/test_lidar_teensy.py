@@ -12,6 +12,7 @@ import unittest
 
 from station.bridge import health as health_mod
 from station.bridge import ld19
+from station.bridge import lidar as lidar_mod
 from station.bridge import link_protocol as lp
 from station.bridge.bridge import Bridge
 from station.bridge.occgrid import UNKNOWN
@@ -301,6 +302,67 @@ class TestBridge(unittest.TestCase):
             self.assertEqual(st["teensy"]["fw_overflow"], 1)
             self.assertEqual(st["port"], "teensy")
         asyncio.run(go())
+
+    def test_firmware_drops_warn_only_on_growth(self):
+        """The firmware's "usb drop N" is cumulative since boot: 82 drops in the first second after a flash are plain
+        info ("82 lost at boot, none since"); only growth between two status lines warns; a reboot starts again."""
+        def line(usb, ovf=0):
+            return "lidar: 19.6 kB/s, 109 frames/s, usb drop %d, overflow %d, max 180 B / 12.0 us per pass" % (usb, ovf)
+
+        def tile(rd, now):
+            return health_mod.lidar_tile({"state": "ok", "pps": 375, "rpm": 600, "crc_errors": 0, "packets": 9000,
+                                          "scan_age_s": 0.05, "flowing": True, "source_label": "Teensy",
+                                          "teensy": rd.stats(now)["teensy"]})
+        clk = Clock()
+        rd = ld19.Ld19Reader("", lambda sc: None, clock=clk, teensy=True)
+        fd = rd.fw_drops
+        lid = type("L", (), {"reader": rd})()                       # on_robot_log / on_hello only touch the reader
+        on_log = lambda text: lidar_mod.Lidar.on_robot_log(lid, text)
+        on_hello = lambda up: lidar_mod.Lidar.on_hello(lid, {"uptime_ms": up})
+        on_hello(500)                                               # the boot
+        clk.t += 30
+        on_log(line(82))                                            # first status line: 82 lost at boot
+        t = tile(rd, clk.t)
+        self.assertEqual(t["level"], "ok", t)
+        self.assertIn("82 lost at boot, none since", t["why"])
+        clk.t += 30
+        on_log(line(82))                                            # nothing new
+        self.assertEqual(tile(rd, clk.t)["level"], "ok")
+        clk.t += 2700
+        on_hello(2_700_000)                                         # a GET_PARAMS reply: same boot, nothing resets
+        on_log(line(82))
+        self.assertEqual(tile(rd, clk.t)["level"], "ok")
+        self.assertEqual(fd.boot_lost, 82)
+        clk.t += 30
+        on_log(line(90, 1))                                         # growth: 9 more
+        t = tile(rd, clk.t)
+        self.assertEqual(t["level"], "warn", t)
+        self.assertIn("9 more lost", t["why"])
+        self.assertIn("82 lost at boot, 9 since", t["why"])
+        clk.t += 30
+        on_log(line(90, 1))                                         # quiet again: the warning clears at the next line
+        t = tile(rd, clk.t)
+        self.assertEqual(t["level"], "ok", t)
+        self.assertIn("82 lost at boot, 9 since", t["why"])
+        clk.t += 200                                                # no line for a while: stale growth never lingers
+        on_log(line(95, 1))
+        clk.t += 100
+        self.assertEqual(tile(rd, clk.t)["level"], "ok")
+        # the firmware reboots: HELLO with a smaller uptime, counts back down; its boot drops are boot drops again
+        on_hello(800)
+        clk.t += 30
+        on_log(line(40))
+        t = tile(rd, clk.t)
+        self.assertEqual(t["level"], "ok", t)
+        self.assertIn("40 lost at boot, none since", t["why"])
+        clk.t += 30
+        on_log(line(3))                                             # counts went down without a HELLO seen: rebased too
+        t = tile(rd, clk.t)
+        self.assertEqual(t["level"], "ok", t)
+        self.assertIn("3 lost at boot, none since", t["why"])
+        clk.t += 30
+        on_log(line(4))
+        self.assertEqual(tile(rd, clk.t)["level"], "warn")
 
     def test_cli_sources(self):
         from station.bridge.__main__ import build_parser, lidar_source

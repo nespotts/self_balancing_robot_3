@@ -486,8 +486,10 @@ class Bridge:
             self.hello = d
             self.log.record("hello", d)
             self._robot_hello(d)
+            if self.lidar:
+                self.lidar.on_hello(d)             # a new boot: the firmware's lidar drop counters start again
             if self.lidar_obst:
-                self.lidar_obst.config_reset()     # (#113) the lidar settings again, to a robot that computes sectors
+                self.lidar_obst.config_reset()    # (#113) the lidar settings again, to a robot that computes sectors
             if changed:
                 self.params = {}
                 self.params_dirty = True
