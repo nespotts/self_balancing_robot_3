@@ -183,6 +183,30 @@ class OfflineBridge:
         elif m["t"] == "set_mode":
             r.set_mode(m["mode"], arm=bool(m.get("arm")))
 
+    def send(self, frame):
+        """A raw link frame to the robot (the planner's zone escape sends cmd_vel, #114)."""
+        for t, p in lp.FrameParser().feed(frame):
+            self.robot.on_frame(t, p)
+
+    def zone_watch(self, zone_again=25.0):
+        """The Bridge's zones watchdog (#70 / #114, Bridge._zone_tick) on the sim robot: driving into a zone in GOTO /
+        EXPLORE -> cmd_vel 0 + HOLD and planner.zone_stop. Call after update(). Returns the reason when it stopped."""
+        t, zv = self.tlm, self.mapper.zones.view()
+        if not t or not zv:
+            return None
+        x, y, h = self.mapper.map_pose(t["x_mm"], t["y_mm"], t["heading_deg"])
+        prev, self.zone_prev = getattr(self, "zone_prev", None), (x, y)
+        auto = t["mode"] in (lp.MODE_GOTO, lp.MODE_EXPLORE) and bool(t["status"] & lp.TLM_ARMED)
+        why, self.zone_hold = zv.watch(x, y, h, t.get("speed_mms", 0.0), self.planner.zone_fp(), prev,
+                                       getattr(self, "zone_hold", {}), zone_again, active=auto)
+        if why:
+            self.zone_stops = getattr(self, "zone_stops", []) + [why]
+            self.say("zones: robot %s - stopping (HOLD)" % why)
+            self.send(lp.encode_cmd_vel(0.0, 0.0))
+            self.robot.set_mode(lp.MODE_HOLD)
+            self.planner.zone_stop(why)
+        return why
+
     def on_contact(self, d):
         """MSG_CONTACT (#104), as Bridge.on_contact: a bump mark on the map, the planner replans round it."""
         mark, merged = self.mapper.add_contact(d)
@@ -193,7 +217,7 @@ class OfflineBridge:
     def update(self):
         r = self.robot
         x, y, th = r.odom()
-        self.tlm = {"x_mm": x, "y_mm": y, "heading_deg": th, "mode": r.mode,
+        self.tlm = {"x_mm": x, "y_mm": y, "heading_deg": th, "mode": r.mode, "speed_mms": r.speed_f,
                     "status": lp.TLM_ARMED if r.armed else 0}
         self.tlm_time = r.t
         self.nav = r.nav.status()

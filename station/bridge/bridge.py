@@ -54,7 +54,6 @@ TLM_HZ_GRACE_S = 10.0             # Tune closed this long ago -> put tlm.hz back
 NEEDS_LINK = {"set_mode", "set_param", "cfg", "get_params", "goto", "event", "estop_release"}  # release: the robot latches too
 NEEDS_LINK_ACTION = {"preset": ("apply",), "motor": ("start", "apply"), "plan": ("goto", "explore", "home", "solve"), "calib": ("start",)}
 # Zones watchdog (#70): the firmware only knows real range obstacles, so the bridge enforces the virtual ones
-ZONE_TOL_MM = 20.0       # footprint = planner robot radius - this (pose noise; the planner keeps radius + margin)
 ZONE_HORIZON_S = 0.3     # joystick: block speed that would enter a zone within this
 ZONE_AGAIN_MM = 25.0     # after a stop, stop again only if the footprint gets this much deeper in
 ZONE_AUTO_MODES = (lp.MODE_GOTO, lp.MODE_EXPLORE)
@@ -1122,7 +1121,7 @@ class Bridge:
 
     # ------------------------------------------------------------------ zones watchdog (#70)
     def _zone_fp(self):
-        return max(20.0, self.planner.settings["robot_radius_mm"] - ZONE_TOL_MM)
+        return self.planner.zone_fp()
 
     def _cmd_out(self):
         """The joystick's cmd_vel as forwarded: slow zones cap the speed; with zones_block_manual (default on) speed
@@ -1147,7 +1146,8 @@ class Bridge:
 
     def _zone_tick(self, now):
         """25 Hz, link up. GOTO / EXPLORE: footprint in a no-go zone, out of the fence or at / across a virtual wall
-        -> cmd_vel 0 + HOLD (it keeps balancing; never IDLE, never arms) and the planner replans. Slow zones lower
+        while driving into it -> cmd_vel 0 + HOLD (it keeps balancing; never IDLE, never arms) and the planner backs
+        away from the edge first (#114), then replans. Slow zones lower
         nav.max_speed while the robot drives itself in (or near) one, put back after."""
         t = self.tlm
         zv = self.mapper.zones.view()
@@ -1156,18 +1156,15 @@ class Bridge:
             self.zone_hold = {}
             self._zone_set_cap(None)
             return
-        x, y, _h = self.mapper.map_pose(t["x_mm"], t["y_mm"], t["heading_deg"])
+        x, y, h = self.mapper.map_pose(t["x_mm"], t["y_mm"], t["heading_deg"])
         prev, self.zone_prev = self.zone_prev, (x, y)
-        v = zv.depths(x, y, self._zone_fp(), prev)
-        self.zone_hold = {k: min(d, v[k][0]) for k, d in self.zone_hold.items() if k in v}
-        auto = t["mode"] in ZONE_AUTO_MODES and (t["status"] & lp.TLM_ARMED) and not self.estop
-        if auto:
-            worse = [txt for k, (d, txt, _kind) in v.items() if k not in self.zone_hold or d > self.zone_hold[k] + ZONE_AGAIN_MM]
-            if worse:
-                for k, (d, _txt, _kind) in v.items():
-                    self.zone_hold[k] = d
-                self._zone_stop(worse[0])
-                auto = False
+        auto = bool(t["mode"] in ZONE_AUTO_MODES and (t["status"] & lp.TLM_ARMED) and not self.estop)
+        # direction-aware (#114): only motion into a zone / across a wall stops it, never driving along or away
+        why, self.zone_hold = zv.watch(x, y, h, t.get("speed_mms", 0.0), self._zone_fp(), prev, self.zone_hold,
+                                       ZONE_AGAIN_MM, active=auto)
+        if why:
+            self._zone_stop(why)
+            auto = False
         self._zone_set_cap(zv.slow_cap(x, y, grow=150.0) if auto else None)
 
     def _zone_stop(self, why):
