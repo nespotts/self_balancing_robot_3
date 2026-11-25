@@ -268,6 +268,60 @@ def source_label(port):
     return "UART"
 
 
+FW_WARN_MAX_S = 75.0      # a growth in the firmware's drop counters warns until the next status line (30 s later), at most this long
+
+
+class FwDrops:
+    """The Teensy's "lidar: ... usb drop N, overflow M" counters are CUMULATIVE since boot: 82 drops in the first second
+    after a flash (no bridge reading yet) must not warn for the rest of the run. So only GROWTH between two status lines
+    warns. The first status line after a Teensy boot (a HELLO that starts a new boot, or counts that went down) is just the
+    baseline: whatever it holds was lost during the boot (the 30 s line cannot tell the first 5 s from the rest). From
+    then on the total stays plain info: "82 lost at boot, none since"."""
+
+    def __init__(self):
+        self.seen = False
+        self.boot_lost = 0          # lost before the baseline line (at boot)
+        self.since = 0              # grown since the baseline
+        self.prev = None            # (usb drop, overflow) of the last status line; None = the next line is the baseline
+        self.grow = 0               # growth in the last status line (0: none)
+        self.grow_t = None          # when that line came; None when it had no growth
+        self.last_grow_t = None     # ... the last growth ever since the baseline (for "last 12 min ago")
+        self._uptime_ms = None      # uptime in the last HELLO: smaller in the next one = a new boot
+
+    def on_hello(self, d):
+        """A HELLO (also the answer to a GET_PARAMS: same boot, uptime still counting up -> nothing happens)."""
+        up = d.get("uptime_ms", 0) or 0
+        if self._uptime_ms is None or up < self._uptime_ms:
+            self._rebase()
+        self._uptime_ms = up
+
+    def _rebase(self):
+        self.prev = None
+        self.boot_lost = self.since = self.grow = 0
+        self.grow_t = self.last_grow_t = None
+
+    def on_line(self, usb, ovf, now):
+        self.seen = True
+        if self.prev is not None and (usb < self.prev[0] or ovf < self.prev[1]):
+            self._rebase()                                  # the counts went down: the firmware rebooted
+        if self.prev is None:
+            self.boot_lost = usb + ovf                      # the baseline
+        else:
+            g = (usb - self.prev[0]) + (ovf - self.prev[1])
+            self.grow = g
+            self.grow_t = now if g > 0 else None
+            if g > 0:
+                self.since += g
+                self.last_grow_t = now
+        self.prev = (usb, ovf)
+
+    def summary(self, now):
+        """For the Health tile: recent = growth in the last status line (still fresh); boot_lost, since, ago_s."""
+        recent = self.grow_t is not None and now - self.grow_t <= FW_WARN_MAX_S
+        return {"recent": self.grow if recent else 0, "boot_lost": self.boot_lost, "since": self.since,
+                "ago_s": None if self.last_grow_t is None else round(now - self.last_grow_t, 1)}
+
+
 class _Source:
     """One byte source's own parser (packets never mix across sources): the serial port, or the Teensy's frames."""
     __slots__ = ("name", "stream", "asm", "bytes", "last_data", "last_pkt")
@@ -318,6 +372,7 @@ class Ld19Reader:
         # MSG_LIDAR_RAW (#100)
         self.raw = {"frames": 0, "seq_gaps": 0, "overflows": 0, "bad": 0, "ignored": 0}
         self.fw = {}                      # the firmware's own counters from its "lidar: ..." log line (usb drop, overflow)
+        self.fw_drops = FwDrops()         # ... and what they did lately (cumulative since boot, so only growth counts)
         self._seq = None
 
     # the source on show (Health / stats): the active one, else the one that got bytes, else the serial port
@@ -510,6 +565,8 @@ class Ld19Reader:
             t = self.teensy
             out["teensy"] = dict(self.raw, bytes=t.bytes, **{"fw_" + k: v for k, v in self.fw.items()},
                                  age_s=None if t.last_data is None else round(now - t.last_data, 2))
+            if self.fw_drops.seen:
+                out["teensy"]["fw_drops"] = self.fw_drops.summary(now)
         return out
 
 

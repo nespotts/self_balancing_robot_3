@@ -338,6 +338,10 @@ LIDAR_RPM_OK = (570.0, 630.0)   # LD19: 10 Hz = 600 rpm, +-0.1 Hz once settled (
 LIDAR_CRC_WARN = 0.02            # share of packets with a bad CRC
 
 
+def _ago(s):
+    return "%.0f s" % s if s < 90 else "%.0f min" % (s / 60.0) if s < 5400 else "%.1f h" % (s / 3600.0)
+
+
 def lidar_tile(l):
     """LD19 tile from Lidar.status(): packets/s, rpm, CRC errors, last-scan age. A missing port is grey, not red:
     the lidar may simply not be mounted yet."""
@@ -373,6 +377,18 @@ def lidar_tile(l):
         if teensy.get("frames") and (lost + teensy.get("overflows", 0)) / float(teensy["frames"] + lost) > LIDAR_CRC_WARN:
             lvl = WARN
             why.append("the robot link drops lidar data (USB busy?)")
+        fd = teensy.get("fw_drops")          # the firmware's cumulative counters: only growth warns, the total is info
+        if fd:
+            if fd.get("recent"):
+                lvl = worst([lvl, WARN])
+                why.append("%d more lost on the robot's USB in the last ~30 s (USB busy?)" % fd["recent"])
+            lost0, since = fd.get("boot_lost", 0), fd.get("since", 0)
+            if since:
+                ago = fd.get("ago_s")
+                why.append("%d lost at boot, %d since%s" % (lost0, since, "" if ago is None else
+                                                            " (last %s ago)" % _ago(ago)))
+            elif lost0:
+                why.append("%d lost at boot, none since" % lost0)
     if crc / pk > LIDAR_CRC_WARN:
         lvl = WARN
         why.append("many CRC errors: check the wiring")

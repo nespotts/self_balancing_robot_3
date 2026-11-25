@@ -393,11 +393,16 @@ class Lidar:
             return
         self.reader.feed_teensy(seq, flags, data)
 
+    def on_hello(self, d):
+        """A HELLO from the robot: a new Teensy boot restarts the drop counters (ld19.FwDrops)."""
+        self.reader.fw_drops.on_hello(d)
+
     def on_robot_log(self, text):
         """The firmware's "lidar: ... usb drop N, overflow M ..." line: its own counters for the Health tile."""
         m = _FW_STAT_RE.search(text)
         if m:
             self.reader.fw = {"usb_drop": int(m.group(1)), "overflow": int(m.group(2))}
+            self.reader.fw_drops.on_line(int(m.group(1)), int(m.group(2)), self.reader.clock())
             s = _FW_SECT_RE.search(text)      # link v10 (#113): the Teensy's own obstacle sectors, rate and cost
             if s:
                 self.reader.fw.update(sectors_hz=float(s.group(1)), sectors_slice_us=int(s.group(2)),
