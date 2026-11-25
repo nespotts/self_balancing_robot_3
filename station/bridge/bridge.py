@@ -61,6 +61,11 @@ POLLER_TIMEOUT_S = 3.0
 DEFAULT_RELEASE_FILE = "/tmp/sbr3-bridge.release" if os.name == "posix" else \
     os.path.join(tempfile.gettempdir(), "sbr3-bridge.release")
 ROBOT_WAIT_S = 3.0        # identify the robot from its firmware string if sys.platform + the param list are not in after this (#97)
+ROBOT_ASK_S = 2.0         # still no HELLO / no params on this connection: GET_PARAMS again this often (#101) ...
+ROBOT_ASK_SLOW_S = 10.0   # ... and this often after ROBOT_ASK_FAST tries (a robot that never answers is not flooded)
+ROBOT_ASK_FAST = 5
+PROFILE_SETTINGS = {("map", "set"), ("lidar", "set"), ("lidar", "defaults"), ("plan", "set")}   # saved in the profile folder
+NO_PROFILE_TEXT = "robot not identified yet; not saved"
 PLATFORM_PARAM = profiles.PLATFORM_PARAM
 RELEASE_STALE_S = 15 * 60
 LINK_POLL_S = 0.25
@@ -139,7 +144,7 @@ class Bridge:
         self.robot = None               # the bound profile name (None until identified)
         self.robot_source = ""          # "override" | "sys.platform" | "firmware" | "default"
         self.robot_pending = False      # a (re)connected robot is being identified (mapping is held meanwhile)
-        self.ident = {"hello": None, "params": {}, "t": 0.0}   # what this connection has said so far
+        self.ident = self._new_ident(0.0)   # what this connection has said so far
         # black-box fall recorder (#50): ~/sbr3-falls/<robot> on the Pi
         self.falls = falls_mod.FallRecorder(None,
                                             params=self.param_values, session=lambda: self.log.name if self.log.f else None,
@@ -428,6 +433,7 @@ class Bridge:
             self.params_dirty = True
             self.log.record("param", d["id"], d["name"], d["value"], d["min"], d["max"])
             self.ident["params"][d["name"]] = d["value"]
+            self.ident["param_t"] = _now()
             self._check_robot()
         elif t == lp.MSG_NAV_STATUS:
             d = _round_dict(lp.decode_nav_status(p))
@@ -440,10 +446,7 @@ class Bridge:
             changed = self.hello is None or d["firmware"] != self.hello.get("firmware")
             self.hello = d
             self.log.record("hello", d)
-            if self.ident["hello"] is None:
-                self.ident["t"] = _now()
-            self.ident["hello"] = d
-            self._check_robot()
+            self._robot_hello(d)
             if changed:
                 self.params = {}
                 self.params_dirty = True
@@ -520,6 +523,7 @@ class Bridge:
                 traceback.print_exc()
 
     def _tick(self, now):
+        self._check_robot(now)          # first, so nothing below can keep the robot unidentified (#101)
         if self.link:
             if now - self.last_hb >= HEARTBEAT_S - 0.005:
                 self.last_hb = now
@@ -570,7 +574,6 @@ class Bridge:
         if self.lidar:
             for text in self.lidar.poll(now):             # the live LD19 scan points, <= 3 Hz (#76)
                 self.broadcast(text, droppable=True)
-        self._check_robot(now)
         self.planner.tick(now)
         self.ros.tick(now)                                # ROS stream (#96): odometry batch, 2 Hz state
         for meta in self.falls.tick(now):                 # a fall record was just saved
@@ -629,37 +632,127 @@ class Bridge:
         return {"maps": profiles.robot_dir(self.map_root, name), "presets": profiles.robot_dir(self.preset_root, name),
                 "falls": profiles.robot_dir(self.falls_root, name)}
 
+    @staticmethod
+    def _new_ident(now):
+        # hello / params: what this connection said; t: first HELLO (or the connect); up: the connect;
+        # param_t: last ParamInfo; asks: GET_PARAMS re-sent by _ask_robot; retry_at: after a failed identification
+        return {"hello": None, "params": {}, "t": now, "up": now, "param_t": None, "asks": 0, "retry_at": 0.0}
+
     def _robot_link_up(self):
         """A new connection: whoever is on the other end is identified again from its own HELLO + params.
         A robot is already loaded: its map / lidar scans are held (not mapped) until the answer is in, so a different
         robot never draws into the previous one's map."""
-        self.ident = {"hello": None, "params": {}, "t": _now()}
+        self.ident = self._new_ident(_now())
         if self.robot_override is None:
             self.robot_pending = True
             if self.robot is not None:
                 self.mapper.hold = True
 
+    def _robot_hello(self, d):
+        """A HELLO on this connection (#101). Every HELLO counts: the first one starts the ROBOT_WAIT_S fallback;
+        one with other firmware on the same connection (reflashed / rebooted without the port dropping), or one while
+        no robot is known at all, starts a new identification; a HELLO from the identified robot re-binds its folders
+        if they are somehow not bound."""
+        prev = self.ident["hello"]
+        if self.robot_override is None and not self.robot_pending and (
+                self.robot is None or (prev is not None and prev.get("firmware") != d.get("firmware"))):
+            self.robot_pending = True
+            self.ident["params"] = {}           # the new firmware streams its own list
+            prev = None
+            if self.robot is not None:
+                self.mapper.hold = True
+        if prev is None:
+            self.ident["t"] = _now()
+        self.ident["hello"] = d
+        if not self.robot_pending and self.robot is not None and not self._bound_to(self.robot):
+            self.say("robot profile %s: folders not bound - binding again" % self.robot)
+            self._bind_robot(self.robot, self.robot_source, fresh=False)
+        self._check_robot()
+
+    def _bound_to(self, name):
+        d = self.robot_dirs(name)
+        return (self.mapper.dir == d["maps"] and self.tools.store.dir == d["presets"] and self.falls.dir == d["falls"])
+
+    def robot_wait(self, now=None):
+        """(seconds, why) the link has been up without the robot being identified; (0, "") when it is (#101)."""
+        if self.link_state != "connected" or not self.link or not (self.robot_pending or self.robot is None):
+            return 0.0, ""
+        now = _now() if now is None else now
+        i = self.ident
+        if i["hello"] is None:
+            why = "no HELLO from the robot yet" + (", asked again %d times" % i["asks"] if i["asks"] else "")
+        elif not i["params"]:
+            why = "HELLO in, waiting for the param list"
+        else:
+            why = "waiting for the param list (%d of %d)" % (len(i["params"]), i["hello"].get("param_count", 0))
+        return max(0.0, now - i["up"]), why
+
+    def _ask_robot(self, now):
+        """GET_PARAMS again (the robot answers HELLO + the whole param list) while this connection has no HELLO yet,
+        or a HELLO but no params, or an incomplete list that stopped coming: the one request at connect can be lost
+        (Teensy still booting, the port's buffers flushed on open, a frame dropped on a busy link) and nothing else
+        would ever ask again (#101)."""
+        if not self.link or self.link_state != "connected":
+            return
+        i = self.ident
+        hello = i["hello"]
+        if hello is None:
+            want = self.robot_pending
+        else:
+            n = hello.get("param_count", 0)
+            quiet = i["param_t"] is None or now - i["param_t"] >= ROBOT_ASK_S
+            want = (not i["params"] or len(i["params"]) < n) and quiet and len(self.params) < n
+        if not want:
+            return
+        if now - self.last_get_params < (ROBOT_ASK_S if i["asks"] < ROBOT_ASK_FAST else ROBOT_ASK_SLOW_S):
+            return
+        if i["asks"] == 0:
+            self.say("robot: %s - asking again (GET_PARAMS)" % (
+                "no HELLO on this connection yet" if hello is None else "param list incomplete"))
+        i["asks"] += 1
+        self.send(lp.encode_get_params())
+        self.last_get_params = now
+
     def _check_robot(self, now=None):
         """Decide the robot once HELLO and the whole param list are in (sys.platform is a param), or after
-        ROBOT_WAIT_S from the HELLO (older firmware without it): then the firmware string decides."""
+        ROBOT_WAIT_S from the HELLO (older firmware without it): then the firmware string decides.
+        now (the tick): also asks the robot again while its HELLO / params are missing (#101)."""
+        if now is not None:
+            try:
+                self._ask_robot(now)
+            except Exception as e:
+                self.say("robot: asking for params failed: %s: %s" % (type(e).__name__, e))
         if not self.robot_pending or self.ident["hello"] is None:
             return
         n = self.ident["hello"].get("param_count", 0)
         done = PLATFORM_PARAM in self.ident["params"] or (n and len(self.ident["params"]) >= n)
         if not done and (now is None or now - self.ident["t"] < ROBOT_WAIT_S):
             return
-        name, src = profiles.identify(self.ident["hello"], self.ident["params"])
-        self._set_robot(name, src)
+        if now is not None and now < self.ident["retry_at"]:
+            return
+        try:
+            name, src = profiles.identify(self.ident["hello"], self.ident["params"])
+            self._set_robot(name, src)
+        except Exception as e:      # stay pending: the tick tries again (never "identified" with nothing bound)
+            self.ident["retry_at"] = (now if now is not None else _now()) + ROBOT_ASK_S
+            self.say("robot identification failed: %s: %s (retrying)" % (type(e).__name__, e))
 
     def _set_robot(self, name, src):
+        """The robot on this connection is `name`. Pending is cleared only after its folders are bound (#101)."""
+        if name != self.robot:
+            if self.robot is not None:
+                self._park_robot("robot changed: %s -> %s" % (self.robot, name))
+            self._bind_robot(name, src, fresh=self.robot is not None)
+        elif not self._bound_to(name):
+            self._bind_robot(name, src, fresh=False)        # the same robot, but its folders are not bound: bind again
+        else:
+            if src != self.robot_source:
+                self.robot_source = src
+            self.say("robot profile: %s again (%s)" % (name, src))
         self.robot_pending = False
         self.mapper.hold = False
         self.log.record("robot", name, src)
-        if name == self.robot:
-            return
-        if self.robot is not None:
-            self._park_robot("robot changed: %s -> %s" % (self.robot, name))
-        self._bind_robot(name, src, fresh=self.robot is not None)
+        self.push_status()
 
     def _park_robot(self, why):
         """Leave the current profile: keep its map (autosave), stop the planner, let pending records finish."""
@@ -674,19 +767,32 @@ class Bridge:
 
     def _bind_robot(self, name, src, fresh):
         """Point the mapper, lidar, planner, presets and falls at <root>/<name>/. fresh: another robot than before
-        (everything in memory is dropped); the first robot after a start keeps the readings taken meanwhile."""
+        (everything in memory is dropped); the first robot after a start keeps the readings taken meanwhile.
+        One part failing (a bad settings file, ...) is reported and never leaves the folders unbound (#101)."""
         d = self.robot_dirs(name)
-        self.mapper.bind(d["maps"], fresh=fresh)
+        errs = []
+
+        def step(what, fn):
+            try:
+                fn()
+            except Exception as e:
+                errs.append("%s: %s: %s" % (what, type(e).__name__, e))
+
+        step("map", lambda: self.mapper.bind(d["maps"], fresh=fresh))
+        if self.mapper.dir != d["maps"]:
+            self.mapper.dir = d["maps"]                     # lidar.json / planner.json / settings.json live here
         if self.lidar:
             if fresh:
                 self.lidar.hist.clear()
                 self.lidar.last_used = None
-            self.lidar.reload_settings()
-        self.planner.reload_settings()
-        self.tools.store.set_dir(d["presets"])
-        self.falls.set_dir(d["falls"])
+            step("lidar", self.lidar.reload_settings)
+        step("planner", self.planner.reload_settings)
+        step("presets", lambda: self.tools.store.set_dir(d["presets"]))
+        step("falls", lambda: self.falls.set_dir(d["falls"]))
         self.robot, self.robot_source = name, src
         self.say("robot profile: %s (%s); data in %s" % (name, src, d["maps"]))
+        if errs:
+            self.say("WARNING: robot profile %s: %s" % (name, "; ".join(errs)))
         self.push_status()
         try:
             self.broadcast(json.dumps(self.tools._presets_msg(), separators=(",", ":")))
@@ -746,6 +852,8 @@ class Bridge:
             "clients": self.client_count(), "session": self.log.name if self.log.f else None,
             "estop": self.estop, "robot_estop": self.robot_estop,
             "robot_name": self.robot, "robot_source": self.robot_source,    # profile in use (#97): balancer | shark | sim ...
+            "robot_pending": self.robot_pending,           # the robot on this connection is being identified (#101)
+            "robot_wait_s": round(self.robot_wait(now)[0], 1),   # ... for this long with the link up (0 = identified)
             "cmd_active": self.cmd_active, "remote_seen": self.remote_seen,
             "uptime_s": int(now - self.t_start), "release_file": self.release_file,
             "tlm_boost": self.hz_base is not None,         # tlm.hz raised by the Tune page, restored when it closes
@@ -758,7 +866,9 @@ class Bridge:
 
     def health_ctx(self):
         """What the Health rules look at (plain values; see station/bridge/health.py)."""
+        wait_s, wait_why = self.robot_wait()
         return {"link": self.link_state, "robot_alive": _now() - self.tlm_time < ROBOT_SILENT_S, "tlm": self.tlm,
+                "robot_wait_s": wait_s, "robot_wait_why": wait_why,
                 "tlm_hz": self.tlm_hz, "rng_hz": self.rng_hz, "crc_errors": self.parser.crc_errors,
                 "params": {p["name"]: p["value"] for p in self.params.values()}, "hello": self.hello,
                 "estop": self.estop, "robot_estop": self.robot_estop, "remote_seen": self.remote_seen,
@@ -798,6 +908,9 @@ class Bridge:
         if not self.link and self._needs_link(t, m.get("action")):
             # nothing would reach the robot: say so instead of pretending (no optimistic state either)
             return {"t": "error", "code": "no_link", "text": NO_LINK_TEXT + " - %s not sent" % t}
+        if self.robot is None and (t, m.get("action")) in PROFILE_SETTINGS:
+            # no profile folder yet (#101): the change could not be saved and the robot's own file replaces it on bind
+            return {"t": "error", "code": "no_profile", "text": NO_PROFILE_TEXT}
         if t == "cmd_vel":
             self.cmd = (_num(m.get("speed"), 0, -3000, 3000), _num(m.get("turn"), 0, -1000, 1000))
             self.cmd_time = _now()

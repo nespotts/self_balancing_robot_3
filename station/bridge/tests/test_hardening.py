@@ -666,6 +666,9 @@ class TestNoLinkCommands(Base):
         # commands that do not touch the robot still work
         self.assertEqual(b.handle_command({"t": "ping", "id": 1}, "t")["t"], "pong")
         self.assertIsNone(b.handle_command({"t": "plan", "action": "stop"}, "t"))
+        self.assertEqual(b.handle_command({"t": "plan", "action": "set", "settings": {"margin_mm": 100}}, "t")["code"],
+                         "no_profile")                                  # no robot profile yet: could not be saved (#101)
+        b._set_robot("balancer", "default")
         self.assertIsNone(b.handle_command({"t": "plan", "action": "set", "settings": {"margin_mm": 100}}, "t"))
         self.assertIsNone(b.handle_command({"t": "cmd_vel", "speed": 0, "turn": 0}, "t"))
         self.assertEqual(b.handle_command({"t": "preset", "action": "list"}, "t")["t"], "presets")
