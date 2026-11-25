@@ -1,7 +1,9 @@
 """Line-by-line port of src/contact.h / contact.cpp (issue #104): contact detection for obstacles below the lidar's
 scan plane. BUMP: the speed falls far below a steady command with a pitch-rate spike and stays down; STUCK: it got
-going, then no new ground for 0.4 s while the command and the velocity loop's lean push on. The sim's Navigator feeds
-it every control step."""
+going, then no new ground for 0.4 s while the command and the velocity loop's lean push on; STALL (#111, reported as
+STUCK): slow / reverse pushes from 30 mm/s (backing off, stepping away; driving: from 60 mm/s, a 0.8 s window below
+100), the wheels (nearly) still for 0.4 s while the lean builds toward the command (or the controller holds it at its
+anti-windup limit). The sim's Navigator feeds it every control step."""
 from station.bridge import link_protocol as lp
 
 BIN_MS, BINS = 10, 12
@@ -18,11 +20,21 @@ STUCK_NEW_MM = 10.0
 STUCK_MS, STUCK_START_MS = 400, 500
 STUCK_LEAN_DEG = 0.6
 FALL_MS = 600
+# stall (#111), see src/contact.h
+STALL_MIN_CMD = 30.0
+STALL_START_MS = 300
+STALL_MS = 400
+STALL_NEW_MM, STALL_BACK_MM = 10.0, 15.0
+STALL_STILL_MMS = 15.0
+STALL_STILL_TAU_MS = 200.0
+STALL_BUILD_DEG = 0.08
+STALL_DRIVE_MS = 800
+STALL_DRIVE_MIN_CMD = 60.0
 
 
 class ContactDetector:
-    """update(c) with c: dict now_ms, watch, upright, cmd, speed, pitch_rate, vel_out, lidar_stuck, cruise -> 0 or
-    lp.LINK_CONTACT_BUMP / LINK_CONTACT_STUCK; then dir / value / flags describe it."""
+    """update(c) with c: dict now_ms, watch, upright, cmd, speed, pitch_rate, vel_out, lidar_stuck, cruise, ramp, drive,
+    held -> 0 or lp.LINK_CONTACT_BUMP / LINK_CONTACT_STUCK; then dir / value / flags / stall describe it."""
 
     def __init__(self):
         self.bins = []                  # (speed, command at the bin's end, pitch-rate max, min), newest last
@@ -32,6 +44,10 @@ class ContactDetector:
         self.last_ms = 0
         self.was_upright = False
         self.dir, self.value, self.flags = 1.0, 0.0, 0
+        self.stall = False
+        self.s_d = 1.0
+        self.s_on_ms = self.s_a_ms = 0
+        self.s_pos = self.s_a_pos = self.s_a_lean = self.s_abs = self.s_sum = 0.0
         self.cand_d = self.run_d = 1.0
         self.pos = self.high = 0.0
         self.new_ms = self.run_ms = 0
@@ -42,9 +58,10 @@ class ContactDetector:
         self.bump_peak = 0.0
         self.hold_ms = 0
         self.run = self.moved = False
+        self.s_run = self.s_win = False
 
-    def _fire(self, kind, d, value, flags):
-        self.dir, self.value, self.flags = d, value, flags
+    def _fire(self, kind, d, value, flags, stall=False):
+        self.dir, self.value, self.flags, self.stall = d, value, flags, stall
         self.reset()
         return kind
 
@@ -72,6 +89,7 @@ class ContactDetector:
         cm = abs(c["cmd"])
         v = d * c["speed"]
         still = now - self.new_ms if self.moved else 0      # ms without new ground
+        s_still = now - self.s_a_ms if self.s_win else 0    # stall: ms in the band
 
         # a fall right after a candidate confirms it (a hard bump throws it over before the hold time is up)
         if fell:
@@ -79,11 +97,14 @@ class ContactDetector:
                 return self._fire(lp.LINK_CONTACT_BUMP, self.cand_d, self.bump_peak, lp.LINK_CONTACT_FELL)
             if still >= STUCK_MS // 2:
                 return self._fire(lp.LINK_CONTACT_STUCK, self.run_d, float(still), lp.LINK_CONTACT_FELL)
+            if s_still >= STALL_MS // 2:
+                return self._fire(lp.LINK_CONTACT_STUCK, self.s_d, float(s_still), lp.LINK_CONTACT_FELL, True)
         if self.cand_ms and now - self.cand_ms > FALL_MS:
             self.cand_ms = 0
         if not c["watch"] or not c["upright"]:
             self.bump_ms = self.hold_ms = 0
             self.moved = self.run = False
+            self.s_run = self.s_win = False
             return 0
 
         # bump
@@ -135,4 +156,32 @@ class ContactDetector:
                 return self._fire(lp.LINK_CONTACT_STUCK, d, float(s), 0)
             if c["lidar_stuck"] and s >= STUCK_MS // 2:
                 return self._fire(lp.LINK_CONTACT_STUCK, d, float(s), lp.LINK_CONTACT_LIDAR)
+
+        # stall (#111): commanded (>= STALL_MIN_CMD, either way) but the wheels (nearly) still while the lean builds
+        if cm >= STALL_MIN_CMD and (not self.s_run or d == self.s_d):
+            if not self.s_run:
+                self.s_run, self.s_d, self.s_on_ms = True, d, now
+                self.s_pos, self.s_win = 0.0, False
+            self.s_pos += v * dt * 0.001
+            drive = c.get("drive", False)
+            # (driving this slowly a balancing robot can stand in its motor dead band: the nav stuck check only)
+            if (c.get("ramp", False) or now - self.s_on_ms < STALL_START_MS
+                    or (drive and (cm < STALL_DRIVE_MIN_CMD or not c.get("cruise", True)))):
+                self.s_win = False            # leaning in / ramping up: a balancing robot lags there
+            else:
+                if not self.s_win or self.s_pos > self.s_a_pos + STALL_NEW_MM or self.s_pos < self.s_a_pos - STALL_BACK_MM:
+                    self.s_win = True         # (it moved: the window starts again here)
+                    self.s_a_pos, self.s_a_ms, self.s_a_lean, self.s_sum = self.s_pos, now, c["vel_out"], 0.0
+                self.s_sum += abs(v) * dt * 0.001                                         # |travel| in the window
+                self.s_abs += (abs(v) - self.s_abs) * min(1.0, dt / STALL_STILL_TAU_MS)   # mean |speed|, last ~0.2 s
+                s = now - self.s_a_ms
+                # (driving slowly: a balancing robot can stand in its motor dead band a while)
+                win = STALL_DRIVE_MS if drive and cm < STUCK_MIN_CMD else STALL_MS
+                # (still now; rocking against it before is fine, up to twice that on average)
+                if (s >= win and self.s_abs <= STALL_STILL_MMS and self.s_sum * 1000.0 <= 2.0 * STALL_STILL_MMS * s
+                        and (d * (c["vel_out"] - self.s_a_lean) >= STALL_BUILD_DEG or c.get("held", False))):
+                    return self._fire(lp.LINK_CONTACT_STUCK, d, float(s),
+                                      lp.LINK_CONTACT_LIDAR if c.get("lidar_stuck") else 0, True)
+        else:
+            self.s_run = self.s_win = False
         return 0

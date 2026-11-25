@@ -182,20 +182,36 @@ class TestCrumbs(Env):
         self.assertEqual(len(self.r.crumbs), 1)
         self.assertEqual(self.r.crumbs[0].path, 0.0)
 
+    def test_correction_jump_drops_older_crumbs(self):
+        self.drive_line(0.0, 900.0)
+        n = len(self.r.crumbs)
+        self.m.corr = [5.0, -3.0, 0.2]                             # matcher drift: crumbs stay
+        self.drive_line(900.0, 1200.0)
+        self.assertGreater(len(self.r.crumbs), n)
+        self.m.corr = [5.0, -303.0, 0.2]                           # found again 300 mm off (a bump): older ones void
+        self.drive_line(1200.0, 1500.0)
+        cs = list(self.r.crumbs)
+        self.assertLessEqual(len(cs), 3)
+        self.assertTrue(all(c.corr == [5.0, -303.0, 0.2] for c in cs))
+
     def test_route_and_stops(self):
         C = rt.Crumb
-        cs = [C(float(-150 * k), 0.0, 0.0, 3000.0 - 150 * k, [0.0, 0.0, 0.0], r)
-              for k, r in enumerate([60, 0, 0, 100, 95, 0, 30, 40, 120, 118, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])]
+        # newest first (k = 0 at x = 0, path 3000); None: laid while lost (untrusted)
+        own = [None, 70, 70, 70, 140, 100, 100, 100, 40, 40, 130, 130, 130, 130, 130, 0, 0, 0, 0, 0, 0]
+        cs = [C(float(-150 * k), 0.0, 0.0, 3000.0 - 150 * k, None if r is None else [0.0, 0.0, 0.0], r or 0)
+              for k, r in enumerate(own)]
         self.r.crumbs.extend(reversed(cs))         # oldest first (the robot drove towards +x)
-        self.p.settings["retrace_max_mm"] = 2000.0
+        self.p.settings["retrace_max_mm"] = 2400.0
         route, stops = self.r._route({"x_mm": 100.0, "y_mm": 0.0})
-        # newest first: the crumb at x = 0 (path 3000) ... within 2 m of path: up to path >= 1100 (k <= 12)
+        # within 2.4 m of path: k <= 15. A stretch's richness = the least of each crumb and its neighbours: the lone
+        # 140 at k = 4 counts 70 (an edge), the 130 stretch k = 10 .. 14 counts 130 inside, 0 at k = 14 (next to 0)
         self.assertEqual(route[0].x, 0.0)
-        self.assertEqual([route[i].rich for i in stops], [100, 120])   # >= 75 % of 120; 100 and 95 are close: 100
+        self.assertEqual([r.rich for r in route[:6]], [0, 0, 70, 70, 70, 100])
+        self.assertEqual(stops, [5, 11])           # >= 75 % of 130 = 97.5: k = 5 (100), then 500 mm on: k = 11
         self.assertEqual(len(route), stops[-1] + 1)                     # the route ends at the last stop
-        self.p.settings["retrace_max_mm"] = 500.0
+        self.p.settings["retrace_max_mm"] = 700.0
         route, stops = self.r._route({"x_mm": 100.0, "y_mm": 0.0})
-        self.assertEqual([route[i].rich for i in stops], [60])          # nothing rich in reach: the best one
+        self.assertEqual([route[i].rich for i in stops], [70])          # nothing rich in reach: the best one
 
 
 class TestRetrace(Env):

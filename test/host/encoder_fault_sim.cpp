@@ -412,6 +412,17 @@ static void testResetCause() {
   CHECK(reset_classify(f) == LINK_RESET_REQUESTED);
   f.srsr = RST_SRSR_TEMP;
   CHECK(reset_classify(f) == LINK_RESET_TEMP);
+  // crash record flags (src/crash_capture.h): the RTWDOG interrupt / our fault handler ran, whatever SRSR shows
+  f = ResetFacts();
+  f.srsr = RST_SRSR_LOCKUP_SW;
+  f.snvs_ok = f.same_build = true;
+  CHECK(reset_classify(f) == LINK_RESET_LOCKUP);
+  f.wdog_isr = true;
+  CHECK(reset_classify(f) == LINK_RESET_WATCHDOG);
+  f.fault = true;
+  CHECK(reset_classify(f) == LINK_RESET_FAULT);
+  f.snvs_ok = false;  // no record: the flags mean nothing
+  CHECK(reset_classify(f) == LINK_RESET_LOCKUP);
   CHECK(reset_unexpected(LINK_RESET_WATCHDOG) && reset_unexpected(LINK_RESET_POWER_DIP));
   CHECK(!reset_unexpected(LINK_RESET_POWER_ON) && !reset_unexpected(LINK_RESET_FLASHED) &&
         !reset_unexpected(LINK_RESET_REQUESTED));

@@ -265,6 +265,7 @@ static_assert(pins::MOT_L_EN == 4 && pins::MOT_L_D1 == 5 && pins::MOT_L_D2 == 6 
 // Teensy core hook (cores/teensy4/startup.c): runs a few instructions after reset, ~300 ms before setup() (the core
 // waits for USB). Without it the L298N inputs float (or the pad keepers hold their last level) all that time.
 // The core selects the fast GPIOs (GPR26..29) a little later; done here first so the levels set now stay.
+#if SBR_EARLY_HOOK
 extern "C" FLASHMEM void startup_early_hook(void) {
   IOMUXC_GPR_GPR26 = 0xFFFFFFFF;
   IOMUXC_GPR_GPR27 = 0xFFFFFFFF;
@@ -272,6 +273,7 @@ extern "C" FLASHMEM void startup_early_hook(void) {
   IOMUXC_GPR_GPR29 = 0xFFFFFFFF;
   MOTOR_PINS_LOW();
 }
+#endif
 
 void motors_emergency_off() { MOTOR_PINS_LOW(); }
 

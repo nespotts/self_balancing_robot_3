@@ -33,6 +33,8 @@ from .lidarmatch import OCC_BYTE, apply
 SPACING_MM = 150.0         # a crumb every 150 mm of odometry travel ...
 KEEP_MM = 20000.0          # ... the last 20 m of path
 JUMP_MM = 600.0            # the odometry moved more than this between two turns: a reset / reboot, the crumbs are void
+CORR_JUMP_MM, CORR_JUMP_DEG = 120.0, 4.0   # the correction moved this much since the last trusted crumb (found again
+#                            after a kidnap / slip, Set position): the older crumbs belong to another odometry-map relation
 RICH_STRIDE = 3            # richness: every 3rd point of the turn
 AFTER_S = 4.0              # lost this long (the in-place search first): retrace
 AHEAD_MM = 250.0           # the GOTO list reaches this far ahead (the navigator slows to ~kp x distance: ~150 mm/s)
@@ -111,6 +113,7 @@ class Retracer:
         self.crumbs = collections.deque()
         self.ver = None              # mapper.version the crumbs belong to
         self.last_odo = None         # (x, y) of the last turn: odometry jumps
+        self.last_corr = None        # the correction of the last trusted crumb: correction jumps
         self.scan = None             # (lidar clock, [complex points, odometry frame]) of the last turn
         self.st = None               # retracing: see _start
         self.done_lost = None        # lost_t0 of the lost episode already handled (retraced / given up / cancelled)
@@ -140,11 +143,13 @@ class Retracer:
             return
         if self.ver != m.version:
             self.crumbs.clear()
+            self.last_corr = None
             self.ver = m.version
         x, y, h = turn.mid
         lo, self.last_odo = self.last_odo, (x, y)
         if lo is not None and math.hypot(x - lo[0], y - lo[1]) > JUMP_MM:
             self.crumbs.clear()             # a pose reset / Teensy reboot: another odometry frame
+            self.last_corr = None
         lm = m.lmatch
         if lm.mode == "slip":
             return                          # the wheels' travel is not the body's
@@ -156,6 +161,15 @@ class Retracer:
         if lm.mode != "track" and not trusted and (c is None or self.st is not None):
             return                          # lost: no crumbs to start a trail with, nor while driving back
         corr = list(m.corr) if trusted else None
+        if trusted and self.last_corr is not None:
+            ax, ay = apply(self.last_corr, x, y)
+            bx, by = apply(corr, x, y)
+            if math.hypot(ax - bx, ay - by) > CORR_JUMP_MM or \
+                    abs((corr[2] - self.last_corr[2] + 180.0) % 360.0 - 180.0) > CORR_JUMP_DEG:
+                self.crumbs.clear()          # their map poses / the window centres they give are void now
+                c, d = None, 0.0
+        if trusted:
+            self.last_corr = corr
         rich = richness(turn.z, corr, m.grid) if trusted else 0
         self.crumbs.append(Crumb(x, y, h, (c.path + d) if c else 0.0, corr, rich))
         while self.crumbs and self.crumbs[-1].path - self.crumbs[0].path > KEEP_MM:
@@ -253,7 +267,9 @@ class Retracer:
 
     # ---------------------------------------------------------- start / end
     def _route(self, t):
-        """Crumbs newest first within retrace_max_mm of path from the robot, and the stops on them."""
+        """Crumbs newest first within retrace_max_mm of path from the robot, and the stops on them. A crumb's rich here
+        is the least of its own and its neighbours' (an untrusted one counts 0): a stop sits inside a well-mapped
+        stretch, not on its edge, where stopping a few cm short puts the robot back in the thin part."""
         cap = self.p.settings["retrace_max_mm"]
         cs = list(self.crumbs)
         if not cs:
@@ -261,6 +277,8 @@ class Retracer:
         x, y = t["x_mm"], t["y_mm"]
         head = math.hypot(cs[-1].x - x, cs[-1].y - y)
         top = cs[-1].path
+        own = [c.rich if c.corr is not None else 0 for c in cs]
+        cs = [c._replace(rich=min(own[max(0, k - 1):k + 2])) if c.corr is not None else c for k, c in enumerate(cs)]
         route = [c for c in reversed(cs) if head + top - c.path <= cap]
         trusted = [(i, c) for i, c in enumerate(route) if c.corr is not None]
         if not trusted:

@@ -2,7 +2,10 @@
 
 #include <Arduino.h>
 
+#include "crash_capture.h"
 #include "motors.h"
+
+#if SBR_WDOG_ENABLE
 
 // RTWDOG (WDOG3) CS register bits (i.MX RT1060 reference manual, RTWDOG chapter)
 static constexpr uint32_t CS_UPDATE = 1u << 5;    // the config may be changed again later (unlock + rewrite)
@@ -22,7 +25,17 @@ static uint32_t g_fed_us = 0;
 
 static void wdogIsr() {
   motors_emergency_off();  // EN + IN low before the reset lets the pins float (the keepers then hold them low)
-  while (1) {}             // the reset follows within 255 bus clocks
+  crash_phase(PH_WDOG_ISR);
+  crash_set_flag(CRF_WDOG_ISR);  // the next boot knows it was the watchdog, whatever SRC_SRSR says
+  // The RTWDOG resets the chip 255 bus clocks (~2 us) after this interrupt. If it has not within 1 ms (WDOG3 reset
+  // masked / not routed), reset ourselves: never spin here for ever at priority 0 with USB and the link dead.
+  const uint32_t c0 = ARM_DWT_CYCCNT;
+  while (ARM_DWT_CYCCNT - c0 < F_CPU_ACTUAL / 1000u) {
+  }
+  crash_set_flag(CRF_WDOG_NORESET);
+  SCB_AIRCR = 0x05FA0004;
+  while (1) {
+  }
 }
 
 static void writeKey(uint32_t key) {
@@ -70,7 +83,13 @@ bool wdt_begin() {
   NVIC_SET_PRIORITY(IRQ_RTWDOG, 0);  // above everything else that can be interrupted
   NVIC_ENABLE_IRQ(IRQ_RTWDOG);
   if (!configure(WDT_IDLE_MS)) return false;
+  // the new configuration takes a few 32 kHz clocks (RCS); v9 refreshed at once, i.e. during the reconfiguration
+  const uint32_t t0 = micros();
+  while (!(WDOG3_CS & CS_RCS) && micros() - t0 < 1000) {
+  }
+  __disable_irq();
   writeKey(REFRESH_KEY);
+  __enable_irq();
   g_fed_us = micros();
   return true;
 }
@@ -91,7 +110,13 @@ void wdt_service(const WdtIn& in) {
 bool wdt_can_block() {
   if (!g_on) return true;
   if (g_timeout_ms < WDT_IDLE_MS || !(WDOG3_CS & CS_RCS)) return false;
-  g_fed_us = micros();
+  const uint32_t now = micros();
+#if !SBR_WDT_FEED_EVERY_PASS
+  // Fed within the last ms: the blocking call still gets (almost) the whole WDT_IDLE_MS. v9 refreshed the RTWDOG here
+  // on every background pass (~100 000 writes/s into its 32 kHz clock domain); once per ms is all it needs.
+  if (now - g_fed_us < 1000) return true;
+#endif
+  g_fed_us = now;
   __disable_irq();
   writeKey(REFRESH_KEY);
   __enable_irq();
@@ -100,3 +125,13 @@ bool wdt_can_block() {
 
 bool wdt_running() { return g_on; }
 uint32_t wdt_timeout_ms() { return g_on ? g_timeout_ms : 0; }
+
+#else  // SBR_WDOG_ENABLE 0: the RTWDOG is never touched (no clock gate, no SRC_SCR, no interrupt vector)
+
+bool wdt_begin() { return false; }
+void wdt_service(const WdtIn&) {}
+bool wdt_can_block() { return true; }
+bool wdt_running() { return false; }
+uint32_t wdt_timeout_ms() { return 0; }
+
+#endif
