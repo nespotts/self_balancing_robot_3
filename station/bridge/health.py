@@ -293,6 +293,46 @@ def lidar_tile(l):
     return _tile("lidar", label, lvl, "%.0f/s %.0f rpm" % (pps, rpm), ", ".join(why))
 
 
+def ros_tile(r):
+    """ROS tile (#106) from RosLink.health(): adapter connected, localized, Nav2 ready. Only shown once a ROS adapter
+    has talked to the bridge this run."""
+    if not r.get("connected"):
+        return _tile("ros", "ROS", BAD, "offline", "no word from the ROS adapter for %.0f s (ROS stopped on the PC, or "
+                     "the Wi-Fi)" % (r.get("age_s") or 0))
+    st = r.get("status") or {}
+    nodes = st.get("nodes") or {}
+    loc = st.get("loc") or {}
+    why, lvl = ["adapter connected"], OK
+    nav2 = nodes.get("nav2")
+    if nav2 == "active" or (nav2 is None and nodes.get("nav_server")):
+        why.append("Nav2 active")
+        value = "Nav2 ready"
+    elif nav2:
+        lvl, value = WARN, "Nav2 " + nav2
+        why.append("Nav2 is %s (still starting?)" % nav2)
+    else:
+        lvl, value = WARN, "no Nav2"
+        why.append("Nav2 is not running (mapping only?)")
+    src = "slam_toolbox" if nodes.get("slam") else "AMCL" if nodes.get("amcl") else None
+    why.append((src + " up") if src else "no slam_toolbox / AMCL")
+    ls, q = loc.get("state"), loc.get("quality")
+    if ls:
+        fit = " (scan fit %d%%)" % round(100 * q) if q is not None else ""
+        if ls == "ok":
+            why.append("localized" + fit)
+        else:
+            lvl = worst([lvl, WARN if ls in ("weak", "searching", "waiting") else BAD])
+            value = {"lost": "lost", "searching": "searching", "weak": "weak pose"}.get(ls, ls)
+            why.append("localization %s%s" % (ls, fit))
+    elif not st.get("tf"):
+        lvl = worst([lvl, WARN])
+        value = "no pose"
+        why.append("no map -> base_link transform yet")
+    if nodes.get("explore"):
+        why.append("explorer running")
+    return _tile("ros", "ROS", lvl, value, ", ".join(why))
+
+
 def evaluate(c):
     """Rules: context dict -> {"tiles": [...], "preflight": {...}}. See Health.context() for the keys."""
     t = c.get("tlm")
@@ -390,6 +430,10 @@ def evaluate(c):
     # ---- lidar (#76): only when the bridge has a lidar port configured
     if c.get("lidar"):
         tiles["lidar"] = lidar_tile(c["lidar"])
+
+    # ---- ROS (#106): only once a ROS adapter has talked to this bridge
+    if c.get("ros"):
+        tiles["ros"] = ros_tile(c["ros"])
 
     # ---- robot profile (#101): link up but nobody knows which robot this is -> lidar on defaults, nothing saved
     wait = c.get("robot_wait_s") or 0.0
@@ -517,7 +561,8 @@ def evaluate(c):
     else:
         head = "Ready to arm"
     order = ["link", "loop", "imu", "encl", "encr", "rngf", "rngr"] + (["lidar"] if "lidar" in tiles else []) + \
-            ["radio", "pi", "disk", "batt", "fw"] + (["profile"] if "profile" in tiles else []) + ["estop"]
+            ["radio", "pi", "disk", "batt", "fw"] + (["ros"] if "ros" in tiles else []) + \
+        (["profile"] if "profile" in tiles else []) + ["estop"]
     return {"tiles": [tiles[k] for k in order],
             "preflight": {"level": {OK: "green", WARN: "amber", BAD: "red", NA: "red"}[lv], "text": head, "items": pre}}
 

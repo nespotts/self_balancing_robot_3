@@ -70,7 +70,9 @@ function goConfirm(btn, what, fire) {
 
 // ---------- the sheet for a tapped pin ----------
 const sheet = $("place-sheet"), goBtn = $("ps-go"), extra = $("ps-extra"), moreBtn = $("ps-more");
-function closeSheet() { sel = null; sheet.hidden = true; extra.hidden = true; resetBtn(goBtn); }
+export function closeSheet() { sel = null; sheet.hidden = true; extra.hidden = true; resetBtn(goBtn); }
+let sheetHook = () => {};
+export function setSheetHook(fn) { sheetHook = fn; }     // ros.js (#106): Go here (ROS), Patrol…, Cancel
 function renderSheet() {
   const p = byName(sel);
   if (!p) return closeSheet();
@@ -85,6 +87,7 @@ function renderSheet() {
   $("ps-del").hidden = p.home && p.default;
   $("ps-del").textContent = p.home ? "Reset Home to the start…" : "Delete…";
   moreBtn.hidden = p.home && p.default;
+  sheetHook(p);
   sheet.hidden = false;
 }
 export function openSheet(p) { menu.hidden = true; resetBtn(goBtn); extra.hidden = true; sel = p.name; renderSheet(); }

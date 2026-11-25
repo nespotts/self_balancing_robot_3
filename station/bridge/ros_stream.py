@@ -177,7 +177,8 @@ class RosStream:
                 "scan": {"bins": SCAN_BINS, "angle_min": -math.pi, "angle_increment": 2 * math.pi / SCAN_BINS,
                          "enc": "b64u16mm", "hz": 10},
                 "odom": {"cols": ODOM_COLS, "hz": ODOM_HZ},
-                "modes": lp.MODE_NAMES, "cmd_vel_timeout_ms": lp.LINK_CMD_VEL_TIMEOUT_MS}
+                "modes": lp.MODE_NAMES, "cmd_vel_timeout_ms": lp.LINK_CMD_VEL_TIMEOUT_MS,
+                "station_link": 1}          # #106: this bridge relays ros_map / ros_pose / ros_nav ... (ros_link.py)
 
     def _send(self, text):
         for c in list(self.clients):

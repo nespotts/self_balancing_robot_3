@@ -5,6 +5,8 @@ import { SENS_RGB, SENS_NEW } from "./chart.js";
 import { drawOccMap, drawPlan, planActive, plan, onChange, routeOn, hasMap, matchLine } from "./occmap.js";
 import { drawPlaces, hitPlace, openSheet, openPlaceMenu, onPlacesChange } from "./places.js";
 import { drawZones, zoneDraw, zoneDrawing, bindZones } from "./zones.js";
+import { rosView, rosRobot, drawRosMap, drawRosPlan, drawRosPending, rosTap, rosGrab, rosDrag, rosPress, rosInfo, rosPoseLine,
+         updateRosBar, hideRosBar, onRosChange, odomToRos, rosToOdom } from "./ros.js";
 
 const C = {
   bg: "#151514", grid: "#262624", grid2: "#30302d", axis: "#45453f",
@@ -114,12 +116,15 @@ function drawRanges() {
 }
 
 // the live LD19 scan (issue #76): one dot per return of the newest revolution (the map itself holds the history)
-function drawLidar() {
+function drawLidar(xf) {
   const p = state.lidarPts;
   if (!p || p.length < 2) return;
   const size = Math.max(2, Math.min(4, 22 * view.s));
   ctx.fillStyle = C.lidar;
-  for (let i = 0; i + 1 < p.length; i += 2) ctx.fillRect(sx(p[i]) - size / 2, sy(p[i + 1]) - size / 2, size, size);
+  for (let i = 0; i + 1 < p.length; i += 2) {
+    const [x, y] = xf ? xf(p[i], p[i + 1]) : [p[i], p[i + 1]];   // ROS view: odometry -> ROS map
+    ctx.fillRect(sx(x) - size / 2, sy(y) - size / 2, size, size);
+  }
 }
 
 function drawWaypoints() {
@@ -162,10 +167,10 @@ function drawWaypoints() {
   ctx.textAlign = "start"; ctx.textBaseline = "alphabetic";
 }
 
-function drawRobot() {
-  const t = state.tlm;
+function drawRobot(at) {
+  const t = at || (state.tlm && { x: state.tlm.x_mm, y: state.tlm.y_mm, h: state.tlm.heading_deg });
   if (!t) return;
-  const x = sx(t.x_mm), y = sy(t.y_mm), h = -t.heading_deg * Math.PI / 180;
+  const x = sx(t.x), y = sy(t.y), h = -t.h * Math.PI / 180;
   // real footprint (CAD): 90 mm long x 152 mm wide, wheels 66 mm on a 126.8 mm track; never under ~30 px wide
   const k = Math.max(view.s, 30 / ROBOT.w);
   const L = ROBOT.l * k, Wd = ROBOT.w * k, tr = ROBOT.track * k, wd = ROBOT.wheel * k, ww = Math.max(3, (ROBOT.w - ROBOT.track) * k);
@@ -185,10 +190,22 @@ function draw() {
   requestAnimationFrame(draw);
   if (!dirty || canvas.offsetParent === null) return;
   dirty = false;
-  if (view.follow && state.tlm) { view.cx = state.tlm.x_mm; view.cy = state.tlm.y_mm; }
+  const rv = rosView(), rr = rv ? rosRobot() : null;
+  if (view.follow && rv && rr) { view.cx = rr.x; view.cy = rr.y; }
+  else if (view.follow && !rv && state.tlm) { view.cx = state.tlm.x_mm; view.cy = state.tlm.y_mm; }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
   if (layers.grid) drawGrid();
+  if (rv) {             // ROS view (#106): everything in the ROS map frame
+    drawRosMap(ctx, sx, sy, view.s);
+    drawZones(ctx, sx, sy, view.s);
+    drawRosPlan(ctx, sx, sy);
+    if (layers.lidar) drawLidar(odomToRos);
+    drawPlaces(ctx, sx, sy);
+    drawRosPending(ctx, sx, sy);
+    if (rr) drawRobot(rr);
+    return;
+  }
   drawOccMap(ctx, sx, sy, view.s);
   drawZones(ctx, sx, sy, view.s);
   if (layers.track) drawTrack();
@@ -204,9 +221,9 @@ requestAnimationFrame(draw);
 // ---------- info box + waypoint bar ----------
 const info = document.getElementById("map-info");
 function updateInfo() {
-  const t = state.tlm, n = state.nav;
-  if (!t) { info.textContent = state.connected ? "Waiting for the robot…" : "Not connected to the bridge"; return; }
-  let s = `x ${(t.x_mm / 1000).toFixed(2)}  y ${(t.y_mm / 1000).toFixed(2)} m  ·  ${Math.round(((t.heading_deg % 360) + 540) % 360 - 180)}°`;
+  const t = state.tlm, n = state.nav, rl = rosInfo();
+  if (!t) { info.textContent = (state.connected ? "Waiting for the robot…" : "Not connected to the bridge") + (rl ? "\n" + rl : ""); info.style.whiteSpace = "pre-line"; return; }
+  let s = rosView() ? rosPoseLine() : `x ${(t.x_mm / 1000).toFixed(2)}  y ${(t.y_mm / 1000).toFixed(2)} m  ·  ${Math.round(((t.heading_deg % 360) + 540) % 360 - 180)}°`;
   const mode = modeName(t.mode);
   if (n && (mode === "GOTO" || mode === "EXPLORE")) {
     const st = state.hello?.nav_states?.[n.state] ?? "state " + n.state;
@@ -214,8 +231,9 @@ function updateInfo() {
     if (n.waypoint_count) s += ` · ${Math.min(n.nav_index + 1, n.waypoint_count)}/${n.waypoint_count} · ${(n.distance_mm / 1000).toFixed(2)} m`;
   }
   if (flag("obstacle")) s += "\n⚠ obstacle ahead";
-  const ml = matchLine();
+  const ml = rosView() ? "" : matchLine();
   if (ml) s += "\n" + ml;
+  if (rl) s += "\n" + rl;
   info.textContent = s;
   info.style.whiteSpace = "pre-line";
 }
@@ -224,6 +242,12 @@ const wpHint = document.getElementById("wp-hint"), wpCount = document.getElement
 const bUndo = document.getElementById("wp-undo"), bClear = document.getElementById("wp-clear"), bGo = document.getElementById("wp-go");
 const bExplore = document.getElementById("wp-explore");
 function updateBar() {
+  if (rosView()) {      // ROS view (#106): Nav2 goal / patrol / explore / cancel instead of the station's route
+    for (const b of [bUndo, bClear, bGo, bExplore]) b.hidden = true;
+    updateRosBar(wpHint, wpCount);
+    return;
+  }
+  hideRosBar(wpHint);
   const sent = state.waypoints?.length || 0;
   const planning = plan.mode !== "idle", exploring = plan.mode === "explore";
   const hasAny = pending.length || sent || planning;
@@ -280,6 +304,7 @@ bExplore.onclick = () => {
 };
 onChange(() => { dirty = true; updateBar(); });
 onPlacesChange(() => { dirty = true; });
+onRosChange(() => { dirty = true; updateBar(); updateInfo(); });
 
 // ---------- pan / zoom / tap ----------
 const ptrs = new Map();
@@ -295,7 +320,12 @@ function setFollow(v) { view.follow = v; document.getElementById("map-follow").c
 const LONG_MS = 550;
 let pressTimer = 0;
 // long-press (or right-click): save a place here (places.js)
-function placeMenuAt(px, py) { if (!zoneDrawing()) openPlaceMenu(px, py, wx(px), wy(py), W, H); }
+function placeMenuAt(px, py) {
+  if (zoneDrawing()) return;
+  const rv = rosView(), [x, y] = rv ? rosToOdom(wx(px), wy(py)) : [wx(px), wy(py)];   // places are saved in odometry mm
+  rosPress(wx(px), wy(py));
+  if (isFinite(x)) openPlaceMenu(px, py, x, y, W, H);
+}
 canvas.addEventListener("pointerdown", (e) => {
   if (e.pointerType === "mouse" && e.button !== 0) return;   // right-click: contextmenu below
   canvas.setPointerCapture(e.pointerId);
@@ -306,6 +336,9 @@ canvas.addEventListener("pointerdown", (e) => {
     return;                                     // drawing a rectangle / dragging a handle (zones.js)
   }
   if (ptrs.size === 2 && gesture && gesture.zone) { zoneDraw.cancel(); gesture.zone = false; }
+  const grab = ptrs.size === 1 && rosView() ? rosGrab(e.offsetX, e.offsetY, sx, sy) : null;
+  if (grab) { gesture = { x: e.offsetX, y: e.offsetY, t: performance.now(), moved: 0, multi: false, long: false, ros: grab }; return; }
+  if (ptrs.size === 2 && gesture && gesture.ros) gesture.ros = null;
   if (ptrs.size === 1) {
     const g = gesture = { x: e.offsetX, y: e.offsetY, t: performance.now(), moved: 0, multi: false, long: false };
     pressTimer = setTimeout(() => {
@@ -318,6 +351,7 @@ canvas.addEventListener("pointermove", (e) => {
   const p = ptrs.get(e.pointerId);
   if (!p) return;
   if (ptrs.size === 1 && gesture && gesture.zone) { zoneDraw.move(e.offsetX, e.offsetY); p.x = e.offsetX; p.y = e.offsetY; return; }
+  if (ptrs.size === 1 && gesture && gesture.ros) { rosDrag(gesture.ros, wx(e.offsetX), wy(e.offsetY)); p.x = e.offsetX; p.y = e.offsetY; return; }
   if (ptrs.size === 1) {
     const dx = e.offsetX - p.x, dy = e.offsetY - p.y;
     if (gesture) gesture.moved += Math.abs(dx) + Math.abs(dy);
@@ -346,12 +380,14 @@ function endPtr(e) {
     if (ptrs.size === 0) { if (e.type === "pointerup") zoneDraw.up(e.offsetX, e.offsetY); else zoneDraw.cancel(); gesture = null; }
     return;
   }
+  if (gesture && gesture.ros) { if (ptrs.size === 0) gesture = null; return; }   // dragged a ROS goal / its heading
   if (ptrs.size === 0 && gesture) {
     clearTimeout(pressTimer);
     if (!gesture.multi && !gesture.long && gesture.moved <= 8 && performance.now() - gesture.t < 600 && e.type === "pointerup") {
       const pin = zoneDrawing() ? null : hitPlace(e.offsetX, e.offsetY, sx, sy);
       if (zoneDrawing()) zoneDraw.tap(e.offsetX, e.offsetY);   // drawing walls / zones (zones.js)
       else if (pin) openSheet(pin);                  // tap a pin: Go here / more
+      else if (rosView()) rosTap(wx(e.offsetX), wy(e.offsetY));   // ROS view: a Nav2 goal (#106)
       else { pending.push([wx(e.offsetX), wy(e.offsetY)]); updateBar(); dirty = true; }
     }
     gesture = null;

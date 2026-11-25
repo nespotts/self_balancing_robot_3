@@ -113,6 +113,53 @@ Virtual walls, no-go zones, the keep-in fence, slow zones and mazes, stored with
 kept in the maze (`best_s`). A `goto` / place inside a no-go zone or outside the fence is refused ("not sent: ..."). `status.zone_alert` =
 the watchdog's last stop / joystick block. Planner setting `zones_block_manual` (default true): see [safety](safety.md#virtual-walls-and-zones).
 
+### ROS in the station
+
+Issues #106 and #107. ROS 2 runs on the PC (slam_toolbox, Nav2, the explorer). The station UI shows it and steers it; see [ros2.md](ros2.md#use-ros-from-the-station).
+Messages go through the bridge; nothing changes while no ROS adapter is connected. `status.ros` is `null` then, and no `ros_*` message is sent.
+
+| Station -> bridge (`/ws` or `POST /api/cmd`) | |
+|---|---|
+| `{"t":"ros","action":"goal","x":3.3,"y":1.3,"yaw":0.0}` | Nav2 goal in the **ROS map** frame (m, rad; no `yaw` = facing the way from the robot). `"frame":"station"`: `x`, `y` in station-map mm |
+| `{"t":"ros","action":"place","name":"Kitchen"}` | Nav2 to a saved station place. The adapter maps it with TF `map <- station_map`, as `go_to.ps1` does |
+| `{"t":"ros","action":"patrol","places":["A","B"],"loops":2,"dwell":5}` | patrol in that order. `loops` 0 = forever. A place Nav2 cannot reach is skipped (`patrol.missed`) |
+| `{"t":"ros","action":"cancel"}` | cancels every Nav2 goal (also RViz's, `go_to.ps1`, `patrol.ps1`) and the station patrol |
+| `{"t":"ros","action":"initial_pose","x":..,"y":..,"yaw":..}` | tells slam_toolbox / AMCL where the robot is (`/initialpose`, like RViz's 2D Pose Estimate). `"frame":"station"` (mm) goes through the last `map <- station_map` taken while the ROS pose was good |
+| `{"t":"ros","action":"explore","run":true}` / `"run":false` | starts / stops the #107 explorer |
+| `{"t":"ros","action":"save_map","name":"explore-20261124-1530"}` | the explorer saves the ROS map. `name` is optional |
+| reply | `{"t":"ros_sent","action":..,"id":n}` (forwarded); refused: `{"t":"error","code":"ros_offline"}` (no adapter) or `"code":"not_manual"` |
+
+**Manual check.** `goal`, `place`, `patrol` and `explore` `run:true` are refused unless the robot is armed in STATION ("Manual"), with no E-stop.
+The text is "Switch to Manual to let ROS drive", or "The robot is disarmed: Arm & Balance, then tap Manual to let ROS drive".
+Nothing arms the robot or changes its mode for ROS. `cancel`, `initial_pose`, `explore` `run:false` and `save_map` always pass.
+The adapter checks again, and it cancels a running station goal or patrol when the robot leaves Manual for 3 s (`ros_nav` `cancelled`, `reason` "stopped: Switch to Manual ...").
+
+| Bridge -> adapter (`/ws`, the client subscribed to the ROS stream) | |
+|---|---|
+| `{"t":"ros_cmd","cmd":"goal"\|"place"\|"patrol"\|"cancel"\|"initial_pose"\|"explore"\|"save_map","id":n,"who":"client3@...",...}` | the fields above, as sent |
+
+| Adapter -> bridge -> every station client | |
+|---|---|
+| `ros_status` (1 Hz) | `{"loc":{"state":"ok\|weak\|lost\|searching\|waiting","quality":0.91},"tf":true,"aligned":true,"nodes":{"nav2":"active","nav_server":true,"slam":true,"amcl":false,"map_server":true,"loc_monitor":true,"explore":false},"map":{"w","h","res","seq","kb","ms"},"drivable":true,"why":""}` |
+| `ros_map` (on change, <= 0.5 Hz) | `{"seq":3,"frame":"map","w":147,"h":98,"res":0.05,"origin":[x,y,yaw],"enc":"rle4","rle":"<base64>"}`. Row 0 = the bottom row at `origin`. RLE = runs of [class byte, count as LEB128 varint]. Classes: 0 unknown, 1 free (<= 25), 2 occupied (>= 65), 3 in between |
+| `ros_pose` (5 Hz, droppable) | `{"p":[x,y,yaw],"T":[x,y,yaw]}`: the robot in the ROS map (m, rad). `T` = `map <- station_map`, so the UI can put places and zones on the ROS map |
+| `ros_plan` (on change, <= 1 Hz) | `{"pts":[[x,y],...],"len_m":4.2}`: the Nav2 global plan, Douglas-Peucker 3 cm, at most 300 points. `[]` when the goal ends |
+| `ros_nav` (on change, 1 Hz while busy, else every 5 s) | `{"state":"idle\|navigating\|dwell\|succeeded\|failed\|cancelled","kind":"goal\|place\|patrol\|external","goal":[x,y,yaw],"place":"Kitchen","dist_m":2.1,"eta_s":12,"recoveries":0,"reason":"...","elapsed_s":8.4,"seq":7,"patrol":{"places":[...],"i":1,"loop":0,"loops":2,"dwell":5,"missed":[],"dwell_left":3.2}}`. `external` = a goal from RViz / a script |
+| `ros_explore` (#107, every change and >= every 2 s while the explorer runs) | `{"state":"waiting\|idle\|exploring\|navigating\|dwell\|done\|stopped\|saving\|error","target":[x_mm,y_mm] (station frame) \| null,"target_map":[x,y],"frontiers":12,"area_m2":14.2,"reason":"...","saved":"name","ok":true,...}`. If the explorer sends only `target_map`, the adapter adds `target` |
+| `ros_reply` | `{"id":n,"cmd":"place","ok":false,"text":"no place called 'x' (places: ...)"}` |
+
+`status.ros` (1 Hz, `null` until an adapter talks this run): `{"connected":true,"age_s":0.4,"since_s":812,"nav":"navigating","loc":"ok","nav2":"active","explore":false,"drivable":true}`.
+"Connected" means a ROS message arrived in the last 3 s. Only a client subscribed to the ROS stream can send `ros_*` messages: a browser cannot pretend to be ROS.
+A new station client gets the newest `ros_status` / `ros_map` / `ros_plan` / `ros_nav` / `ros_explore` / `ros_pose` on connect.
+Health: a **ROS** tile, shown once an adapter has talked this run (adapter connected, Nav2 active, slam_toolbox / AMCL up, localized + scan fit).
+
+On the ROS side, explore goes through two topics, so the explorer node needs no WebSocket:
+- the adapter publishes `ros_cmd` `explore` / `save_map` on `/station/explore_cmd` (std_msgs/String JSON `{"cmd":"explore","run":true}`, `{"cmd":"save_map","name":...}`);
+- it forwards `/explore/status` (String JSON, the `ros_explore` body) as `ros_explore`.
+
+Bridge hook for the station's **Set position** (#105): `bridge.roslink.station_pose_set(x_mm, y_mm, heading_deg)` sends the same pose to ROS as `initial_pose` in the station frame, when ROS is connected.
+In the UI it is `rosSetPose(x, y, yaw)` from `web/js/ros.js`. The ROS view also has its own **Set ROS position here**: hold on the ROS map.
+
 ### Who may command the robot
 
 `/ws` and every `/api/*` request are checked (`httpws.check_origin`), so a web page you happen to open on the same Wi-Fi cannot drive the robot:

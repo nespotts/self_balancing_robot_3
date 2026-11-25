@@ -1,10 +1,11 @@
 #!/bin/bash
 # Copy ros2/sbr3_ros into ~/sbr3_ws/src and build it (a copy, so colcon never writes into the Windows checkout).
 #   bash ros2/scripts/build.sh
+#   SBR3_WS=~/other_ws bash ros2/scripts/build.sh      another workspace (e.g. to test without touching a running one)
 set -eo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PKG="$HERE/../sbr3_ros"
-WS="$HOME/sbr3_ws"
+WS="${SBR3_WS:-$HOME/sbr3_ws}"
 mkdir -p "$WS/src"
 rm -rf "$WS/src/sbr3_ros"
 cp -r "$PKG" "$WS/src/sbr3_ros"

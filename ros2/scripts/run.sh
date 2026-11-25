@@ -12,7 +12,7 @@ WHAT="${1:-mapping}"; shift || true
 URL="${1:-ws://192.168.0.209:8080/ws}"; shift || true
 bash "$HERE/build.sh" >/dev/null
 source /opt/ros/jazzy/setup.bash
-source "$HOME/sbr3_ws/install/setup.bash"
+source "${SBR3_WS:-$HOME/sbr3_ws}/install/setup.bash"
 # RViz on the GPU (WSLg's Mesa d3d12 driver -> the NVIDIA card) instead of llvmpipe software rendering (~3 CPU cores).
 # SBR3_SOFT_GL=1 keeps software rendering (if the GPU path ever misbehaves).
 if [ -z "$SBR3_SOFT_GL" ]; then
