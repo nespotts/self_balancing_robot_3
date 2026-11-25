@@ -21,6 +21,7 @@ from .mapping import AUTOSAVE_NAME, Mapper
 from .planner import Planner
 from . import profiles
 from .ros_stream import RosStream
+from . import ros_link
 from .session_log import SessionLog, to_csv
 from .transport import LinkError, open_link
 from .tuning_api import TuningTools
@@ -215,6 +216,7 @@ class Bridge:
         self.planner = Planner(self, NAV_STATE_NAMES)          # route planning + explore on the map
         self.planner.prof = self.prof
         self.ros = RosStream(self, clock=_now)                 # opt-in scans + odometry for the ROS 2 adapter (#96)
+        self.roslink = ros_link.RosLink(self, clock=_now)      # ROS map / pose / Nav2 for the station UI, goals back (#106)
 
         self.cmd = (0.0, 0.0)
         self.cmd_time = -10.0
@@ -607,6 +609,7 @@ class Bridge:
             self.planner.tick(now)
         with P("ros.tick"):
             self.ros.tick(now)                            # ROS stream (#96): odometry batch, 2 Hz state
+            self.roslink.tick(now)                        # ROS link (#106): "ROS connected" timeout
         with P("falls.tick"):
             falls = self.falls.tick(now)
         for meta in falls:                                # a fall record was just saved
@@ -901,6 +904,7 @@ class Bridge:
             "lidar_nav": self.lidar_obst.status(now) if self.lidar_obst else None,   # obstacle frames to the robot (#77)
             # event loop (#102): longest stall in the last ~10 s, busy % of a core, top parts (ms/s), worker threads (%)
             "loop": self.prof.status(),
+            "ros": self.roslink.status(now),               # ROS link (#106): null = no ROS adapter this run
         }
 
     def health_ctx(self):
@@ -913,7 +917,7 @@ class Bridge:
                 "estop": self.estop, "robot_estop": self.robot_estop, "remote_seen": self.remote_seen,
                 "clients": self.client_count(), "log_error": self.log.error,
                 "lidar": self.lidar.status() if self.lidar else None, "robot_name": self.robot,
-                "loop": self.prof.status()}
+                "loop": self.prof.status(), "ros": self.roslink.health()}
 
     def _push_health(self, now):
         """Once a second: the Health page + battery minutes (a few hundred bytes; reads /proc and /sys only)."""
@@ -1058,7 +1062,12 @@ class Bridge:
             return self.tools.handle(m, who)
         elif t == "map":       # occupancy grid: reset / save / load / list / delete / set (#12), set_pose (#105)
             tl = self.tlm
-            return self.mapper.command(m, who, (tl["x_mm"], tl["y_mm"], tl["heading_deg"]) if tl else None)
+            r = self.mapper.command(m, who, (tl["x_mm"], tl["y_mm"], tl["heading_deg"]) if tl else None)
+            if r is None and m.get("action") == "set_pose" and getattr(self.mapper, "last_set_pose", None):
+                # Set position (#105) also gives ROS the pose as its initial pose when an adapter is connected (#106)
+                if self.roslink.station_pose_set(*self.mapper.last_set_pose, who=who):
+                    self.say("%s: Set position also sent to ROS (initial pose)" % who)
+            return r
         elif t == "places":    # saved places on the map: add / rename / delete / list (#53)
             return self.mapper.places_command(m, who)
         elif t == "zones":     # virtual walls / no-go / fence / slow zones / mazes (#70)
@@ -1074,6 +1083,8 @@ class Bridge:
             if self.estop and m.get("action") in ("goto", "explore", "home", "solve"):
                 return {"t": "error", "code": "estop", "text": "E-stop is on: release it first"}
             return self.planner.command(m, who)
+        elif t == "ros":       # ROS goals / places / patrols / cancel / initial pose / explore (#106)
+            return self.roslink.command(m, who)
         elif t == "ping":
             return {"t": "pong", "id": m.get("id")}
         else:
@@ -1236,6 +1247,7 @@ class Bridge:
         ws.send(self.planner.msg())
         for item in list(self.logs)[-60:]:
             ws.send(json.dumps(dict(t="log", **{k: v for k, v in item.items() if k != "t"}, ts=item["t"])))
+        self.roslink.welcome(ws)                            # ROS map / pose / Nav2 status, if ROS is connected (#106)
 
     async def ws_handler(self, ws):
         self.client_ids += 1
@@ -1265,8 +1277,12 @@ class Bridge:
                         else:
                             self.tune_clients.discard(ws)
                         continue
-                    if m.get("t") == "ros":   # {"t": "ros", "action": "subscribe"} -> ROS stream (#96)
-                        ws.send(json.dumps(self.ros.command(ws, m)))
+                    if m.get("t") == "ros" and m.get("action") not in ros_link.ACTIONS:
+                        ws.send(json.dumps(self.ros.command(ws, m)))     # subscribe -> ROS stream (#96)
+                        continue
+                    if m.get("t") in ros_link.UPLINK:    # the adapter's ROS map / pose / Nav2 status (#106)
+                        with self.prof.part("ros.link"):
+                            self.roslink.from_adapter(ws, m)
                         continue
                     with self.prof.part("ws.cmd"):
                         reply = self.run_command(m, who)
@@ -1280,6 +1296,7 @@ class Bridge:
             self.clients.discard(ws)
             self.tune_clients.discard(ws)
             self.ros.drop(ws)
+            self.roslink.drop(ws)
             # a driving client went away: stop immediately rather than waiting for the timeout
             if self.cmd_active:
                 self.cmd_active = False

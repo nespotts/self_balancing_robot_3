@@ -4,6 +4,7 @@ Issues #96 and #98. ROS 2 Jazzy runs on the Windows PC in WSL2. The robot does n
 
 | I want to | Run (PowerShell, repo root) | Section |
 |---|---|---|
+| **Watch and steer ROS from the phone (no RViz)** | `ros2\run_localize.ps1 -Map room -NoRviz`, then the station's **ROS** button | [Use ROS from the station](#use-ros-from-the-station) |
 | Record a run | `ros2\record_run.ps1` | [Record and replay](#record-and-replay-rosbag2) |
 | Make a map, save it | `ros2\run_mapping.ps1`, `ros2\save_map.ps1 -Name room` | [Saved maps](#saved-maps-and-localization) |
 | Drive on a saved map | `ros2\run_localize.ps1 -Map room` | [Saved maps](#saved-maps-and-localization) |
@@ -18,6 +19,96 @@ Issues #96 and #98. ROS 2 Jazzy runs on the Windows PC in WSL2. The robot does n
 <img src="img/ros2/sim-nav2-goal1-reached.png" width="40%">
 </p>
 <p>Nav2 drives the sim robot through the bridge (RViz on WSLg), and the goal is reached on the slam_toolbox map. Blue lines are the sim's true walls.</p>
+
+## Use ROS from the station
+
+Issue #106. ROS keeps running on the PC, and the station UI (phone or desktop) shows and steers it. RViz is optional: add `-NoRviz`.
+
+<p>
+<img src="../station/docs/screenshots/phone-ros-nav.png" width="30%">
+<img src="../station/docs/screenshots/desktop-ros-nav.png" width="66%">
+</p>
+
+| Do | Where |
+|---|---|
+| Show ROS | Map page, **ROS** button (top right). It appears only while ROS is connected |
+| Nav2 goal | ROS view: tap the map. Drag the arrow's end circle to set the heading (drag the dot to move it). Then **Go ▶** |
+| Go to a place | tap a pin, then **Go here (ROS) ▶** (two taps) |
+| Patrol | **Patrol…** in the bar (or the pin's ⋯). Tap places in order, pick loops (1, 2, 3, ∞) and the wait, then **Patrol ▶** |
+| Cancel | **Cancel** in the bar or on the pin sheet. It cancels every Nav2 goal, RViz's too |
+| Tell ROS where the robot is | ROS view: hold on the map, **Set ROS position here**, turn the arrow, **Set ▶** (= RViz 2D Pose Estimate) |
+| Explore (#107) | **Explore** in the bar, **Save ROS map…** in ⋯. Both show only while the explorer runs |
+| Status | the info box (top left): Nav2 → place · distance · ETA, patrol stop / loop, failure reason, ROS pose fit, explorer state |
+| Health | the **ROS** tile: adapter connected, Nav2 active, slam_toolbox / AMCL up, localized + scan fit |
+
+<p>
+<img src="../station/docs/screenshots/phone-ros-goal.png" width="24%">
+<img src="../station/docs/screenshots/phone-ros-place.png" width="24%">
+<img src="../station/docs/screenshots/phone-ros-patrol.png" width="24%">
+<img src="../station/docs/screenshots/phone-ros-health.png" width="24%">
+</p>
+
+```mermaid
+flowchart LR
+  P["phone / desktop<br>Map: ROS view"] -- "ros: goal / place / patrol<br>cancel / initial_pose / explore" --> B["bridge<br>ros_link.py<br>(Manual check)"]
+  B -- "ros_cmd" --> A["adapter<br>station_nav.py"]
+  A -- "NavigateToPose, cancel,<br>/initialpose, /station/explore_cmd" --> N["Nav2, slam_toolbox,<br>explorer"]
+  N -- "/map /plan TF, action status,<br>/localization_status, /explore/status" --> A
+  A -- "ros_map ros_pose ros_plan<br>ros_nav ros_status ros_explore" --> B
+  B --> P
+```
+
+**ROS view.** The Map draws in the ROS map frame: the ROS grid, the ROS pose, the Nav2 plan (blue dashes) and the goal.
+The station's places, zones and live LD19 points are put on top with `map <- station_map`. Two good signs: the lidar dots sit on the ROS walls, and the pins sit in the right rooms.
+The station view (ROS button off) is unchanged.
+Drawing walls / zones switches back to the station view.
+
+**Safety (unchanged).**
+- Goals only make Nav2 publish `/cmd_vel`. The adapter forwards it only while the robot is armed in **Manual** (STATION).
+- A goal / place / patrol sent while it is not in Manual is refused at once: "Switch to Manual to let ROS drive".
+- If the robot leaves Manual for 3 s during a goal (STOP, Disarm, another mode), the adapter cancels it and the info line says why.
+- Nothing arms the robot or changes its mode for ROS. STOP works as always.
+
+**Sim test** (`scripts/sim_e2e_station.sh simroom`, everything through the station's own API, `scripts/station_e2e.py`):
+
+| Check | Result (sim) |
+|---|---|
+| goal from the station (3.3, 1.3) | succeeded, 55 s, 0.10 m from the goal (tolerance 0.15 m) |
+| plan shown | 48 plan updates (<= 1 Hz), the first 12 points / 3.7 m; cleared when the goal ends |
+| cancel on the way | `ros_nav` cancelled at once; cmd_vel stopped within 2 s (deadman), then 0.0 m in 3 s |
+| go to place Couch | succeeded, 21 s, 0.14 m from the true spot |
+| patrol Window -> Kitchen, wait 2 s | succeeded, 47 s: Window, wait, Kitchen, wait |
+| goal before Manual | refused: "The robot is disarmed: Arm & Balance, then tap Manual to let ROS drive" |
+| robot leaves Manual during a goal | cancelled after 3 s: "stopped: Switch to Manual to let ROS drive (the robot is in BALANCE)" |
+| Health tile | "Nav2 ready" (adapter connected, Nav2 active, slam_toolbox up, localized) |
+
+<p>
+<img src="../station/docs/screenshots/desktop-ros-patrol.png" width="62%">
+<img src="../station/docs/screenshots/phone-ros-manual.png" width="22%">
+</p>
+<p>A patrol (Couch, stop 2 of 3, loop 1 of 2) on the desktop. Right: the robot was switched out of Manual mid-goal, so the adapter cancelled it and the station says why.</p>
+
+Limits:
+- The ROS view shows the grid that Nav2 uses (`/map`). In localization mode this is the saved map; slam_toolbox's live additions are not shown.
+- Map frame only: no costmaps, no local plan, no footprint.
+- Places and zones on the ROS view follow the station's own alignment, as `go_to.ps1` does. If the station's pose is wrong, they are off by the same amount (fix it with Scan & correct).
+- **Set ROS position** is set on the ROS view. The station's **Set position** (⋯ menu, #105) also sends its pose to ROS as the initial pose when ROS is connected; that hook uses the last alignment taken while the ROS pose was good, so it needs ROS to have been localized once.
+- A sim on a busy PC can starve itself: the bridge loop stalls, Nav2 logs "extrapolation into the future" or aborts (`pose not available in time (TF)`). Its LD19 clock can then fall behind, and every scan is dropped as stale for minutes. That is the sim's clock, not a real LD19. Restart the sim.
+
+The test is isolated, so it can run next to a live session:
+- its own workspace (`~/sbr3_ws_station`);
+- `ROS_DOMAIN_ID=42`;
+- the sim web UI on http://localhost:8095;
+- it stops only its own processes.
+
+`HOLD=1` keeps it running for `python -m station.tools.ros_shots` (these screenshots).
+
+**Update the live ROS after pulling this** (the adapter changed; nothing else):
+1. Ctrl+C the running `run_localize.ps1` (or `run_nav.ps1`).
+2. Start it again: `powershell -File ros2\run_localize.ps1 -Map house -NoRviz`. The run scripts rebuild `~/sbr3_ws` from the checkout on every start.
+3. Restart the bridge on the Pi as usual, so the station UI gets the ROS view.
+
+The old adapter keeps working with the new bridge, without the ROS view. The new adapter works with an old bridge too, without the station link.
 
 ## First real-robot session (checklist)
 
@@ -463,6 +554,7 @@ Tested in the sim with fake `/joy` messages (no pad here): stick pushed without 
 | `ros2/sbr3_ros/sbr3_ros/goal_test.py` | one Nav2 goal (or `go_to`: a station place), logs the plan and track to JSON |
 | `.../loc_monitor.py`, `scanfit.py` | scan fit, global relocalization, kidnap recovery (numpy) |
 | `.../places.py`, `patrol.py` | station places in the map frame, waypoint-follower patrol |
+| `.../station_nav.py`, `stationlink.py` | ROS inside the station (#106): map / pose / plan / Nav2 status to the bridge; goals, places, patrols, cancel, initial pose, explore from it |
 | `.../keepout_mask.py`, `keepout.py` | station zones -> keepout filter mask, RViz markers |
 | `.../explore.py`, `frontier.py` | frontier explorer (Nav2 goals, status, map save); frontier search (numpy + scipy) |
 | `.../bag_tf_filter.py`, `pose_logger.py` | replay helper; map pose / speed / pitch to CSV |
@@ -470,7 +562,7 @@ Tested in the sim with fake `/joy` messages (no pad here): stick pushed without 
 | `ros2/sbr3_ros/config/` | `slam_toolbox.yaml` (LD19, 5 cm, loop closure), `nav2.yaml` (controller, smoother, collision monitor, keepout, AMCL), `teleop_joy.yaml`, `explore.yaml` |
 | `ros2/*.ps1`, `ros2/scripts/` | setup / run from PowerShell, build, `sim_e2e_*.sh` tests + their `*_report.py` / `nav_metrics.py`, `map_png.py` |
 
-Tests: `python -m unittest discover -s ros2/sbr3_ros/test` (adapter, scan fit, places, keep-out, frontiers; Windows or WSL, frontiers need numpy + scipy), and `station/bridge/tests/test_ros_stream.py` + `station/sim/tests/test_extras.py` inside the station suite. Sim end-to-end (WSL): `sim_e2e_bag.sh`, `sim_e2e_localize.sh`, `sim_e2e_places.sh`, `sim_e2e_goals.sh`, `sim_e2e_keepout.sh`, `sim_e2e_teleop.sh`, `sim_e2e_explore.sh` (own ROS_DOMAIN_ID 43, workspace and sim ports: runs next to a live session).
+Tests: `python -m unittest discover -s ros2/sbr3_ros/test` (adapter, scan fit, places, keep-out, frontiers, station link; Windows or WSL, frontiers need numpy + scipy), and `station/bridge/tests/test_ros_stream.py`, `test_ros_link.py` + `station/sim/tests/test_extras.py` inside the station suite. Sim end-to-end (WSL): `sim_e2e_bag.sh`, `sim_e2e_localize.sh`, `sim_e2e_places.sh`, `sim_e2e_goals.sh`, `sim_e2e_keepout.sh`, `sim_e2e_teleop.sh`, `sim_e2e_explore.sh` (own ROS_DOMAIN_ID 43, workspace and sim ports: runs next to a live session), `sim_e2e_station.sh` (isolated: own workspace, domain 42, port 8095).
 
 Sim-only options used by these tests (`python -m station.sim --lidar ...`): `--start x,y,deg` (start pose; odometry reads 0 there), `--teleport-file PATH` (kidnap: write `x y deg`), `--truth-log PATH` (true pose CSV), `--box cx,cy,w,h` (an obstacle that is not on the saved map). `ros2/scripts/sim_station.py` saves places / zones in the local sim as the phone would (it refuses any other bridge).
 

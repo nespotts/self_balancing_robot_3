@@ -167,6 +167,24 @@ button.ask { background: var(--orange); border-color: #ff8a5c; }
 body.setpos #wp-bar, body.setpos .place-sheet { display: none; }
 .setpos-bar { z-index: 26; border-color: #d95926; }
 .setpos-bar .wp-hint b { color: #ffb08a; font-weight: 600; }
+/* ROS inside the station (#106) */
+.map-tools button.tool-txt { font-size: 13px; font-weight: 700; letter-spacing: .04em; }
+.ps-row #ps-ros { flex: 1; height: 46px; }
+.ps-row #ps-cancel { height: 46px; }
+#ros-go { min-width: 88px; }
+#ros-explore.on { color: #ffb4a8; border-color: #ffb4a8; }
+.rp-list { display: flex; flex-wrap: wrap; gap: 6px; max-height: 40vh; overflow-y: auto; }
+.rp-chip { padding: 8px 12px; display: inline-flex; gap: 6px; align-items: center; }
+.rp-chip.on { border-color: var(--blue); background: #1f2b3a; color: #cfe3ff; }
+.rp-chip i { font-style: normal; font-size: 12px; font-weight: 700; background: var(--blue); color: #fff; border-radius: 9px;
+  min-width: 18px; height: 18px; display: inline-grid; place-items: center; padding: 0 4px; }
+.rp-opts { align-items: center; flex-wrap: wrap; }
+.rp-opts label { display: flex; gap: 6px; align-items: center; color: var(--text-2); }
+.rp-opts select, .rp-opts input { font: inherit; background: var(--surface); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px; }
+.rp-opts input { width: 64px; }
+.rp-opts #rp-go { flex: 1; height: 46px; min-width: 110px; }
+#rp-sum { overflow: hidden; text-overflow: ellipsis; }
 /* zones: draw bar, sheet, maze timer (#70) */
 body.drawing .wp-bar, body.drawing .place-sheet:not(.zone-sheet) { display: none; }
 .draw-bar { position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 26; display: flex; flex-direction: column; gap: 8px;

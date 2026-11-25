@@ -49,9 +49,18 @@ on("plan", (m) => {
 export function planActive() { return plan.mode !== "idle" && plan.path.length > 1; }
 export function hasMap() { return occ.tiles.size > 0; }
 // map frame (places, grid) -> odometry frame (what the canvas draws): the inverse of the map's pose correction
-export function mapToOdom(x, y) {
+// (the ROS view, #106, draws in the ROS map frame instead: setStationView gives places / zones that transform)
+let stationView = null;
+export function setStationView(fn) { stationView = fn; }
+export function mapToOdom(x, y) { return stationView ? stationView(x, y) : rawMapToOdom(x, y); }
+export function rawMapToOdom(x, y) {
   const [tx, ty, th] = occ.corr, a = -th * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
   return [c * (x - tx) - s * (y - ty), s * (x - tx) + c * (y - ty)];
+}
+// odometry (the robot's x_mm, y_mm, the lidar points) -> the station map frame: map pose = corr o odometry pose
+export function odomToMap(x, y) {
+  const [tx, ty, th] = occ.corr, a = th * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+  return [tx + c * x - s * y, ty + s * x + c * y];
 }
 
 // ---------- drawing (called from map.js with its view: odometry mm -> screen px) ----------

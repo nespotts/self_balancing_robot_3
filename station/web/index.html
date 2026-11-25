@@ -44,6 +44,7 @@
       <button id="map-zin" title="Zoom in">+</button>
       <button id="map-zout" title="Zoom out">−</button>
       <button id="map-follow" title="Follow robot" class="on"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" class="fill"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></button>
+      <button id="map-ros" class="tool-txt" title="ROS view: the ROS map, pose and Nav2 plan; tap for a Nav2 goal" hidden>ROS</button>
       <button id="map-more" title="More">⋯</button>
     </div>
     <div class="menu" id="map-menu" hidden>
@@ -60,6 +61,7 @@
       <label><input type="checkbox" id="lay-grid" checked> Grid</label>
       <label class="occ-row"><input type="checkbox" id="lay-occ" checked> Map <input type="range" id="occ-opacity" min="0.15" max="1" step="0.05" value="0.8" title="Map opacity"></label>
       <button id="map-save">Save map…</button>
+      <button id="ros-savemap" hidden title="The ROS explorer saves the ROS map (slam_toolbox pose graph + image) on the PC">Save ROS map…</button>
       <button id="map-load">Load map…</button>
       <div id="map-list" class="map-list" hidden></div>
       <button id="map-clear-track">Clear track &amp; points</button>
@@ -86,11 +88,21 @@
     <div class="menu" id="place-menu" hidden>
       <button id="pm-save">Save place here…</button>
       <button id="pm-home">Set Home here</button>
+      <button id="pm-rospose" hidden title="Tell ROS (slam_toolbox / AMCL) the robot is here: like RViz's 2D Pose Estimate">Set ROS position here</button>
     </div>
     <div class="place-sheet" id="place-sheet" hidden>
       <div class="ps-head"><b id="ps-name"></b><small id="ps-dist"></small><button id="ps-close" class="ghost small" title="Close">✕</button></div>
-      <div class="ps-row"><button id="ps-go" class="primary">Go here ▶</button><button id="ps-more" title="More">⋯</button></div>
-      <div class="ps-extra" id="ps-extra" hidden><button id="ps-rename">Rename…</button><button id="ps-del" class="warn">Delete…</button></div>
+      <div class="ps-row"><button id="ps-go" class="primary">Go here ▶</button><button id="ps-ros" hidden title="Nav2 drives there (the robot must be armed in Manual)">Go here (ROS) ▶</button><button id="ps-cancel" class="warn" hidden title="Stop the Nav2 goal / patrol">Cancel</button><button id="ps-more" title="More">⋯</button></div>
+      <div class="ps-extra" id="ps-extra" hidden><button id="ps-patrol" hidden>Patrol…</button><button id="ps-rename">Rename…</button><button id="ps-del" class="warn">Delete…</button></div>
+    </div>
+    <div class="place-sheet" id="rp-sheet" hidden>
+      <div class="ps-head"><b>Patrol (ROS)</b><small id="rp-sum"></small><button id="rp-close" class="ghost small" title="Close">✕</button></div>
+      <div class="rp-list" id="rp-list"></div>
+      <div class="ps-row rp-opts">
+        <label>Loops <select id="rp-loops"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="0">∞</option></select></label>
+        <label>Wait <input type="number" id="rp-dwell" min="0" max="600" step="1" value="3"> s</label>
+        <button id="rp-go" class="primary">Patrol ▶</button>
+      </div>
     </div>
     <div class="map-info" id="map-info"></div>
     <div class="maze-timer" id="maze-timer" hidden></div>
@@ -123,6 +135,11 @@
       <button id="wp-undo">Undo</button>
       <button id="wp-clear">Clear</button>
       <button id="wp-go" class="primary">Go ▶</button>
+      <button id="ros-patrol" hidden title="Nav2 patrols saved places">Patrol…</button>
+      <button id="ros-explore" hidden title="The ROS explorer drives to unmapped places (slam_toolbox maps)">Explore</button>
+      <button id="ros-clear" hidden>Clear</button>
+      <button id="ros-cancel" class="warn" hidden title="Cancel every Nav2 goal and the patrol">Cancel</button>
+      <button id="ros-go" class="primary" hidden>Go ▶</button>
     </div>
   </section>
 

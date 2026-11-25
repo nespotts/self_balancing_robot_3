@@ -6,6 +6,8 @@ and with use_bridge_correction:=true /tf map -> odom from the bridge's own LD19 
 Station data (#98): /tf odom -> station_map (the station's map frame, from the bridge's correction), and latched
 /station/places and /station/zones (std_msgs/String, JSON as the bridge sends them, station_map frame).
 Subscribes /cmd_vel (Twist) -> station cmd_vel, only while the robot is armed in STATION mode, with a deadman.
+Station link (#106, station_link:=true): the ROS map / pose / Nav2 plan + status go to the bridge for the station UI,
+and the station's goals / places / patrols / cancel / initial pose / explore come back (station_nav.py).
 It never arms the robot, never changes its mode and never releases an E-stop.
 
   ros2 run sbr3_ros adapter --ros-args -p url:=ws://127.0.0.1:8080/ws
@@ -67,6 +69,10 @@ class Adapter(Node):
         self.pub_zones = self.create_publisher(String, "station/zones", latched)
         self.station_corr = None                         # newest bridge correction (station map <- odom)
         self.station_seen = {"places": None, "zones": None}
+        self.station_nav = None
+        if self.station_frame and P("station_link", True).value:
+            from .station_nav import StationNav          # (Nav2 / tf2 imports only when it is on)
+            self.station_nav = StationNav(self, self.send_station, self.robot_state, self.station_frame)
 
         self.clock_sync = cv.ClockSync()
         self.hello = None
@@ -112,8 +118,11 @@ class Adapter(Node):
 
     def on_open(self, ws):
         self.get_logger().info("connected to the bridge")
+        self.hello = None                                # this bridge's ros_hello follows
         ws.send(json.dumps({"t": "hi", "name": "ros2"}))
         ws.send(json.dumps({"t": "ros", "action": "subscribe"}))
+        if self.station_nav is not None:
+            self.station_nav.on_connect()
 
     def on_error(self, ws, err):
         self.get_logger().warn("bridge websocket: %s" % err, throttle_duration_sec=10.0)
@@ -130,6 +139,13 @@ class Adapter(Node):
             return True
         except Exception:
             return False
+
+    def send_station(self, m):
+        """Station link messages (#106): only to a bridge that relays them (ros_hello "station_link"); an older one would
+        take them for commands."""
+        if not (self.hello or {}).get("station_link"):
+            return False
+        return self.send(m)
 
     def on_message(self, ws, text):
         try:
@@ -150,6 +166,10 @@ class Adapter(Node):
                 self.on_hello(m)
             elif t in ("places", "zones") and self.station_frame:
                 self.on_station(t, m)
+                if t == "places" and self.station_nav is not None:
+                    self.station_nav.on_places(m)
+            elif t == "ros_cmd" and self.station_nav is not None:
+                self.station_nav.command(m)
             elif t == "error":
                 self.get_logger().warn("bridge: %s" % m.get("text"))
         except Exception as e:
@@ -280,6 +300,10 @@ class Adapter(Node):
             self.last_corr = m["corr"]
         if m.get("corr") is not None:
             self.station_corr = m["corr"]
+
+    def robot_state(self):
+        with self.lock:
+            return self.state
 
     # ------------------------------------------------------------ station places / zones (#98)
     def station_tf(self, stamp):

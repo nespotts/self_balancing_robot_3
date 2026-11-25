@@ -132,6 +132,7 @@ class Mapper:
         self.changed_since_save = False
         self.last_autosave = time.monotonic()
         self.full_pending = False
+        self.last_set_pose = None        # the last Set position (#105), map frame (x mm, y mm, heading deg)
         self.extra_listeners = []        # callables(): the map changed (planner, #12 follow-up)
         self.places = Places()           # saved places (#53), map frame; stored as <map>.places.json
         self.places_pending = False      # broadcast the places on the next poll
@@ -504,6 +505,7 @@ class Mapper:
             err = self.lmatch.set_pose(x, y, th, who, odom)
             if err:
                 return {"t": "error", "text": err}
+            self.last_set_pose = (x, y, th)  # map frame: the bridge also gives it to ROS as its initial pose (#106)
             self.full_pending = True        # browsers get the new correction now
             return None
         if act == "relocalize":             # "Find myself" (#105): search the whole map for the robot
