@@ -103,6 +103,32 @@ LOOP_AHEAD_MM = 39.0      # a block's obstacle: its distance (from the sensor he
 LOOP_REPLAN_S = 1.0
 LOOP_SAME_S = 0.3         # reports this close in time (and 50 mm) are one stop (a stuck that is also a contact)
 BLOCKED_RE = re.compile(r"nav: blocked, obstacle at (\d+) mm")
+# stale routes: a plan starts from the pose when the job began, and on the Pi a plan takes seconds (the worker gives
+# way to the loop, #110) - meanwhile the robot drives on along the old route. The new route goes from where it is now:
+ON_ROUTE_MM = 60.0        # the robot within this of the route: it is on it (joins at the next point ahead)
+STALE_MM = 150.0          # moved this far while planning and the join leg is not clear: plan again from here (once)
+SAME_ROUTE_MM = 100.0     # the new route's points all within this of the ones it follows: not sent (no restart at 0)
+
+
+def project_on_route(path, xy):
+    """Where the robot at xy is on the route path (path[0] = where it was planned from): (k, (px, py), off) -
+    nearest to leg path[k-1] -> path[k] at (px, py), off mm from it, so path[k] is the next point ahead. The first
+    leg within ON_ROUTE_MM wins (a route that comes back past here later is not skipped to); a projection past the
+    end of a leg (it reached that point) moves on to the next leg."""
+    best, first = None, None
+    for k in range(1, len(path)):
+        (ax, ay), (bx, by) = path[k - 1], path[k]
+        dx, dy = bx - ax, by - ay
+        L2 = dx * dx + dy * dy
+        u = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((xy[0] - ax) * dx + (xy[1] - ay) * dy) / L2))
+        p = (ax + u * dx, ay + u * dy)
+        hit = (k + 1 if u >= 1.0 and k + 1 < len(path) else k, p, math.hypot(xy[0] - p[0], xy[1] - p[1]))
+        if best is None or hit[2] < best[2]:
+            best = hit
+        if hit[2] <= ON_ROUTE_MM:
+            first = hit
+            break
+    return first or best
 
 
 def clean_settings(s, base):
@@ -932,6 +958,8 @@ class Planner:
         self.spots = []               # #111: recent stops: (time, map x, y, weight, what stopped it (odometry x, y,
                                       # heading) or None: a contact, marked by the bridge already)
         self.loop_marks = 0           # ... loops marked in this job
+        self._cms = {}                # costmap kind -> the last one built (set by the worker)
+        self._stale_retry = False     # the plan running is the one more after a stale route that could not be joined
 
     # ---------------------------------------------------------- frames
     def robot_map_pose(self):
@@ -953,15 +981,17 @@ class Planner:
         zones = self.zone_view()
         if kind == "boost":
             s["margin_mm"] += self.boost
-        elif kind == "squeeze":
+        if kind == "squeeze":
             # at the map's own 25 mm cells (at 50 mm a 280 mm doorway rounds shut); sure walls only when the
             # map is not range-weighted (see SURE_LUT)
             s["margin_mm"] = min(s["margin_mm"], s["squeeze_mm"])
             rw = self.b.mapper.settings.get("range_weight", False)
             cm = CostMap(g, s, res_mm=g.res, sure_walls=not rw, specks=True, zones=zones, grow_mm=END_GROW_MM)
             cm.centre = True
-            return cm
-        return CostMap(g, s, zones=zones, grow_mm=END_GROW_MM)
+        else:
+            cm = CostMap(g, s, zones=zones, grow_mm=END_GROW_MM)
+        self._cms[kind] = cm          # the last one of each kind: a route's join leg is checked on it (no rebuild)
+        return cm
 
     def zone_view(self):
         """The map's zones (#70) as the planner sees them (Solve: that maze's exit closed), or None."""
@@ -1360,20 +1390,22 @@ class Planner:
         pose = self.robot_map_pose()
         if pose is None:
             return False
-        gen = self.gen
+        gen, t0 = self.gen, self.clock()
+        if force:
+            self._stale_retry = False
         if not check:
-            self.last_plan = self.clock()
+            self.last_plan = t0
         if self.sync:
             fut = concurrent.futures.Future()
             try:
                 fut.set_result(fn(pose))
             except Exception as e:
                 fut.set_exception(e)
-            self._job_done(fut, go, gen)
+            self._job_done(fut, go, gen, fn, t0)
             return True
         loop = asyncio.get_running_loop()
         self.job = loop.run_in_executor(None, self._run_job, fn, pose)
-        self.job.add_done_callback(lambda fut: self._job_done(fut, go, gen))
+        self.job.add_done_callback(lambda fut: self._job_done(fut, go, gen, fn, t0))
         return True
 
     def _run_job(self, fn, pose):
@@ -1384,7 +1416,7 @@ class Planner:
         with prof.thread("planner" + getattr(fn, "__name__", ".job").replace("_plan_", ".").replace("_", ".", 1)):
             return fn(pose)
 
-    def _job_done(self, fut, go, gen):
+    def _job_done(self, fut, go, gen, fn=None, t0=None):
         if self.pending:
             fn, pgo = self.pending
             self.pending = None
@@ -1436,6 +1468,15 @@ class Planner:
                 self.path, self.holding, self.scan_wait, self.sent_goal = [], True, None, None
                 self._set_status("exploring: stopped to scan and check the pose", log=False)
                 return
+            retry, self._stale_retry = self._stale_retry, False
+            if not esc:
+                path, note = self._fresh(path, self._cms.get(cmk), t0, replan=fn if not retry else None, go=go)
+                if path is None:
+                    return            # planning again from here
+                if note == "same":
+                    self.sent_goal = self.goal
+                    self._set_status(status, log=False)
+                    return
             self.path = path
             self.sent_goal = self.goal
             self._send(path[1:] or path[-1:], go)
@@ -1448,7 +1489,7 @@ class Planner:
         elif kind == "ok":
             pass
         elif kind == "recentre":      # the same route, its gap waypoints moved onto the centre line (#108)
-            self.path = res[1]
+            self.path = self._fresh(res[1], self._cms.get("squeeze"), t0, dedupe=False)[0]
             self._send(self.path[1:], False)
             self._push()
         elif kind == "wait":
@@ -1467,6 +1508,67 @@ class Planner:
                 self.solve = None
                 res = (res[0], "maze: " + res[1])
             self._set_status(res[1])
+
+    def _fresh(self, path, cm, t0, replan=None, go=False, dedupe=True):
+        """A route planned from the pose when its job began (path[0], map frame) against where the robot is now (it
+        drove on meanwhile: plans take seconds on the Pi): the points it passed are dropped and it joins at the next
+        one ahead - straight there when it is on the route or that leg is clear on cm, else back onto the route first.
+        Moved more than STALE_MM and no clear join: plans again from here (replan: the job's function; None = not
+        again). Returns (path, note): path None = planning again; note "same" = the route it follows already (dedupe:
+        then nothing is sent - a resend restarts its list at 0). Plan time and the move go to the log."""
+        pose = self.robot_map_pose()
+        if not pose or len(path) < 2:
+            return path, ""
+        cur = (pose[0], pose[1])
+        moved = math.hypot(cur[0] - path[0][0], cur[1] - path[0][1])
+        k, proj, off = project_on_route(path, cur)
+        how = ""
+        if off <= ON_ROUTE_MM:
+            new = [cur] + path[k:]
+        else:
+            a = cm.cell(*cur) if cm is not None else None
+            b = cm.cell(*path[k]) if cm is not None else None
+            if a is not None and b is not None and cm.clear_line(a, b, self.mode == "goto", allow_start_zone=True):
+                new = [cur] + path[k:]
+                how = ", joins it from %d mm off" % off
+            elif moved > STALE_MM and replan is not None:
+                if replan == self._check:
+                    replan = self._plan_goto if self.mode == "goto" else self._plan_explore
+                self._plan_note(t0, moved, "%d mm off the route, the way onto it is not clear - planning again"
+                                % off)
+                self._stale_retry = True
+                self._start_job(replan, go)
+                return None, ""
+            else:
+                new = [cur, proj] + path[k:]
+                how = ", back onto it (%d mm off) first" % off
+        if dedupe and self._following(new[1:]):
+            self._plan_note(t0, moved, "the route it is on already - not sent again")
+            return path, "same"
+        what = ("dropped %d passed point%s" % (k - 1, "" if k == 2 else "s") if k > 1 else "route from here") + how
+        if k > 1 or how or moved >= 50.0 or (t0 is not None and self.clock() - t0 >= 0.5):
+            self._plan_note(t0, moved, what)
+        return new, ""
+
+    def _following(self, pts):
+        """Is the robot driving the route pts (map frame) already - the rest of the one sent, each point within
+        SAME_ROUTE_MM?"""
+        if self.holding or self.backing is not None or not self.path:
+            return False
+        t, nav = self.b.tlm, self.b.nav or {}
+        if not t or t["mode"] != (lp.MODE_GOTO if self.mode == "goto" else lp.MODE_EXPLORE) or \
+                nav.get("waypoint_count") != getattr(self, "sent_n", -1):
+            return False
+        st = nav.get("state", 99)
+        if st >= len(self.nav_names) or self.nav_names[st] not in ("turning", "driving"):
+            return False
+        rest = self._remaining()
+        return len(rest) == len(pts) and all(math.hypot(a[0] - b[0], a[1] - b[1]) <= SAME_ROUTE_MM
+                                             for a, b in zip(rest, pts))
+
+    def _plan_note(self, t0, moved, what):
+        dur = self.clock() - t0 if t0 is not None else 0.0
+        self.b.say("planner: plan took %.1f s, robot moved %d mm meanwhile - %s" % (dur, moved, what))
 
     def on_correction(self, entry):
         """A stop-and-scan moved the map frame (#71): the robot's waypoints are in its odometry frame, so the
