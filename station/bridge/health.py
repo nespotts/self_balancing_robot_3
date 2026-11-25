@@ -30,6 +30,7 @@ OCV = [(3.30, 0), (3.50, 10), (3.70, 40), (3.80, 60), (3.90, 75), (4.00, 88), (4
 
 TEMP_WARN_C, TEMP_BAD_C = 70.0, 80.0
 CPU_WARN_PCT = 90.0
+LOOP_STALL_WARN_MS = 150      # the bridge's event loop blocked this long in the last 10 s (#102; the robot drops the link at 500)
 DISK_WARN_GB, DISK_BAD_GB = 2.0, 0.3
 LOG_USAGE_EVERY_S = 30.0
 
@@ -455,6 +456,16 @@ def evaluate(c):
         val = ("%dC" % round(tc) if tc is not None else "") + ("  CPU %d%%" % round(cpu) if cpu is not None else "")
         if pi.get("mem_pct") is not None:
             why.append("memory %d%%" % round(pi["mem_pct"]))
+        loop = c.get("loop") or {}
+        if loop.get("stall_max_ms") is not None:
+            # the bridge's event loop (#102): its longest stall in the last ~10 s and its busy share of a core
+            st = int(loop["stall_max_ms"])
+            if st >= LOOP_STALL_WARN_MS:
+                lv = worst([lv, WARN])
+                top = ", ".join("%s %g ms/s" % (k, v) for k, v in (loop.get("top") or [])[:3])
+                why.append("bridge loop stalled %d ms (top: %s)" % (st, top or "?"))
+            else:
+                why.append("bridge loop: max stall %d ms, busy %d%%" % (st, round(loop.get("busy_pct") or 0)))
         tiles["pi"] = _tile("pi", "Pi", lv, val.strip(), ", ".join(why) or "temperature and load fine")
 
     # ---- disk / logs

@@ -17,6 +17,7 @@ Settings (lidar.json in the map folder, like planner.json) hold the mount: fill 
 Frames: robot frame = x forward, y left (CCW +), origin at the axle centre, like the poses. The LD19 turns clockwise
 (manual section 4); its 0 deg is yaw_deg CCW from robot forward.
 """
+import asyncio
 import collections
 import json
 import math
@@ -25,6 +26,7 @@ import re
 import time
 
 from .ld19 import POINT_RATE, TEENSY, Ld19Reader
+from . import loopprof
 from .lidarmatch import ODO_JUMP_MM
 from .link_protocol import LINK_LIDAR_RAW_MAX
 
@@ -71,6 +73,28 @@ LIMITS = {"x_mm": (-500, 500), "y_mm": (-500, 500), "yaw_deg": (-360, 360), "hei
 INTS = ("every_n", "ray_step")
 CHOICES = {"tilt_mode": ("skip", "project")}
 MAX_SECTORS = 8
+PART_POINTS = 160          # the bridge puts a turn into the grid in parts of this many points (#102: ~15-25 ms each on the Pi)
+
+
+def split_runs(runs, n=PART_POINTS):
+    """Runs -> parts (lists of runs) of about n points. A run longer than that is cut with one shared point, so the free
+    space fans of the two pieces meet edge to edge (the scanline fill is half-open: no cell twice)."""
+    chunks = []
+    for r in runs:
+        if len(r) <= n:
+            chunks.append(r)
+        else:
+            chunks += [r[j:j + n + 1] for j in range(0, len(r) - 1, n)]
+    parts, cur, cnt = [], [], 0
+    for c in chunks:
+        if cur and cnt + len(c) > n:
+            parts.append(cur)
+            cur, cnt = [], 0
+        cur.append(c)
+        cnt += len(c)
+    if cur:
+        parts.append(cur)
+    return parts
 
 
 def clean_settings(s, base):
@@ -192,6 +216,11 @@ class Lidar:
         self.last_send = 0.0
         self.pts_dirty_msg = True
         self.scan_listeners = []      # callables(scan), before the mapping: the navigator feed (lidar_obstacles.py, #77)
+        self.prof = loopprof.NULL     # the bridge's loop profile (#102)
+        # the bridge sets this (#102): a turn's filter + match and its grid update run as separate event-loop callbacks
+        # after the navigator feed, so the loop (heartbeat, the link's reads) gets a turn in between (~20-60 ms each on
+        # the Pi). False (tests, tools): everything at once, as before.
+        self.defer = False
         mapper.lidar = self
 
     # ------------------------------------------------------------ settings
@@ -276,15 +305,74 @@ class Lidar:
     def on_scan(self, scan):
         for f in self.scan_listeners:
             try:
-                f(scan)
+                with self.prof.part("scan:" + type(getattr(f, "__self__", f)).__name__):
+                    f(scan)
             except Exception as e:                  # a listener bug must not stop the mapping
                 self.reader.error = "scan listener: %s: %s" % (type(e).__name__, e)
+        loop = self._loop()
+        if loop is not None:
+            loop.call_soon(self._process_timed, scan)
+        else:
+            self._process_timed(scan)
+
+    def _loop(self):
+        if not self.defer:
+            return None
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
+    def _process_timed(self, scan):
         t0 = time.perf_counter()
         try:
-            self.process_scan(scan)
+            with self.prof.part("lidar.scan"):
+                self.process_scan(scan)
         finally:
             dt = time.perf_counter() - t0
             self._cpu_acc += dt
+
+    def _integrate(self, ox, oy, runs, robot_xy, version=None):
+        """The turn into the grid; version: deferred (the map was reset / loaded meanwhile: dropped), then in parts."""
+        if version is not None and version != self.mapper.version:
+            return
+        if version is not None:
+            parts = split_runs(runs)
+            if len(parts) > 1:
+                g = self.mapper.grid
+                pts = [p for r in runs for p in r]
+                g._cover([p[0] for p in pts] + [ox], [p[1] for p in pts] + [oy])   # grown once, before the parts
+                self._integrate_part(ox, oy, parts, 0, robot_xy, version, set(), g.cells)
+                return
+        t0 = time.perf_counter()
+        with self.prof.part("lidar.integrate"):
+            self.mapper.integrate_scan(ox, oy, runs, robot_xy)
+        ms = (time.perf_counter() - t0) * 1000.0
+        if version is not None:                     # deferred: not in the turn's time yet
+            self._cpu_acc += ms / 1000.0
+        self.cost_ms += ms
+        self.cost_avg_ms += 0.1 * ms
+
+    def _integrate_part(self, ox, oy, parts, k, robot_xy, version, seen, cells):
+        if version != self.mapper.version:
+            return
+        if self.mapper.grid.cells is not cells:     # the grid grew meanwhile: the cell indices in seen moved
+            seen = set()
+        t0 = time.perf_counter()
+        last = k == len(parts) - 1
+        with self.prof.part("lidar.integrate"):
+            self.mapper.integrate_scan(ox, oy, parts[k], robot_xy, seen=seen, last=last)
+        ms = (time.perf_counter() - t0) * 1000.0
+        self._cpu_acc += ms / 1000.0
+        self.cost_ms += ms
+        self.cost_avg_ms += 0.1 * ms
+        if not last:
+            loop = self._loop()
+            args = (ox, oy, parts, k + 1, robot_xy, version, seen, self.mapper.grid.cells)
+            if loop is None:
+                self._integrate_part(*args)
+            else:
+                loop.call_soon(self._integrate_part, *args)
 
     # ------------------------------------------------------------ one scan
     def process_scan(self, scan):
@@ -402,17 +490,55 @@ class Lidar:
         mx, my, mh = map_pose(xm, ym, hm)
         hr = radians(mh)
         ox, oy = mx + cos(hr) * sx - sin(hr) * sy, my + sin(hr) * sx + cos(hr) * sy
-        lm = getattr(self.mapper, "lmatch", None)
-        if lm is not None:          # scan-to-map matching (#78): may correct the pose; the turn then maps at the new one
-            ox, oy, mx, my, runs, pts_all = lm.on_scan(ox, oy, mx, my, mh, runs, pts_all)
-        if runs is not None:        # (None: the matcher keeps this turn out of the map, see lidarmatch._map_now)
-            self.mapper.integrate_scan(ox, oy, runs, (mx, my))
         n["used"] += 1
         self.last_used = self.clock()
-        self._keep_points(pts_all)
-        self.cost_ms = (time.perf_counter() - t0) * 1000.0
-        self.cost_avg_ms = self.cost_ms if not self.cost_avg_ms else 0.9 * self.cost_avg_ms + 0.1 * self.cost_ms
+        ms = (time.perf_counter() - t0) * 1000.0
+        loop = self._loop()
+        if loop is not None:        # the field update, the match and the grid update each in its own loop callback (#102)
+            loop.call_soon(self._prepare, (ox, oy, mx, my, mh, runs, pts_all, ms, self.mapper.version))
+        else:
+            self._match_map(ox, oy, mx, my, mh, runs, pts_all, ms)
         return len(pts_all)
+
+    def _prepare(self, args):
+        """(deferred) the matcher's field first, then the match in the next loop round."""
+        if args[-1] != self.mapper.version:
+            return
+        t0 = time.perf_counter()
+        lm = getattr(self.mapper, "lmatch", None)
+        if lm is not None and hasattr(lm, "prepare"):
+            lm.prepare()
+        dt = time.perf_counter() - t0
+        self._cpu_acc += dt
+        args = args[:7] + (args[7] + dt * 1000.0, args[8])
+        loop = self._loop()
+        if loop is None:
+            self._match_map(*args)
+        else:
+            loop.call_soon(self._match_map, *args)
+
+    def _match_map(self, ox, oy, mx, my, mh, runs, pts_all, ms, version=None):
+        """Second half of a turn: scan-to-map matching, then (maybe) into the grid. ms: the first half's cost.
+        version: deferred (the map was reset / loaded meanwhile: dropped)."""
+        if version is not None and version != self.mapper.version:
+            return
+        t0 = time.perf_counter()
+        lm = getattr(self.mapper, "lmatch", None)
+        if lm is not None:          # scan-to-map matching (#78): may correct the pose; the turn then maps at the new one
+            with self.prof.part("lidar.match"):
+                ox, oy, mx, my, runs, pts_all = lm.on_scan(ox, oy, mx, my, mh, runs, pts_all)
+        self._keep_points(pts_all)
+        dt = time.perf_counter() - t0
+        if version is not None:
+            self._cpu_acc += dt
+        self.cost_ms = ms + dt * 1000.0
+        self.cost_avg_ms = self.cost_ms if not self.cost_avg_ms else 0.9 * self.cost_avg_ms + 0.1 * self.cost_ms
+        if runs is not None:        # (None: the matcher keeps this turn out of the map, see lidarmatch._map_now)
+            loop = self._loop()
+            if loop is not None:
+                loop.call_soon(self._integrate, ox, oy, runs, (mx, my), self.mapper.version)
+            else:
+                self._integrate(ox, oy, runs, (mx, my))
 
     def _keep_points(self, pts):
         """For the map view: the mapped points, back in the odometry frame (the robot / track are drawn there)."""

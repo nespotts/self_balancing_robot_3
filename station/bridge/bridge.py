@@ -1,10 +1,12 @@
 """Ground-station bridge: Teensy link <-> browsers (WebSocket JSON + HTTP polling), session logs."""
 import asyncio
 import collections
+import gc
 import json
 import math
 import os
 import re
+import sys
 import tempfile
 import time
 
@@ -14,6 +16,7 @@ from . import health as health_mod
 from .httpws import HttpServer, Response, check_origin
 from .lidar import Lidar
 from .lidar_obstacles import LidarObstacles
+from .loopprof import STALL_LOG_S, LoopProf
 from .mapping import AUTOSAVE_NAME, Mapper
 from .planner import Planner
 from . import profiles
@@ -42,7 +45,8 @@ WS_LIVE_S = 6.0                   # a client silent (no frame, no pong) this lon
                                   # pauses GOTO / EXPLORE (a phone that left the Wi-Fi leaves no FIN; its socket lingers)
 WS_IDLE_S = 45.0                  # ... and one silent this long is dropped
 LOG_RETRY_S = 30.0                # session log could not be opened: try again this often
-TICK_LATE_S = 0.2                 # warn in the log when the event loop was blocked this long (#45)
+SWITCH_INTERVAL_S = 0.001         # GIL hand-over interval for worker threads (#102; Python's default 5 ms)
+TICK_LATE_S = STALL_LOG_S         # warn in the log (with the top offenders, #102) when the event loop was blocked this long (#45)
 TLM_HZ_GRACE_S = 10.0             # Tune closed this long ago -> put tlm.hz back (#46)
 # Commands that act on the robot: refused with an error while there is no link (#48)
 NEEDS_LINK = {"set_mode", "set_param", "cfg", "get_params", "goto", "event", "estop_release"}  # release: the robot latches too
@@ -126,6 +130,8 @@ class Bridge:
         self.pruning = False
         self.last_prune = _now()
         self.quiet = quiet
+        self.prof = LoopProf()          # per-component event-loop timing (#102): stall lines, status["loop"]
+        self._frame_parts = {}          # link message type -> profile part name
         self.allow_any_origin = allow_any_origin    # --allow-any-origin: no Origin / Host checks (#44)
         self.allow_hosts = list(allow_hosts)
         self.allow_origins = list(allow_origins)
@@ -192,9 +198,13 @@ class Bridge:
         self.last_health = -10.0
         self.tools = TuningTools(self, None)                # Tune page: presets, scored runs, motor test (#16)
         self.mapper = Mapper(None, say=self.say)            # main: ~/sbr3-maps/<robot>
+        self.mapper.prof = self.prof
         self.range_listeners.append(self.mapper.on_range)
         # LD19 spinning lidar (#76): "/dev/ttyS5", "COM7" or "tcp://host:port" (simulator); None = no lidar
         self.lidar = Lidar(self.mapper, lidar_port, say=self.say, clock=_now) if lidar_port else None
+        if self.lidar:
+            self.lidar.prof = self.prof
+            self.lidar.defer = True                         # a turn's mapping in its own loop callbacks (#102)
         # ... and its obstacles for the robot's navigator: MSG_LIDAR_OBSTACLES per scan (#77)
         # (the robot's corridor params; nothing sent until its profile, and with it lidar.json, is bound: #99)
         self.lidar_obst = LidarObstacles(self.lidar, self.send, clock=_now, params=self.param_values,
@@ -202,7 +212,8 @@ class Bridge:
                                          ) if self.lidar else None
         # ... and the matcher's stuck check: wheels turning, lidar pose still -> the navigator backs off (#79, link v6)
         self.mapper.lmatch.stuck_listeners.append(lambda: self.send(lp.encode_event(lp.EVT_LINK_STUCK)))
-        self.planner =Planner(self, NAV_STATE_NAMES)           # route planning + explore on the map
+        self.planner = Planner(self, NAV_STATE_NAMES)          # route planning + explore on the map
+        self.planner.prof = self.prof
         self.ros = RosStream(self, clock=_now)                 # opt-in scans + odometry for the ROS 2 adapter (#96)
 
         self.cmd = (0.0, 0.0)
@@ -359,14 +370,22 @@ class Bridge:
             return self.link.write(frame)
         return False
 
+    def _frame_part(self, t):
+        name = self._frame_parts.get(t)
+        if name is None:
+            name = self._frame_parts[t] = "link:" + lp.MSG_NAMES.get(t, "MSG_%d" % t)[4:].lower()
+        return self.prof.part(name)
+
     def _on_data(self, data):
-        for t, payload in self.parser.feed(data):
-            try:
-                self._on_frame(t, payload)
-            except Exception as e:  # short payload etc.: drop the frame, keep the link
-                self.parser.crc_errors += 1
-                if not self.quiet:
-                    print("[bridge] bad frame", lp.MSG_NAMES.get(t, t), e)
+        with self.prof.part("link:parse"):          # (the frames' own parts nest inside: one loop callback)
+            for t, payload in self.parser.feed(data):
+                try:
+                    with self._frame_part(t):
+                        self._on_frame(t, payload)
+                except Exception as e:  # short payload etc.: drop the frame, keep the link
+                    self.parser.crc_errors += 1
+                    if not self.quiet:
+                        print("[bridge] bad frame", lp.MSG_NAMES.get(t, t), e)
 
     def _on_frame(self, t, p):
         if t == lp.MSG_TELEMETRY:
@@ -375,7 +394,8 @@ class Bridge:
             self.tlm_seq += 1
             self.tlm_count += 1
             self.tlm_time = _now()
-            self.log.tlm(d)
+            with self.prof.part("log"):
+                self.log.tlm(d)
             self.falls.on_tlm(d, self.tlm_time)
             self.health.on_tlm(d, self.tlm_time)
             if self.lidar:
@@ -514,10 +534,14 @@ class Bridge:
             now = _now()
             late = now - self.last_tick - TICK_S if self.last_tick is not None else 0.0
             self.last_tick = now
-            if late > TICK_LATE_S:      # something blocked the loop: the robot drops the link after 500 ms of this
-                self.say("WARNING: event loop stalled for %d ms" % round(late * 1000))
+            # something blocked the loop (the robot drops the link after 500 ms of this): one line with the top 3 parts
+            # of the loop's work since the last tick (#102)
+            line = self.prof.tick(now, late)
+            if line and late > TICK_LATE_S:
+                self.say(line)
             try:
-                self._tick(now)
+                with self.prof.part("tick"):
+                    self._tick(now)
             except Exception:
                 import traceback
                 traceback.print_exc()
@@ -569,16 +593,26 @@ class Bridge:
             self.range_sent = self.range_next
             if pts:
                 self.broadcast(json.dumps({"t": "ranges", "pts": pts}, separators=(",", ":")), droppable=True)
-        for text in self.mapper.poll(now):                # occupancy grid tiles, ~2 Hz (#12)
+        P = self.prof.part
+        with P("map.poll"):
+            msgs = self.mapper.poll(now)
+        for text in msgs:                                 # occupancy grid tiles, ~2 Hz (#12)
             self.broadcast(text)
         if self.lidar:
-            for text in self.lidar.poll(now):             # the live LD19 scan points, <= 3 Hz (#76)
+            with P("lidar.poll"):
+                msgs = self.lidar.poll(now)
+            for text in msgs:                             # the live LD19 scan points, <= 3 Hz (#76)
                 self.broadcast(text, droppable=True)
-        self.planner.tick(now)
-        self.ros.tick(now)                                # ROS stream (#96): odometry batch, 2 Hz state
-        for meta in self.falls.tick(now):                 # a fall record was just saved
+        with P("planner.tick"):
+            self.planner.tick(now)
+        with P("ros.tick"):
+            self.ros.tick(now)                            # ROS stream (#96): odometry batch, 2 Hz state
+        with P("falls.tick"):
+            falls = self.falls.tick(now)
+        for meta in falls:                                # a fall record was just saved
             self.broadcast(json.dumps({"t": "fall", "fall": meta}, separators=(",", ":")))
-        self.tools.tick(now)
+        with P("tools.tick"):
+            self.tools.tick(now)
         if self.params_dirty:
             self.params_dirty = False
             self.broadcast(self.params_msg())
@@ -592,11 +626,14 @@ class Bridge:
             self.last_rate = now
             if self.lidar:
                 self.lidar.tick(now)
-            self.push_status()
-            self.log.flush()
+            with P("status"):
+                self.push_status()
+            with P("log"):
+                self.log.flush()
         if now - self.last_health >= 1.0:
             self.last_health = now
-            self._push_health(now)
+            with P("health"):
+                self._push_health(now)
 
     def _prune_async(self):
         """Delete old sessions in a worker thread (stat / remove of big files must not stall the loop)."""
@@ -862,6 +899,8 @@ class Bridge:
             "zone_alert": self.zone_alert,                 # zones watchdog (#70): last stop / joystick block
             "lidar": self.lidar.status(now) if self.lidar else None,   # LD19 (#76): state, packets/s, rpm, CRC errors, scan age
             "lidar_nav": self.lidar_obst.status(now) if self.lidar_obst else None,   # obstacle frames to the robot (#77)
+            # event loop (#102): longest stall in the last ~10 s, busy % of a core, top parts (ms/s), worker threads (%)
+            "loop": self.prof.status(),
         }
 
     def health_ctx(self):
@@ -873,7 +912,8 @@ class Bridge:
                 "params": {p["name"]: p["value"] for p in self.params.values()}, "hello": self.hello,
                 "estop": self.estop, "robot_estop": self.robot_estop, "remote_seen": self.remote_seen,
                 "clients": self.client_count(), "log_error": self.log.error,
-                "lidar": self.lidar.status() if self.lidar else None, "robot_name": self.robot}
+                "lidar": self.lidar.status() if self.lidar else None, "robot_name": self.robot,
+                "loop": self.prof.status()}
 
     def _push_health(self, now):
         """Once a second: the Health page + battery minutes (a few hundred bytes; reads /proc and /sys only)."""
@@ -893,13 +933,16 @@ class Bridge:
         return json.dumps({"t": "params", "list": sorted(self.params.values(), key=lambda d: d["id"])})
 
     def broadcast(self, text, droppable=False):
-        for c in list(self.clients):
-            if c.closed:
-                self.clients.discard(c)
-                continue
-            if droppable and c.buffered() > WS_SLOW_BYTES:
-                continue  # slow client: skip telemetry, keep commands/status
-            c.send(text)
+        if not self.clients:
+            return
+        with self.prof.part("broadcast"):
+            for c in list(self.clients):
+                if c.closed:
+                    self.clients.discard(c)
+                    continue
+                if droppable and c.buffered() > WS_SLOW_BYTES:
+                    continue  # slow client: skip telemetry, keep commands/status
+                c.send(text)
 
     # ------------------------------------------------------------------ commands
     def handle_command(self, m, who="?"):
@@ -1167,9 +1210,8 @@ class Bridge:
             "range_geom": {"fwd_mm": SENSOR_FWD_MM, "radius_mm": SENSOR_RADIUS_MM},
         })
 
-    async def ws_handler(self, ws):
-        self.client_ids += 1
-        who = "client%d@%s" % (self.client_ids, ws.peer[0] if ws.peer else "?")
+    def _send_welcome(self, ws):
+        """Everything a new client needs (the whole map included)."""
         ws.send(self.hello_msg())
         ws.send(json.dumps(self.status()))
         if self.health_cache:
@@ -1193,6 +1235,12 @@ class Bridge:
         ws.send(self.planner.msg())
         for item in list(self.logs)[-60:]:
             ws.send(json.dumps(dict(t="log", **{k: v for k, v in item.items() if k != "t"}, ts=item["t"])))
+
+    async def ws_handler(self, ws):
+        self.client_ids += 1
+        who = "client%d@%s" % (self.client_ids, ws.peer[0] if ws.peer else "?")
+        with self.prof.part("ws.connect"):
+            self._send_welcome(ws)
         self.clients.add(ws)
         self.say("%s connected (%d clients)" % (who, len(self.clients)))
         try:
@@ -1219,7 +1267,8 @@ class Bridge:
                     if m.get("t") == "ros":   # {"t": "ros", "action": "subscribe"} -> ROS stream (#96)
                         ws.send(json.dumps(self.ros.command(ws, m)))
                         continue
-                    reply = self.run_command(m, who)
+                    with self.prof.part("ws.cmd"):
+                        reply = self.run_command(m, who)
                     if reply:
                         ws.send(json.dumps(reply))
                         if reply.get("code") == "no_link":      # the page may have shown the new value already
@@ -1372,9 +1421,19 @@ class Bridge:
     async def run(self):
         http = self.build_http()
         await http.start(self.http_host, self.http_port)
+        # (#102) everything built so far lives as long as the bridge: out of the garbage collector's full passes, which
+        # would otherwise walk it every time (tens of ms on the Pi); the collector's pauses are timed as the part "gc"
+        gc.freeze()
+        self.prof.install_gc()
+        # worker threads (planner jobs, the lost lidar search, autosave) hand the GIL back after 1 ms, not 5: after each
+        # socket write the loop would otherwise wait up to a whole interval to get it back
+        sys.setswitchinterval(SWITCH_INTERVAL_S)
         self.say("web UI on http://%s:%d/  (robot link: %s)" % (
             "localhost" if self.http_host in ("0.0.0.0", "") else self.http_host, self.http_port, self.port))
         jobs = [self.link_task(), self.tick_task()]
         if self.lidar:
             jobs.append(self.lidar.run())
-        await asyncio.gather(*jobs)
+        try:
+            await asyncio.gather(*jobs)
+        finally:
+            self.prof.uninstall_gc()
