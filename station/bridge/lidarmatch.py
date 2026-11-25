@@ -32,7 +32,12 @@ Every match_every_n-th LD19 turn (lidar.py, after deskew and the filters, before
      follow the wheels the position is held (heading: gyro) and the lidar takes over. A pose the matcher keeps
      doubting is "lost": not mapped, searched wider (to match_wide_mm / _deg) until a confident match. A slip where
      the body stays put while the robot drives is "stuck" (the bridge tells the navigator). See LidarMatch.
-Not here (next version): loop closure, relocalisation (a kidnapped pose beyond the widest window stays lost).
+  9. Relocalisation (#105, match_global; reloc.py): lost for GLOBAL_AFTER_S, a Teensy reboot / pose reset seen while a
+     map exists (the odometry jumped back to ~0, 0, 0), a map loaded, or "Find myself": a branch-and-bound search over
+     the whole map and all headings in the worker thread. A clear, unique best puts the robot there (still lost: not
+     mapped) until 2 strict matches confirm it; an ambiguous one (a symmetric room) is not taken: "use Set position".
+     Set position (set_pose): the user's pose at once, then the same search in a small window around it.
+Not here (next version): loop closure.
 """
 import asyncio
 import bisect
@@ -99,6 +104,16 @@ RELAX = {"score": 0.3, "inliers": 0.35, "margin": 0.05}
 STUCK_MM = 60.0            # lidar stuck: the body moved less than this ...
 STUCK_WHEEL_MM = 150.0     # ... while the wheels turned at least this much, for match_stuck_s
 STUCK_MODES = (lp.MODE_GOTO, lp.MODE_EXPLORE)
+
+# relocalisation (#105, reloc.py)
+GLOBAL_AFTER_S = 5.0       # lost this long: search the whole map ...
+GLOBAL_RETRY_S = 12.0      # ... and again this often while still lost (ambiguous / no fit / not confirmed)
+CONFIRM_S = 8.0            # a pose found / set waits this long for its 2 strict matches, then counts as unconfirmed
+FOUND_SHOW_S = 10.0        # the map info line says "found" this long
+SET_BOX_MM, SET_DEG = 600.0, 25.0   # Set position: searched within +-600 mm / +-25 deg of the tapped pose ...
+SET_ACCEPT = {"margin": 0.05}       # ... where a runner-up close by is no reason to doubt it
+SET_HOLD_S = 60.0          # after a Set position the automatic whole-map search waits this long (the user's word)
+RESET_NEAR_MM, RESET_NEAR_DEG = 500.0, 30.0   # a jump of the odometry to within this of 0, 0, 0: a pose reset / reboot
 
 FIELD_BUDGET_S = 0.02      # field update per turn (#102: Pi time); the tiles left over are done with the next turn
 _POOL = []                 # the lost search's worker thread (#102), made on first use
@@ -176,6 +191,7 @@ class Field:
         self.walls = 0
         self.rebuilds = 0
         self.carried = 0           # syncs that ran out of FIELD_BUDGET_S
+        self.ver = 0               # bumps on every change (the global search's pyramid cache, #105)
 
     def invalidate(self):
         self.grid = None
@@ -205,6 +221,7 @@ class Field:
         self.masks = {}
         self.walls = 0
         self.rebuilds += 1
+        self.ver += 1
         self.zero = bytes(grid.T * grid.T)
         tiles = grid.touched | grid.dirty | grid.fdirty
         grid.fdirty = set()
@@ -230,6 +247,7 @@ class Field:
         old = self.masks.get(t, self.zero)
         if old == new:
             return
+        self.ver += 1
         added, removed = [], False
         for j in range(T):
             a, b = old[j * T:(j + 1) * T], new[j * T:(j + 1) * T]
@@ -517,7 +535,11 @@ class LidarMatch:
         self.job = None
         self.turns = 0
         self.k = 0
-        self.n = {"matched": 0, "rejected": 0, "jumps": 0, "slips": 0, "lost": 0, "found": 0, "stuck": 0, "checks": 0}
+        self.n = {"matched": 0, "rejected": 0, "jumps": 0, "slips": 0, "lost": 0, "found": 0, "stuck": 0, "checks": 0,
+                  "global": 0, "relocated": 0}
+        self.pyr = None              # (key, reloc.Pyramid) of the last global search (#105): reused while the map is the same
+        self.reloc = None            # the global search / Set position state for the browsers (#105, _reloc_stats)
+        self.last_global = None      # the last reloc.find() result
         self.last = None             # the last result (match() dict + applied step)
         self.state = "off"
         self.jump = None             # [target corr, matches agreeing]
@@ -556,6 +578,10 @@ class LidarMatch:
         self.remap_until = 0.0       # re-anchored: map every turn until then
         self.checking = False        # lost only to check the pose after a lidar gap (quiet; lost after CHECK_S)
         self.lost_k = 0              # self.k when it got lost
+        self.glob_req = None         # {"why", "by", "around"}: a global search starts with the next turn (#105)
+        self.glob_t = None           # lost: when the last global search ended (or a Set position holds them off until)
+        self.glob_running = False    # the job in the worker thread is a global search
+        self.confirm_t0 = None       # a pose found / set by hand waits for its confirmation since
 
     # ------------------------------------------------------------ inputs
     def prepare(self):
@@ -582,11 +608,19 @@ class LidarMatch:
             return ox, oy, mx, my, runs, pts
         now = self._now()
         odo = inverse(self.m.corr, mx, my)              # where the wheels say the robot is (odometry frame)
-        prev, self.prev_odo = self.prev_odo, (odo[0], odo[1], now)
+        oh = mh - self.m.corr[2]                        # ... and its odometry (gyro) heading
+        prev, self.prev_odo = self.prev_odo, (odo[0], odo[1], now, oh)
         gap = None
+        if not recover:
+            self.glob_req = None
         if prev is not None and recover and self.turns > int(S["match_warmup"]):
             d = math.hypot(odo[0] - prev[0], odo[1] - prev[1])
-            if now - prev[2] > GAP_S and d > GAP_MM:
+            if self._reset_seen(prev, odo, oh, S):
+                # the odometry jumped back to ~0, 0, 0 (a Teensy reboot, or a pose reset nobody logged): the map pose
+                # jumped to the old origin. Search the whole map for where the robot really is (#105)
+                self.request_global("the odometry jumped to %d, %d, %d deg: a Teensy reboot / pose reset"
+                                    % (round(odo[0]), round(odo[1]), round(oh)), by="reset")
+            elif now - prev[2] > GAP_S and d > GAP_MM:
                 gap = (now - prev[2], d)
         if prev is not None and (now - prev[2] > 1.0 or math.hypot(odo[0] - prev[0], odo[1] - prev[1]) > ODO_JUMP_MM):
             prev = None                                  # a gap / pose reset: no wheel travel to compare
@@ -617,8 +651,14 @@ class LidarMatch:
             self.state = "turning" if self.mode == "track" else self.state
             return ox, oy, mx, my, None, pts
         self.k += 1
+        if recover and self.glob_req is not None and self.mode != "lost":
+            self._lose(now, self.glob_req["why"], quiet=True)    # not mapped until the pose is found and confirmed
         lost = recover and self.mode == "lost"
+        if lost and self.job is None and self._global_due(now, S):
+            if self._global_start(runs, mx, my, now, S):         # whole-map search (#105) with this turn
+                return ox, oy, mx, my, None, pts
         if lost:
+            self._confirm_check(now)
             every = self._wide_every(now)
             if self.checking and now - self.lost_t0 > CHECK_S:
                 self.checking = False                    # the check did not confirm it: lost
@@ -1032,11 +1072,14 @@ class LidarMatch:
                 pass
         return True
 
-    def _lose(self, now, why, pred=None, check=False):
-        """Lost (check: only checking the pose after a lidar gap, from the +-300 mm level, quietly)."""
+    def _lose(self, now, why, pred=None, check=False, quiet=False):
+        """Lost (check: only checking the pose after a lidar gap, from the +-300 mm level, quietly; quiet: the caller
+        says why, #105)."""
         self.mode = "lost"
         self.checking = check
         self.lost_t0 = now
+        self.glob_t = None
+        self.confirm_t0 = None
         self.lost_k = self.k                      # the next turn searches at once
         self.level, self.tries = (2 if check else 1), 0
         self.cand = None
@@ -1058,7 +1101,8 @@ class LidarMatch:
             self.n["checks"] += 1
             return
         self.n["lost"] += 1
-        self.m.say("lidar: pose lost (%s): searching wider, not mapping until it is found" % why)
+        if not quiet:
+            self.m.say("lidar: pose lost (%s): searching wider, not mapping until it is found" % why)
 
     def _found(self, now, how, remap=False):
         """Back to track. remap (re-anchored in a changed room / trusted by hand): every turn is mapped for REMAP_S,
@@ -1072,6 +1116,17 @@ class LidarMatch:
         self.obs.clear()
         self.suspect = None
         self.mapped_at = None                     # map at once from the pose found
+        self.glob_req = None
+        rl = self.reloc
+        if rl is not None and rl["phase"] in ("confirming", "set", "set_poor", "unconfirmed"):
+            # a pose the global search found / the user set, now confirmed by the matcher (#105)
+            self.n["relocated"] += 1
+            rl.update(phase="found", t=now)
+            how = ("%s, found by the whole-map search" if rl.get("by") not in ("set",) else
+                   "%s, from the position set by hand") % how
+        elif rl is not None and rl["phase"] != "found":
+            self.reloc = None
+        self.confirm_t0 = None
         if self.checking:
             self.checking = False
             if "moved" in how and not how.endswith(("moved 0 mm", "moved 1 mm")):
@@ -1166,6 +1221,7 @@ class LidarMatch:
         """Lost, by hand (map menu "Trust the pose"): take the pose as it is and map from here."""
         if self.mode != "lost":
             return False
+        self.reloc = None
         self._found(self._now(), "%s: the pose was trusted as it is" % who, remap=True)
         return True
 
@@ -1173,6 +1229,10 @@ class LidarMatch:
         """The robot's odometry went back to (0, 0, 0) where it stands: with a recent lidar pose, the correction keeps
         it at that map pose (else the map would see it jump to the old origin and stay lost)."""
         lp_ = self.last_pose
+        if self.job is not None:     # a search on the old odometry frame: its result would be wrong now
+            self.gen += 1
+            self.job = None
+            self.glob_running = False
         self.prev_odo = None
         self.obs.clear()
         self.wheels.clear()
@@ -1180,8 +1240,13 @@ class LidarMatch:
         self.prev_h = None
         if self.mode == "slip":
             self.mode = "track"
-        if not self.m.settings.get("lidar_match") or not self.m.settings.get("match_slip", True) or lp_ is None or \
-                self._now() - lp_[3] > 1.0:
+        if not self.m.settings.get("lidar_match") or not self.m.settings.get("match_slip", True):
+            return False
+        if lp_ is None or self._now() - lp_[3] > 1.0:
+            # no recent lidar pose to keep (the lidar was off / the Teensy rebooted, which also stops its LD19 bytes):
+            # with a map, find the robot on it (#105)
+            if self.field.walls >= MIN_WALL_CELLS:
+                self.request_global("pose reset with no recent lidar pose", by="reset")
             return False
         self.m.corr = [lp_[0], lp_[1], lp_[2]]
         self.raw.clear()
@@ -1190,12 +1255,273 @@ class LidarMatch:
             f()
         return True
 
+    # ------------------------------------------------------------ #105: relocalisation, Set position
+    def request_global(self, why, by="auto", around=None):
+        """Search the whole map (around: (x, y, half_mm, half_deg) only there) with the next turn: lost (not mapped)
+        until the pose is found and confirmed. by: "auto" | "reset" | "load" | "user" | "set"."""
+        self.glob_req = {"why": why, "by": by, "around": around}
+        self.prev_h = None                         # the map heading may jump: not "turning fast"
+        if by != "set":
+            self.reloc = {"phase": "pending", "by": by, "why": why, "t": self._now()}
+        self.m.say("lidar: %s - searching the whole map for the robot" % why if around is None else
+                   "lidar: %s - matching the scan around it" % why)
+
+    def relocalize(self, who="?"):
+        """"Find myself" (map menu / API): a whole-map search now. Returns an error text or None."""
+        S = self.m.settings
+        if self.m.lidar is None:
+            return "no lidar: nothing to search the map with"
+        if not (S.get("lidar_match") and S.get("match_slip", True)):
+            return "lidar scan matching (and its wheel slip handling) is off"
+        if self.field.grid is not None and self.field.walls < MIN_WALL_CELLS:
+            return "the map is too small to search (%d wall cells)" % self.field.walls
+        if self.job is not None and self.glob_running:
+            return None                            # one is running already
+        self.request_global("%s: find myself" % who, by="user")
+        return None
+
+    def set_pose(self, x, y, th, who="?", odom=None):
+        """Set position (map menu tool / API): the robot is at (x, y) mm, heading th deg, map frame. The correction is set
+        so the current odometry pose maps there at once; with LD19 matching the pose is then matched in a window around
+        it (SET_BOX_MM / SET_DEG: a tap is not exact) and confirmed by 2 strict matches before anything is mapped
+        again; a poor fit keeps the user's pose, unconfirmed (the map info line says so). odom: the robot's odometry
+        (x, y, heading) now (the bridge's telemetry), else the lidar's pose history. Returns an error text or None."""
+        if odom is None:
+            hist = getattr(self.m.lidar, "hist", None)
+            items = hist.items() if hist is not None else []
+            if items:
+                odom = items[-1][1:4]
+            elif self.last_pose is not None:
+                lx, ly, lh = self.last_pose[:3]
+                odom = inverse(self.m.corr, lx, ly) + (lh - self.m.corr[2],)
+        if odom is None:
+            return "no robot pose yet (no telemetry)"
+        x, y, th = float(x), float(y), float(th)
+        if not all(math.isfinite(v) for v in (x, y, th)):
+            return "set_pose: x, y, th must be numbers"
+        ox, oy, oh = (float(v) for v in odom[:3])
+        if self.job is not None:     # a search still running would overwrite the user's pose with its own: dropped
+            self.gen += 1
+            self.job = None
+            self.glob_running = False
+        dt = th - oh
+        c, s = math.cos(math.radians(dt)), math.sin(math.radians(dt))
+        self._set_corr([x - (c * ox - s * oy), y - (s * ox + c * oy), dt])
+        S = self.m.settings
+        now = self._now()
+        self.reloc = {"phase": "set", "by": "set", "who": who, "t": now, "pose": [round(x), round(y), round(th, 1)]}
+        if self.m.lidar is None or not (S.get("lidar_match") and S.get("match_slip", True)):
+            self.reloc["phase"] = "found"         # nothing to check it with: taken as it is
+            self.m.say("%s: position set to %d, %d mm, %d deg" % (who, round(x), round(y), round(th)))
+            return None
+        if self.mode != "lost":
+            self._lose(now, "position set", quiet=True)
+        else:
+            self.lost_t0, self.checking = now, False
+        self._confirm_start(now)
+        self.request_global("%s: position set to %d, %d mm, %d deg" % (who, round(x), round(y), round(th)), by="set",
+                            around=(x, y, SET_BOX_MM, SET_DEG))
+        return None
+
+    def _set_corr(self, corr):
+        """A new correction from relocalisation / Set position (a jump, not a filtered step)."""
+        m = self.m
+        if m.places.origin is None:               # the default Home (the odometry origin) stays where it is in the map
+            m.places.origin = [round(v, 1) for v in m.map_pose(0.0, 0.0, 0.0)[:2]]
+        m.corr = [float(v) for v in corr]
+        self.raw.clear()
+        self.jump = None
+        self.prev_h = None
+        self.obs.clear()
+        self.last_fix = None
+        self.last_pose = None
+        for f in m.corr_listeners:
+            f()
+
+    def _confirm_start(self, now):
+        """Lost, a pose to confirm (found / set): the normal window around it again, no old candidates."""
+        self.level, self.tries = 0, 0
+        self.cand, self.cands = None, {}
+        self.offs, self.off_i = [(0.0, 0.0)], 0
+        self.confirm_t0 = now
+
+    def _confirm_check(self, now):
+        rl = self.reloc
+        if rl is not None and self.confirm_t0 is not None and now - self.confirm_t0 > CONFIRM_S and \
+                rl["phase"] in ("confirming", "set"):
+            rl["phase"] = "unconfirmed" if rl["phase"] == "confirming" else "set_poor"
+            self.confirm_t0 = None
+            self.m.say("lidar: the pose %s was not confirmed by the scans within %.0f s: still not mapping"
+                       % ("found" if rl["phase"] == "unconfirmed" else "set by hand", CONFIRM_S))
+
+    def _reset_seen(self, prev, odo, oh, S):
+        """The odometry jumped to ~(0, 0, 0) from somewhere else: a Teensy reboot / unlogged pose reset (#105)."""
+        if not S.get("match_global", True) or self.field.walls < MIN_WALL_CELLS or len(prev) < 4:
+            return False
+        d = math.hypot(odo[0] - prev[0], odo[1] - prev[1])
+        dh = abs((oh - prev[3] + 180.0) % 360.0 - 180.0)
+        near = math.hypot(odo[0], odo[1]) < RESET_NEAR_MM and abs((oh + 180.0) % 360.0 - 180.0) < RESET_NEAR_DEG
+        return near and (d > ODO_JUMP_MM or dh > 45.0)
+
+    def _global_due(self, now, S):
+        if self.glob_req is not None:
+            return True
+        if not S.get("match_global", True) or self.checking or self.m.lidar is None:
+            return False
+        if self.reloc is not None and self.reloc["phase"] in ("confirming", "set"):
+            return False
+        if now - self.lost_t0 < GLOBAL_AFTER_S:
+            return False
+        return self.glob_t is None or now >= self.glob_t + GLOBAL_RETRY_S
+
+    def _pyr_key(self):
+        g = self.m.grid
+        return id(g), id(g.cells), self.field.ver, len(g.touched | g.dirty)
+
+    def _global_start(self, runs, mx, my, now, S):
+        """Start a whole-map (or Set position window) search with this turn: in the worker thread under the bridge,
+        right here without a loop (tests, offline sims). False: not started (map too small)."""
+        from . import reloc
+        req, self.glob_req = self.glob_req or {"why": "lost for %.0f s" % (now - self.lost_t0), "by": "auto",
+                                               "around": None}, None
+        self.checking = False                      # (a gap check overtaken by a reboot / request: really lost now)
+        P = getattr(self.m, "prof", loopprof.NULL)
+        with P.part("match.field"):
+            self.field.sync(self.m.grid)
+        if self.field.walls < MIN_WALL_CELLS:
+            if req["by"] != "set":
+                self.reloc = {"phase": "none", "by": req["by"], "why": "map too small", "t": now}
+            self.glob_t = now
+            return False
+        with P.part("match.global"):
+            fz = reloc.Frozen(self.field)          # (copies: the loop may change the real field meanwhile)
+        key = self._pyr_key()
+        pyr = self.pyr[1] if self.pyr is not None and self.pyr[0] == key else None
+        around = req.get("around")
+        accept = SET_ACCEPT if around is not None else None
+        corr0, gen = list(self.m.corr), self.gen
+        min_curv = S["match_min_curv"]
+        prof = getattr(self.m, "prof", loopprof.NULL)
+        if req["by"] != "set":
+            self.reloc = {"phase": "searching", "by": req["by"], "why": req["why"], "t": now}
+        self.state = "set position: matching the scan around it" if around is not None else \
+            "lost: searching the whole map"
+        self.glob_running = True
+
+        def work(y=reloc._nothing):
+            with prof.thread("match.global"):
+                try:
+                    p = pyr or reloc.Pyramid(fz, y)
+                    r = reloc.find(fz, p, runs, mx, my, around, min_curv, accept, y)
+                    r["pyr_ms"] = 0.0 if pyr is not None else round(p.ms, 1)
+                    return r, p
+                except reloc.Cancelled:
+                    return None, None
+                except Exception as e:      # a search bug must never stop the bridge
+                    return {"ok": False, "why": "error: %s: %s" % (type(e).__name__, e)}, None
+        loop = self._loop()
+        if loop is None:
+            res, p = work()
+            self._global_done(res, p, key, gen, req, mx, my, corr0)
+            return True
+
+        def run():
+            return work(reloc.Yielder(cancel=lambda: gen != self.gen))
+
+        def done(fut):              # (worker thread)
+            try:
+                res, p = fut.result()
+            except Exception as e:
+                res, p = {"ok": False, "why": "error: %s: %s" % (type(e).__name__, e)}, None
+            try:
+                loop.call_soon_threadsafe(self._global_done, res, p, key, gen, req, mx, my, corr0)
+            except RuntimeError:    # the loop is gone (shutdown)
+                pass
+        self.job = _pool().submit(run)
+        self.job.add_done_callback(done)
+        return True
+
+    def _global_done(self, res, pyr, key, gen, req, mx, my, corr0):
+        """(loop) A global search result: a clear, unique pose -> the correction jumps there and the matcher confirms it
+        (2 strict matches) before mapping; else the state says why (ambiguous: use Set position)."""
+        if gen != self.gen:
+            return                  # reset / another map meanwhile
+        self.job = None
+        self.glob_running = False
+        if res is None:
+            return
+        if pyr is not None:
+            self.pyr = (key, pyr)
+        now = self._now()
+        S = self.m.settings
+        self.n["global"] += 1
+        self.last_global = res
+        by, around = req["by"], req.get("around")
+        self.glob_t = now + (SET_HOLD_S if by == "set" else 0.0)
+        if self.mode != "lost" or not S.get("lidar_match"):
+            return                  # trusted by hand / switched off meanwhile
+        info = {"score": res.get("score"), "margin": res.get("margin"), "ms": res.get("ms"), "q": res.get("q"),
+                "cands": len(res.get("cands") or ())}
+        if res["ok"]:
+            # rotate dth about where the robot was (mx, my) in the turn's frame (corr0), then shift it to (x, y)
+            target = compose((res["x"] - mx, res["y"] - my, res["dth"]), corr0, mx, my)
+            moved = math.hypot(res["x"] - mx, res["y"] - my)
+            self._set_corr(target)
+            self._confirm_start(now)
+            rl = self.reloc if by == "set" and self.reloc else {}
+            rl.update(info, phase="confirming", by=by, why=req["why"], t=now)
+            self.reloc = rl
+            self.state = "found on the map: confirming"
+            self.m.say("lidar: %s at %d, %d mm (moved %d mm, %+.0f deg; fit %d %%, margin %d %%, %.1f s): confirming"
+                       % ("pose matched" if by == "set" else "found on the map", round(res["x"]), round(res["y"]),
+                          round(moved), res["dth"], round(100 * res["score"]), round(100 * res["margin"]),
+                          res["ms"] / 1000.0))
+            return
+        why = res.get("why") or "no fit"
+        if by == "set":
+            rl = self.reloc or {"by": "set"}
+            rl.update(info, phase="set_poor", why=why, t=now)
+            self.reloc = rl
+            self.state = "set position: %s - kept, not mapping" % why
+            self.m.say("lidar: the scan does not fit the map well around the position set (%s, fit %d %%): kept, "
+                       "not mapping until a match confirms it" % (why, round(100 * (res.get("score") or 0))))
+            return
+        phase = "ambiguous" if why == "ambiguous" else "none"
+        self.reloc = dict(info, phase=phase, by=by, why=why, t=now)
+        self.state = "lost: ambiguous - use Set position" if phase == "ambiguous" else \
+            "lost: not found on the map (%s)" % why
+        self.m.say("lidar: whole-map search: %s (best fit %d %%, margin %d %%, %d candidates): %s" % (
+            why, round(100 * (res.get("score") or 0)), round(100 * (res.get("margin") or 0)), info["cands"],
+            "use Set position" if phase == "ambiguous" else "still lost, searching again in %.0f s" % GLOBAL_RETRY_S))
+
+    def _reloc_stats(self, now):
+        rl = self.reloc
+        if rl is None:
+            return None
+        if rl["phase"] == "found" and now - rl.get("t", now) > FOUND_SHOW_S:
+            self.reloc = None
+            return None
+        out = {k: rl.get(k) for k in ("phase", "by", "why", "score", "margin", "ms", "cands")}
+        out["age_s"] = round(now - rl.get("t", now), 1)
+        out["running"] = self.glob_running
+        return out
+
     # ------------------------------------------------------------ browsers
     def _state_text(self, step, res):
         if self.mode == "slip":
             return "wheel slip: holding the position (grip %d %%)" % round(100 * min(1.0, self.grip or 0.0))
         if self.mode == "lost":
             w = res.get("window") or [0, 0]
+            ph = (self.reloc or {}).get("phase")
+            if ph in ("confirming", "set", "set_poor", "unconfirmed"):    # #105: a pose found / set, being confirmed
+                lead = {"confirming": "found on the map: confirming", "set": "set position: confirming",
+                        "set_poor": "set position: poor fit, not mapping",
+                        "unconfirmed": "found on the map: not confirmed"}[ph]
+                return lead + " (%s)" % res["why"] if res.get("why") else lead
+            if ph == "ambiguous":
+                return "lost: ambiguous - use Set position (searching +-%d mm / %.0f deg)" % (w[0], w[1])
+            if ph == "none":
+                return "lost: not found on the map (searching +-%d mm / %.0f deg)" % (w[0], w[1])
             return ("checking the pose after a lidar gap: +-%d mm / %.0f deg" if self.checking else
                     "lost: searching +-%d mm / %.0f deg") % (w[0], w[1]) + (" (%s)" % res["why"] if res.get("why") else "")
         return ("matched" if any(step) else "matched: pose fine") if step else "kept: " + res["why"]
@@ -1215,4 +1541,5 @@ class LidarMatch:
                 "lost_s": round(now - self.lost_t0, 1) if self.mode == "lost" else None,
                 "window": [round(v, 1) for v in self._wide(self.level, self.m.settings)] if self.mode == "lost" else None,
                 "slips": self.n["slips"], "lost": self.n["lost"], "found": self.n["found"], "stuck": self.n["stuck"],
-                "checking": self.checking, "checks": self.n["checks"]}
+                "checking": self.checking, "checks": self.n["checks"],
+                "reloc": self._reloc_stats(self._now()), "global": self.n["global"], "relocated": self.n["relocated"]}

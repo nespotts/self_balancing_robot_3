@@ -3,7 +3,9 @@
   python -m station.tools.loop_bench                       10 x 10 m room, waypoint tour, 90 s
   python -m station.tools.loop_bench --world room --seconds 60
   python -m station.tools.loop_bench --explore             the planner explores instead (worker-thread jobs too)
-  python -m station.tools.loop_bench --kidnap 25           carry the robot away after 25 s: the scan matcher goes lost
+  python -m station.tools.loop_bench --kidnap 25           carry the robot away after 25 s: the scan matcher goes lost,
+                                                           the whole-map search finds it (#105)
+  python -m station.tools.loop_bench --reboot 25           the odometry resets to 0, 0, 0 after 25 s (a Teensy reboot)
 
 The fake Teensy + LD19 (station/sim) runs in a child process, like the real robot's Teensy: its physics and ray casting
 do not load the bridge's loop. The bridge runs here with its own event loop, a web client connected (so tiles really go
@@ -52,7 +54,7 @@ def big_room(room):
     room.segs = list(s)
 
 
-def sim_main(port, world, seed, kidnap=0.0):
+def sim_main(port, world, seed, kidnap=0.0, reboot=0.0):
     from station.sim.lidar_sim import LidarSim
     from station.sim.sim import SimServer
     from station.sim.tour import DriftRobot
@@ -71,6 +73,12 @@ def sim_main(port, world, seed, kidnap=0.0):
                 await asyncio.sleep(kidnap)
                 extras.teleport(robot, robot.X + 800.0, robot.Y - 600.0, robot.TH + 25.0)   # odometry does not notice
             jobs.append(carry())
+        if reboot:
+            async def boot():
+                from station.sim import extras
+                await asyncio.sleep(reboot)
+                extras.teleport(robot, robot.X, robot.Y, robot.TH, reset_odom=True)   # odometry 0, 0, 0 right here
+            jobs.append(boot())
         await asyncio.gather(*jobs)
     try:
         asyncio.run(run())
@@ -131,7 +139,9 @@ async def bench(a, sim_port, tmp):
     orig_tick = prof.tick
 
     def tick(now, late):
-        windows.append((late, sum(prof.since.values()), dict(prof.since)))
+        with prof._lock:
+            glob = "match.global" in prof.thread_ran       # the whole-map search (#105) ran since the last tick
+        windows.append((late, sum(prof.since.values()), dict(prof.since), glob))
         return orig_tick(now, late)
     prof.tick = tick
     gc_t = {}
@@ -184,10 +194,10 @@ def report(a, b, windows):
     if not ws:
         print("no data")
         return
-    secs = sum(max(TICK_S, TICK_S + l) for l, _, _ in ws)
+    secs = sum(max(TICK_S, TICK_S + l) for l, _, _, _ in ws)
     tot = {}
     peak = {}
-    for _, _, d in ws:
+    for _, _, d, _ in ws:
         for k, v in d.items():
             tot[k] = tot.get(k, 0.0) + v
             peak[k] = max(peak.get(k, 0.0), v)
@@ -199,22 +209,28 @@ def report(a, b, windows):
     for k, v in sorted(tot.items(), key=lambda kv: -kv[1])[:14]:
         print("%-22s %10.2f %12.1f %16.0f" % (k, 1000 * v / secs, 1000 * peak[k], 1000 * peak[k] * a.pi_scale))
     for k in ("lidar.integrate", "lidar.match", "match.field", "map.tiles"):
-        v = sorted(d[k] for _, _, d in ws if d.get(k))
+        v = sorted(d[k] for _, _, d, _ in ws if d.get(k))
         if v:
             print("  %-16s per tick: n %d, median %.1f ms, p95 %.1f, p99 %.1f, max %.1f (PC)" % (
                 k, len(v), 1000 * v[len(v) // 2], 1000 * v[int(0.95 * len(v))], 1000 * v[int(0.99 * len(v))], 1000 * v[-1]))
-    late = [l for l, _, _ in ws]
+    late = [l for l, _, _, _ in ws]
     print("ticks: %d, PC late max %.0f ms, > 50 ms: %d, > 150 ms: %d" % (
         len(ws), 1000 * max(late), sum(1 for l in late if l > 0.05), sum(1 for l in late if l > 0.15)))
     print("longest single loop callback (PC): %.1f ms -> Pi ~%.0f ms (a tick cannot run during one)" % (
         prof.chunk_peak * 1000, prof.chunk_peak * 1000 * a.pi_scale))
     print("  longest callbacks by part (PC ms): " + ", ".join(
         "%s %.1f" % (k, 1000 * v) for k, v in sorted(prof.chunk_peaks.items(), key=lambda kv: -kv[1])[:6]))
-    pi = [(s * a.pi_scale - TICK_S, d) for _, s, d in ws]
+    pi = [(s * a.pi_scale - TICK_S, d) for _, s, d, _ in ws]
     worst = max(pi, key=lambda x: x[0])
     print("Pi estimate: max stall %.0f ms; ticks > 50 ms: %d, > 150 ms: %d (of %d); worst: %s" % (
         1000 * max(0.0, worst[0]), sum(1 for p, _ in pi if p > 0.05), sum(1 for p, _ in pi if p > 0.15), len(pi),
         ", ".join("%s %.0f" % (k, 1000 * v * a.pi_scale) for k, v in sorted(worst[1].items(), key=lambda kv: -kv[1])[:4])))
+    for flag, what in ((True, "while the whole-map search ran (#105)"), (False, "the other ticks")):
+        sel = [(l, s * a.pi_scale - TICK_S) for l, s, _, g in ws if g == flag]
+        if sel:
+            print("  %s: %d ticks, PC late max %.0f ms, Pi est max %.0f ms, Pi est > 50 ms: %d (%.1f %%)" % (
+                what, len(sel), 1000 * max(l for l, _ in sel), 1000 * max(0.0, max(p for _, p in sel)),
+                sum(1 for _, p in sel if p > 0.05), 100.0 * sum(1 for _, p in sel if p > 0.05) / len(sel)))
     for gen in (0, 1, 2):
         d = [s for g_, s in GC if g_ == gen]
         if d:
@@ -229,6 +245,16 @@ def report(a, b, windows):
     print("lidar: %s" % {k: ls.get(k) for k in ("state", "rpm", "crc_errors", "cost_ms", "cpu_pct")})
     lm = m.lmatch
     print("matcher: mode %s, state %s" % (lm.mode, getattr(lm, "state", "?")))
+    for l in b.logs:
+        if any(k in l["text"] for k in ("pose lost", "whole map", "whole-map", "found on the map", "found again",
+                                         "Teensy reboot", "not confirmed")):
+            print("  log:", l["text"])
+    g = getattr(lm, "last_global", None)
+    if g:
+        print("whole-map search: %d run(s), relocated %d; last: %s, fit %.2f, margin %.2f, %d nodes, %.0f ms in the "
+              "thread (PC; pyramid %s ms)" % (lm.n.get("global", 0), lm.n.get("relocated", 0), g.get("why") or "ok",
+                                              g.get("score", 0), g.get("margin", 0), g.get("nodes", 0), g.get("ms", 0),
+                                              g.get("pyr_ms")))
     if a.png:
         with open(a.png, "wb") as f:
             f.write(m.grid.png())
@@ -247,11 +273,13 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--kidnap", type=float, default=0.0, metavar="S",
                     help="carry the robot 1 m / 25 deg after S s (odometry does not notice): the matcher goes lost")
+    ap.add_argument("--reboot", type=float, default=0.0, metavar="S",
+                    help="reset the odometry to 0, 0, 0 after S s where the robot is (a Teensy reboot, #105)")
     ap.add_argument("--png", default=None, help="write the final map here")
     a = ap.parse_args(argv)
     sim_port = _free_port()
     ctx = multiprocessing.get_context("spawn")
-    sim = ctx.Process(target=sim_main, args=(sim_port, a.world, a.seed, a.kidnap), daemon=True)
+    sim = ctx.Process(target=sim_main, args=(sim_port, a.world, a.seed, a.kidnap, a.reboot), daemon=True)
     sim.start()
     tmp = tempfile.mkdtemp(prefix="sbr3-bench-")
     try:

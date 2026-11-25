@@ -163,6 +163,10 @@ button.ask { background: var(--orange); border-color: #ff8a5c; }
 .wp-count { flex: 1; font-weight: 600; padding-left: 6px; }
 .wp-bar #wp-go { min-width: 88px; }
 @media (min-width: 900px) { .wp-bar { left: 50%; right: auto; transform: translateX(-50%); min-width: 460px; } }
+/* Set position (#105): the hint bar replaces the waypoint bar while the tool is on */
+body.setpos #wp-bar, body.setpos .place-sheet { display: none; }
+.setpos-bar { z-index: 26; border-color: #d95926; }
+.setpos-bar .wp-hint b { color: #ffb08a; font-weight: 600; }
 /* zones: draw bar, sheet, maze timer (#70) */
 body.drawing .wp-bar, body.drawing .place-sheet:not(.zone-sheet) { display: none; }
 .draw-bar { position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 26; display: flex; flex-direction: column; gap: 8px;

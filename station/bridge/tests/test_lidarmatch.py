@@ -495,6 +495,8 @@ class TestLost(Turns):
         self.assertLess(self.err((0, 0, 0), (800.0, 0, 0)), 25)
 
     def test_carried_away_stays_lost_until_trusted(self):
+        # (the whole-map search of #105 finds it: test_reloc; off, the #79 behaviour is unchanged)
+        self.m.apply_settings({"match_global": False}, save=False)
         self.build(30)
         mapped0 = self.mapped
         for _ in range(80):                       # carried 0.86 m: beyond the widest window, no wheel travel to go by
