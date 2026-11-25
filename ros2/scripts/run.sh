@@ -13,6 +13,11 @@ URL="${1:-ws://192.168.0.209:8080/ws}"; shift || true
 bash "$HERE/build.sh" >/dev/null
 source /opt/ros/jazzy/setup.bash
 source "$HOME/sbr3_ws/install/setup.bash"
+# RViz on the GPU (WSLg's Mesa d3d12 driver -> the NVIDIA card) instead of llvmpipe software rendering (~3 CPU cores).
+# SBR3_SOFT_GL=1 keeps software rendering (if the GPU path ever misbehaves).
+if [ -z "$SBR3_SOFT_GL" ]; then
+  export GALLIUM_DRIVER=d3d12 MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-NVIDIA}"
+fi
 SIM_PID=""
 cleanup() { [ -n "$SIM_PID" ] && kill "$SIM_PID" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
