@@ -13,6 +13,9 @@ matcher off and on, odometry drift / miscalibration, real LD19 packets (lidar_si
                                                         relocalisation (#105): after 3 tour legs the robot is carried
                                                         to random poses / headings, and a Teensy reboot (odometry back
                                                         to 0, 0, 0): found?, time to find, pose error after
+  python -m station.sim.lidar_eval --retrace --seeds 1 2 3
+                                                        retracing steps: lost in a sparse spot (lidar ~7 % of its
+                                                        points, bumped 300 mm in a 1 s gap), planner retrace_lost off / on
 
 Per run: stand up, drive the TOUR loop as planner gotos (map frame, a short stop at every corner) --loops times, then
 go to the saved places (Home = start, "Far" = (3500, 1400)) and measure where the robot really is.
@@ -343,6 +346,78 @@ def run_kidnap(seed, kind="kidnap", to=None, legs=3, wait_s=14.0, drift=3.0, sca
         e.close()
 
 
+SPARSE_X, SPARSE_DROPOUT = 2700.0, 0.93     # run_retrace: west of this the LD19 gets ~7 % of its points
+
+
+def run_retrace(seed, retrace=True, goal=(500.0, 300.0), shift_mm=300.0, legs=3, max_s=150.0, drift=3.0, scale=0.02,
+                quiet=True):
+    """Retracing steps (retrace.py): drive the first `legs` TOUR legs (the map), then a planner goto to `goal` into a
+    sparse spot: west of SPARSE_X the lidar returns only ~7 % of its points (dark / glossy furniture; turns with too
+    few points are skipped, the rest cannot be matched). 250 mm into it the robot is bumped shift_mm sideways during a
+    1 s lidar gap (the odometry does not notice): the gap check fails, the pose is lost where nothing can find it.
+    retrace: the planner setting retrace_lost. Returns the first lost episode's timeline and the end state."""
+    from station.sim import extras
+    e = Run(seed, True, drift, scale, sample_s=0.25)
+    ev = {"modes": []}
+
+    def hook(run):
+        r = run.r
+        run.sim.dropout = SPARSE_DROPOUT if ("armed" in ev and r.X < SPARSE_X) else 0.01
+        if "armed" in ev and "kid" not in ev and r.X < SPARSE_X - 250.0:
+            ev["kid"], ev["kid_x"] = r.t, r.X
+            extras.teleport(r, r.X, r.Y - shift_mm, r.TH)
+        if "kid" in ev:
+            run.lidar_off = r.t < ev["kid"] + 1.0
+    e.on_step = hook
+    try:
+        e.stand_up()
+        for p in TOUR[:legs]:
+            e.drive(lambda b, p=p: b.planner._begin_goto([tuple(p)], None, False), max_s=60.0)
+            e.settle(0.5)
+        b, r, m = e.b, e.r, e.m
+        pl, lm, rt = b.planner, m.lmatch, b.planner.retrace
+        pl.settings["retrace_lost"] = retrace
+        ev["armed"] = True
+        pl._begin_goto([goal], None, False)
+        out = {"seed": seed, "retrace": retrace, "lost_s": None, "retrace_s": None, "found_s": None, "back_mm": 0.0,
+               "x_back": None, "trail": 0, "err_found_mm": None, "statuses": []}
+        start = r.t
+        while r.t - start < max_s:
+            heartbeat(r)
+            for _ in range(10):
+                e.step()
+            m.poll(r.t)
+            b.update()
+            pl.tick(r.t)
+            if pl.status not in out["statuses"]:
+                out["statuses"].append(pl.status)
+            k = ev.get("kid")
+            if k is not None and out["lost_s"] is None and lm.mode == "lost":
+                out["lost_s"] = round(r.t - k, 1)
+            if rt.active() and out["found_s"] is None:
+                if out["retrace_s"] is None:
+                    out["retrace_s"] = round(r.t - k, 1)
+                out["x_back"] = max(out["x_back"] or -1e9, r.X)
+                out["trail"] = max(out["trail"], len((rt.msg() or {}).get("trail") or ()))
+                out["back_mm"] = rt.st["driven"]
+            if out["retrace_s"] is not None and out["found_s"] is None and lm.mode == "track":
+                out["found_s"] = round(r.t - k, 1)
+                out["err_found_mm"] = round(e.pose_error()[0])
+            if pl.mode == "idle":
+                break
+        gx, gy = goal
+        x, y, _ = m.map_pose(*r.odom())
+        out.update(status=pl.status, mode=lm.mode, err_end_mm=round(e.pose_error()[0]),
+                   goal_mm=round(math.hypot(x - gx, y - gy)), back_mm=round(out["back_mm"]), n=dict(rt.n),
+                   kid_x=round(ev.get("kid_x", 0.0)), t_s=round(r.t - start, 1),
+                   wall_fit=round(wall_stats(m, r.room, e.F)[0], 3), relocated=lm.n["relocated"], lines=b.lines[-12:])
+        if not quiet:
+            print(out, flush=True)
+        return out
+    finally:
+        e.close()
+
+
 KEYS = ("err_mean_mm", "err_max_mm", "err_end_mm", "head_mean_deg", "head_max_deg", "head_end_deg", "far_mm", "home_mm",
         "wall_fit", "occ_cells", "occ_mm", "scan_ms", "match_ms", "match_ms_p95", "slips", "lost", "stuck")
 
@@ -364,7 +439,16 @@ def main(argv=None):
     ap.add_argument("--lidar-off", action="store_true", help="--slip: no LD19 data during the episode (lost + wide search)")
     ap.add_argument("--reloc", action="store_true", help="relocalisation runs (#105): kidnaps + a reboot per seed")
     ap.add_argument("--kidnaps", type=int, default=3, help="--reloc: random kidnaps per seed")
+    ap.add_argument("--retrace", action="store_true", help="retracing steps runs: lost in a sparse spot, with and "
+                                                               "without the planner's retrace_lost")
     a = ap.parse_args(argv)
+    if a.retrace:
+        for seed in a.seeds:
+            for on in (False, True):
+                o = run_retrace(seed, on)
+                o.pop("lines")
+                print(o, flush=True)
+        return
     if a.reloc:
         import random
         from .reloc_eval import free_pose
