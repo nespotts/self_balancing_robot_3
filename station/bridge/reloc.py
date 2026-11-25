@@ -54,10 +54,12 @@ class Cancelled(Exception):
 class Yielder:
     """Called often from the worker; every SLICE_S it sleeps PAUSE_S (the event loop takes the GIL) and checks cancel."""
 
-    def __init__(self, slice_s=SLICE_S, pause_s=PAUSE_S, cancel=None):
-        self.slice_s, self.pause_s, self.cancel = slice_s, pause_s, cancel
+    def __init__(self, slice_s=None, pause_s=None, cancel=None):
+        self.slice_s = SLICE_S if slice_s is None else slice_s
+        self.pause_s = PAUSE_S if pause_s is None else pause_s
+        self.cancel = cancel
         self.clock = time.perf_counter
-        self.end = self.clock() + slice_s
+        self.end = self.clock() + self.slice_s
         self.pauses = 0
 
     def __call__(self):
