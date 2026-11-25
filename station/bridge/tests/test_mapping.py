@@ -506,7 +506,10 @@ class TestBigMap(unittest.TestCase):
         seen = sum(1 for x in range(11000, 16000, 250) for y in (-1500, 1500)
                    if any(m.grid.value(x + dx, y + dy) > 150 for dx in (-50, 0, 50) for dy in (-75, -50, -25, 0, 25, 50, 75)))
         self.assertGreater(seen, 6)                                          # of 40 wall samples out there (a straight drive sees the walls at few angles)
-        self.assertLess(m.grid.value(14000, 0), UNKNOWN)
+        # seen free along the drive out there (#103: one cell, (14000, 0), was luck: the sweep's beams leave a few
+        # unknown cells on the track either way)
+        track = [m.grid.value(x, 0) for x in range(13000, 15001, 250)]
+        self.assertGreater(sum(1 for v in track if v < UNKNOWN), len(track) // 2, track)
         # browsers: full message covers the far tiles with absolute indices, the planner can use the grid
         full = json.loads(m.full_msg())
         self.assertTrue(any(t[0] >= 14 for t in full["tiles"]))

@@ -23,6 +23,13 @@ static constexpr float kStuckDeg = 15.0f;                 // turning: progress =
 static constexpr float kLidarDeadR = 180.0f;
 static constexpr float kDeadFront = kLidarDeadR - kAxisFwd - kSensorOut;  // the same, as a front distance (141)
 static constexpr float kGhostMerge = 40.0f;               // a new point this close to a ghost stands for it
+// Pass-through waypoints (#103)
+static constexpr float kSharpDeg = 75.0f;   // a sharper corner: slow down as for a stop and turn in place there
+static constexpr float kLookS = 1.0f;       // pursuit lookahead / pass radius: this x the speed (>= nav.arrive_mm)
+static constexpr float kCutMm = 30.0f;      // corner speed: the pursuit cuts a corner by about this much
+static constexpr float kLookFar = 0.5f;     // pursuit lookahead up to this x the distance to the waypoint
+static constexpr uint8_t kCapAhead = 8;     // corners ahead that limit the speed
+static constexpr uint8_t kPursueAhead = 3;  // waypoints ahead the pursuit point may be on
 
 static float clampf(float v, float lim) { return v > lim ? lim : (v < -lim ? -lim : v); }
 
@@ -47,14 +54,18 @@ bool Navigator::add(float x, float y) {
 
 void Navigator::listChanged(bool replaced) {
   if (replaced || idx_ > n_) {
+    // driving on (no blocked / stuck): a new route while under way (the planner's resends) does not stop it to
+    // turn in place first (#103); a large bearing error still does
+    const bool on = phase_ == SEEK && driving_ && !blocked_ && !stuck_;
     idx_ = 0;
     phase_ = SEEK;
-    driving_ = false;
+    driving_ = on;
   } else if (phase_ == DONE && idx_ < n_) {
     phase_ = SEEK;
     driving_ = false;
   }
   if (n_ == 0) idx_ = 0;
+  leg_set_ = q_set_ = false;               // the leg to the (new) waypoint starts at the pose
   blocked_ = latched_ = backing_ = false;  // a new / changed list always resumes
   if (fresh(now_ms_)) blk_fwd_ = blk_rev_ = false;  // ... but without fresh data a latch stays (#99)
   dead_back_ = false;
@@ -152,6 +163,8 @@ void Navigator::onModeChange(const NavIn& in) {
   if (fresh(in.now_ms)) blk_fwd_ = blk_rev_ = false;  // without fresh data a latch stays (#99)
   dead_back_ = false;
   driving_ = false;
+  leg_set_ = q_set_ = false;
+  last_v_ = look_far_ = 0;
   stop_since_ = 0;
   stuck_ = away_ = away_done_ = false;
   stuck_ms_ = 0;
@@ -415,6 +428,82 @@ void Navigator::update(const NavIn& in) {
   }
   if (!stuck_seen_) stuck_ms_ = 0;  // not trying to move this step: the no-progress window starts over
   if (lidar_stuck_ms_ && in.now_ms - lidar_stuck_ms_ > kLidarStuckMs) lidar_stuck_ms_ = 0;  // not driving: dropped
+  last_v_ = speed_;
+  last_ms_ = in.now_ms;
+}
+
+// ------------------------------------------------------------------ pass-through waypoints (#103)
+
+void Navigator::legStart(uint8_t i, float* x, float* y) const {
+  *x = i == idx_ ? sx_ : wx_[i - 1];
+  *y = i == idx_ ? sy_ : wy_[i - 1];
+}
+
+float Navigator::cornerDeg(uint8_t i, float heading) const {
+  float ax, ay;
+  legStart(i, &ax, &ay);
+  const float ix = wx_[i] - ax, iy = wy_[i] - ay, ox = wx_[i + 1] - wx_[i], oy = wy_[i + 1] - wy_[i];
+  if (ox * ox + oy * oy < 1.0f) return 0.0f;  // the same point twice
+  const float a_in = ix * ix + iy * iy < 1.0f ? heading : atan2f(iy, ix) / kDeg;
+  return fabsf(wrap180(atan2f(oy, ox) / kDeg - a_in));
+}
+
+// Speed cap at the current waypoint: each corner ahead at most vc, reached with at most nav.speed_kp x the leg to
+// spare; 0 at the last point (it stops there). vc: the pursuit (lookahead kLookS x speed) cuts a corner of th by
+// about kLookS x v x tan(th / 4), so v <= kCutMm / tan(th / 4) / kLookS (>= nav.min_speed); 0 sharper than kSharpDeg.
+float Navigator::cornerCap(float heading, float vmax) const {
+  const int top = (int)n_ - 2 < (int)idx_ + kCapAhead ? (int)n_ - 2 : (int)idx_ + kCapAhead;
+  const float kp = P(P_NAV_SPEED_KP), vmin = fminf(P(P_NAV_MIN_SPEED), vmax);
+  float cap = top == (int)n_ - 2 ? 0.0f : vmax;
+  for (int i = top; i >= (int)idx_; i--) {
+    const float th = cornerDeg((uint8_t)i, heading);
+    const float tq = tanf(0.25f * th * kDeg);
+    const float vc = th > kSharpDeg ? 0.0f : fmaxf(vmin, tq * vmax * kLookS > kCutMm ? kCutMm / (tq * kLookS) : vmax);
+    cap = fminf(vc, cap + kp * hypotf(wx_[i + 1] - wx_[i], wy_[i + 1] - wy_[i]));
+  }
+  return cap;
+}
+
+// Segment (x0,y0) -> (x1,y1): where a circle of radius L about (px,py) leaves it (false: it doesn't).
+static bool circleExit(float x0, float y0, float x1, float y1, float px, float py, float L, float* ax, float* ay) {
+  const float dx = x1 - x0, dy = y1 - y0, a = dx * dx + dy * dy;
+  if (a < 1.0f) return false;
+  const float fx = x0 - px, fy = y0 - py;
+  const float b = fx * dx + fy * dy, c = fx * fx + fy * fy - L * L;
+  const float disc = b * b - a * c;
+  if (disc < 0) return false;
+  const float t = (-b + sqrtf(disc)) / a;  // the far crossing
+  if (t < 0 || t > 1) return false;
+  *ax = x0 + t * dx;
+  *ay = y0 + t * dy;
+  return true;
+}
+
+static float segDist(float x0, float y0, float x1, float y1, float px, float py) {
+  const float dx = x1 - x0, dy = y1 - y0, a = dx * dx + dy * dy;
+  const float t = a > 1.0f ? fminf(1.0f, fmaxf(0.0f, ((px - x0) * dx + (py - y0) * dy) / a)) : 1.0f;
+  return hypotf(x0 + t * dx - px, y0 + t * dy - py);
+}
+
+// Pure pursuit: the point L from the robot on the route ((the leg before, q_set_) leg start -> waypoints idx_ ..
+// last), furthest along. false: the route is farther than L away (aim at the waypoint).
+bool Navigator::pursuit(const NavIn& in, float L, uint8_t last, float* ax, float* ay) const {
+  if (hypotf(wx_[last] - in.x, wy_[last] - in.y) <= L) {
+    *ax = wx_[last];
+    *ay = wy_[last];
+    return true;
+  }
+  for (int k = last; k >= (int)idx_; k--) {
+    float x0, y0;
+    legStart((uint8_t)k, &x0, &y0);
+    if (circleExit(x0, y0, wx_[k], wy_[k], in.x, in.y, L, ax, ay)) return true;
+  }
+  return q_set_ && circleExit(qx_, qy_, sx_, sy_, in.x, in.y, L, ax, ay);
+}
+
+float Navigator::routeOff(const NavIn& in) const {
+  const float d = segDist(sx_, sy_, tx_, ty_, in.x, in.y);
+  return q_set_ ? fminf(d, segDist(qx_, qy_, sx_, sy_, in.x, in.y)) : d;
 }
 
 void Navigator::startBlocked(const NavIn& in) {
@@ -500,7 +589,10 @@ void Navigator::updateGoto(const NavIn& in) {
       if (in.now_ms - stop_since_ >= (uint32_t)P(P_NAV_DWELL_MS)) {
         log("nav: reached %u/%u, %.0f mm off", (unsigned)idx_ + 1, (unsigned)n_, (double)dist_);
         stop_since_ = 0;
-        if (idx_ + 1 < n_) {
+        if (idx_ + 1 < n_) {  // (points added while it stopped at the last one)
+          q_set_ = false;
+          sx_ = tx_;
+          sy_ = ty_;
           idx_++;
           phase_ = SEEK;
           driving_ = false;
@@ -521,7 +613,29 @@ void Navigator::updateGoto(const NavIn& in) {
   }
 
   // SEEK
-  if (dist_ < arrive) {
+  if (!leg_set_) {
+    sx_ = in.x;
+    sy_ = in.y;
+    leg_set_ = true;
+  }
+  // pass-through (#103): an intermediate waypoint is done once closer than L (sharp corner: nav.arrive_mm) or
+  // passed (beyond its end along its leg); a sharp corner then turns in place
+  const float L = fmaxf(arrive, kLookS * fabsf(last_v_));
+  while (idx_ + 1 < n_) {
+    const bool sharp = cornerDeg(idx_, in.heading) > kSharpDeg;
+    const bool passed = (in.x - tx_) * (tx_ - sx_) + (in.y - ty_) * (ty_ - sy_) >= 0;
+    if (!passed && dist_ >= (sharp ? arrive : L)) break;
+    log("nav: passed %u/%u, %.0f mm off", (unsigned)idx_ + 1, (unsigned)n_, (double)dist_);
+    qx_ = sx_;
+    qy_ = sy_;
+    q_set_ = !sharp;  // (a sharp corner: the new leg only)
+    sx_ = tx_;
+    sy_ = ty_;
+    idx_++;
+    setTarget(in, wx_[idx_], wy_[idx_]);
+    if (sharp && !blocked_) driving_ = false;
+  }
+  if (idx_ + 1 >= n_ && dist_ < arrive) {  // the last point: stop there
     phase_ = STOPPING;
     stop_since_ = 0;
     blocked_ = latched_ = backing_ = false;
@@ -529,15 +643,26 @@ void Navigator::updateGoto(const NavIn& in) {
     obst_ = front_;
     return;
   }
-  const float bearing = atan2f(ty_ - in.y, tx_ - in.x) / kDeg;
+  // steer on the pursuit point (the route up to the next sharp corner / the last point), else the waypoint
+  uint8_t last = idx_;
+  while (last + 1 < n_ && last < idx_ + kPursueAhead && cornerDeg(last, in.heading) <= kSharpDeg) last++;
+  // (lookahead >= 3 x the distance to the route: the point is always on it, <= 20 deg off it; and up to half the
+  // way to the waypoint, growing no faster than the robot drives: on a long leg it aims far ahead, as at the
+  // waypoint before #103, a turn command does not wind up while the wheels slip)
+  const float dt = last_ms_ && in.now_ms - last_ms_ < 100 ? (in.now_ms - last_ms_) * 0.001f : 0.1f;
+  look_far_ = fminf(kLookFar * dist_, look_far_ + fabsf(last_v_) * dt);
+  float ax = tx_, ay = ty_;
+  pursuit(in, fmaxf(fmaxf(L, look_far_), 3.0f * routeOff(in)), last, &ax, &ay);
+  const float bearing = atan2f(ay - in.y, ax - in.x) / kDeg;
   const float e = wrap180(bearing - in.heading);
-  const bool far = dist_ > 2.0f * arrive;  // close in, the bearing is noisy: don't steer
+  // close in to a stop / a sharp corner, the bearing is noisy: don't steer
+  const bool far = last > idx_ || dist_ > 2.0f * arrive;
   const float align = P(P_NAV_ALIGN_DEG);
   if (!blocked_) {
     if (!driving_ && fabsf(e) < align) {
       driving_ = true;
       away_ = away_done_ = false;
-    } else if (driving_ && far && fabsf(e) > 3.0f * align) {
+    } else if (driving_ && far && fabsf(e) > fmaxf(3.0f * align, kSharpDeg)) {
       driving_ = false;
     }
   }
@@ -576,8 +701,14 @@ void Navigator::updateGoto(const NavIn& in) {
     if (stuckCheck(in, true, fabsf(turn_) >= P(P_NAV_STOP_TURN))) startStuck(in, true);
     return;
   }
-  float v = P(P_NAV_SPEED_KP) * dist_ * fmaxf(0.0f, cosf(e * kDeg));
+  // corners ahead slow it down (#103); the speed rises at most nav.speed_kp x vmax per s (a balancing robot
+  // leans to speed up: no steps, e.g. after a corner)
+  const float kp = P(P_NAV_SPEED_KP);
+  // (a corner to pass: its cap at the pass radius L; a stop / sharp corner: at the point)
+  const float to_go = last > idx_ ? fmaxf(0.0f, dist_ - L) : dist_;
+  float v = fminf(cornerCap(in.heading, vmax) + kp * to_go, vmax) * fmaxf(0.0f, cosf(e * kDeg));
   v = fminf(fmaxf(v, P(P_NAV_MIN_SPEED)), vmax);
+  v = fminf(v, fmaxf(last_v_, P(P_NAV_MIN_SPEED)) + kp * vmax * dt);
   float vl = limitSpeed(v, vmax, true);
   if (latched_ || stuck_) obst_flag_ = true;  // EXPLORE: stays blocked until a new list; stuck: backing off
   if (obst_flag_) {

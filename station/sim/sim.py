@@ -131,6 +131,13 @@ DEAD_FRONT = LIDAR_DEAD_R - SENSOR_FWD_MM - SENSOR_RADIUS_MM   # kDeadFront: the
 GHOST_MERGE = 40.0        # kGhostMerge
 GHOSTS = 8                # Navigator::kGhosts
 SWEEP_FRESH_MS = 500      # Navigator::kSweepFreshMs
+# pass-through waypoints (#103)
+SHARP_DEG = 75.0          # kSharpDeg: a sharper corner: slow down as for a stop and turn in place there
+LOOK_S = 1.0              # kLookS: pursuit lookahead / pass radius = this x the speed (>= nav.arrive_mm)
+CUT_MM = 30.0             # kCutMm: corner speed: the pursuit cuts a corner by about this much
+LOOK_FAR = 0.5            # kLookFar: pursuit lookahead up to this x the distance to the waypoint
+CAP_AHEAD = 8             # kCapAhead: corners ahead that limit the speed
+PURSUE_AHEAD = 3          # kPursueAhead: waypoints ahead the pursuit point may be on
 
 
 def _box(cx, cy, w, h):
@@ -195,6 +202,32 @@ def _wrap180(a):
 
 def _clamp(v, lim):
     return lim if v > lim else (-lim if v < -lim else v)
+
+
+def _circle_exit(p0, p1, px, py, L):
+    """Segment p0 -> p1: where a circle of radius L about (px, py) leaves it (None: it doesn't); circleExit()."""
+    (x0, y0), (x1, y1) = p0, p1
+    dx, dy = x1 - x0, y1 - y0
+    a = dx * dx + dy * dy
+    if a < 1.0:
+        return None
+    fx, fy = x0 - px, y0 - py
+    b, c = fx * dx + fy * dy, fx * fx + fy * fy - L * L
+    disc = b * b - a * c
+    if disc < 0:
+        return None
+    t = (-b + math.sqrt(disc)) / a        # the far crossing
+    if t < 0 or t > 1:
+        return None
+    return x0 + t * dx, y0 + t * dy
+
+
+def _seg_dist(p0, p1, px, py):
+    (x0, y0), (x1, y1) = p0, p1
+    dx, dy = x1 - x0, y1 - y0
+    a = dx * dx + dy * dy
+    t = min(1.0, max(0.0, ((px - x0) * dx + (py - y0) * dy) / a)) if a > 1.0 else 1.0
+    return math.hypot(x0 + t * dx - px, y0 + t * dy - py)
 
 
 def _slew(cur, target, step):
@@ -332,6 +365,12 @@ class Navigator:
         self.mode = lp.MODE_IDLE
         self.phase = self.SEEK
         self.driving = self.blocked = self.latched = self.backing = False
+        self.sx = self.sy = 0.0               # start of the leg to the current waypoint (#103)
+        self.leg_set = False                  # False: the next update starts it at the pose
+        self.q = None                         # start of the leg before it, after a pass-through (pursuit, no jump)
+        self.last_v = 0.0                    # speed command of the last update (rise limit)
+        self.last_ms = 0
+        self.look_far = 0.0                   # pursuit lookahead, long-leg part (grows as the robot drives)
         self.back = (0.0, 0.0, 0)
         self.stop_since = 0
         self.hold = (0.0, 0.0)
@@ -381,11 +420,15 @@ class Navigator:
     def list_changed(self, replaced):
         n = len(self.wp)
         if replaced or self.idx > n:
-            self.idx, self.phase, self.driving = 0, self.SEEK, False
+            # driving on (no blocked / stuck): a new route while under way (the planner's resends) does not stop it
+            # to turn in place first (#103); a large bearing error still does
+            on = self.phase == self.SEEK and self.driving and not self.blocked and not self.stuck
+            self.idx, self.phase, self.driving = 0, self.SEEK, on
         elif self.phase == self.DONE and self.idx < n:
             self.phase, self.driving = self.SEEK, False
         if n == 0:
             self.idx = 0
+        self.leg_set, self.q = False, None    # the leg to the (new) waypoint starts at the pose
         self.blocked = self.latched = self.backing = False   # a new / changed list always resumes
         if self.fresh(self.now_ms):           # ... but without fresh data a latch stays (#99)
             self.blk_fwd = self.blk_rev = False
@@ -457,6 +500,8 @@ class Navigator:
             self.blk_fwd = self.blk_rev = False
         self.dead_back = False
         self.driving = False
+        self.leg_set, self.q = False, None
+        self.last_v = self.look_far = 0.0
         self.stop_since = 0
         self.stuck = self.away = self.away_done = False
         self.stuck_ms = 0
@@ -700,6 +745,55 @@ class Navigator:
             self.stuck_ms = 0
         if self.lidar_stuck_ms and i["now_ms"] - self.lidar_stuck_ms > LIDAR_STUCK_MS:
             self.lidar_stuck_ms = 0       # not driving: dropped
+        self.last_v = self.speed
+        self.last_ms = i["now_ms"]
+
+    # ---- pass-through waypoints (#103)
+    def _leg_start(self, k):
+        return (self.sx, self.sy) if k == self.idx else self.wp[k - 1]
+
+    def _corner_deg(self, k, heading):
+        """Turn at waypoint k (k + 1 < n), 0..180 deg: the leg into it -> the leg out of it."""
+        ax, ay = self._leg_start(k)
+        (bx, by), (cx, cy) = self.wp[k], self.wp[k + 1]
+        ix, iy, ox, oy = bx - ax, by - ay, cx - bx, cy - by
+        if ox * ox + oy * oy < 1.0:
+            return 0.0                    # the same point twice
+        a_in = heading if ix * ix + iy * iy < 1.0 else math.degrees(math.atan2(iy, ix))
+        return abs(_wrap180(math.degrees(math.atan2(oy, ox)) - a_in))
+
+    def _corner_cap(self, heading, vmax):
+        """Speed cap at the current waypoint: each corner ahead at most vc, reached with at most nav.speed_kp x the
+        leg to spare; 0 at the last point. vc: the pursuit (lookahead LOOK_S x speed) cuts a corner of th by about
+        LOOK_S x v x tan(th / 4), so v <= CUT_MM / tan(th / 4) / LOOK_S (>= nav.min_speed); 0 sharper than SHARP_DEG."""
+        n = len(self.wp)
+        top = min(n - 2, self.idx + CAP_AHEAD)
+        kp, vmin = self.P("nav.speed_kp"), min(self.P("nav.min_speed"), vmax)
+        cap = 0.0 if top == n - 2 else vmax
+        for k in range(top, self.idx - 1, -1):
+            th = self._corner_deg(k, heading)
+            tq = math.tan(math.radians(0.25 * th))
+            vc = 0.0 if th > SHARP_DEG else max(vmin, CUT_MM / (tq * LOOK_S) if tq * vmax * LOOK_S > CUT_MM else vmax)
+            (x0, y0), (x1, y1) = self.wp[k], self.wp[k + 1]
+            cap = min(vc, cap + kp * math.hypot(x1 - x0, y1 - y0))
+        return cap
+
+    def _pursuit(self, i, L, last):
+        """Pure pursuit: the point L from the robot on the route ((the leg before, self.q) leg start -> waypoints
+        idx .. last), furthest along; None: the route is farther than L away (aim at the waypoint)."""
+        x, y = i["x"], i["y"]
+        if math.hypot(self.wp[last][0] - x, self.wp[last][1] - y) <= L:
+            return self.wp[last]
+        for k in range(last, self.idx - 1, -1):
+            p = _circle_exit(self._leg_start(k), self.wp[k], x, y, L)
+            if p:
+                return p
+        return _circle_exit(self.q, (self.sx, self.sy), x, y, L) if self.q else None
+
+    def _route_off(self, i):
+        """Distance to this leg (and the one before, self.q)."""
+        d = _seg_dist((self.sx, self.sy), (self.tx, self.ty), i["x"], i["y"])
+        return min(d, _seg_dist(self.q, (self.sx, self.sy), i["x"], i["y"])) if self.q else d
 
     def on_lidar_stuck(self, now_ms):
         """EVT_LINK_STUCK (#79): the bridge's lidar saw the wheels turn but the robot not move."""
@@ -782,7 +876,9 @@ class Navigator:
                 if i["now_ms"] - self.stop_since >= P("nav.dwell_ms"):
                     self.log("nav: reached %u/%u, %.0f mm off" % (self.idx + 1, n, self.dist))
                     self.stop_since = 0
-                    if self.idx + 1 < n:
+                    if self.idx + 1 < n:      # (points added while it stopped at the last one)
+                        self.q = None
+                        self.sx, self.sy = self.tx, self.ty
                         self.idx += 1
                         self.phase, self.driving = self.SEEK, False
                         self._set_target(i, *self.wp[self.idx])
@@ -795,21 +891,49 @@ class Navigator:
             return
 
         # SEEK
-        if self.dist < arrive:
+        if not self.leg_set:
+            self.sx, self.sy = i["x"], i["y"]
+            self.leg_set = True
+        # pass-through (#103): an intermediate waypoint is done once closer than L (sharp corner: nav.arrive_mm) or
+        # passed (beyond its end along its leg); a sharp corner then turns in place
+        L = max(arrive, LOOK_S * abs(self.last_v))
+        while self.idx + 1 < n:
+            sharp = self._corner_deg(self.idx, i["heading"]) > SHARP_DEG
+            passed = (i["x"] - self.tx) * (self.tx - self.sx) + (i["y"] - self.ty) * (self.ty - self.sy) >= 0
+            if not passed and self.dist >= (arrive if sharp else L):
+                break
+            self.log("nav: passed %u/%u, %.0f mm off" % (self.idx + 1, n, self.dist))
+            self.q = None if sharp else (self.sx, self.sy)   # (a sharp corner: the new leg only)
+            self.sx, self.sy = self.tx, self.ty
+            self.idx += 1
+            self._set_target(i, *self.wp[self.idx])
+            if sharp and not self.blocked:
+                self.driving = False
+        if self.idx + 1 >= n and self.dist < arrive:   # the last point: stop there
             self.phase, self.stop_since = self.STOPPING, 0
             self.blocked = self.latched = self.backing = False
             self.state = NAV_DRIVING
             self.obst = self.front
             return
-        bearing = math.degrees(math.atan2(self.ty - i["y"], self.tx - i["x"]))
+        # steer on the pursuit point (the route up to the next sharp corner / the last point), else the waypoint
+        last = self.idx
+        while last + 1 < n and last < self.idx + PURSUE_AHEAD and self._corner_deg(last, i["heading"]) <= SHARP_DEG:
+            last += 1
+        # (lookahead >= 3 x the distance to the route: the point is always on it, <= 20 deg off it; and up to half the
+        # way to the waypoint, growing no faster than the robot drives: on a long leg it aims far ahead, as at the
+        # waypoint before #103, a turn command does not wind up while the wheels slip)
+        dt = (i["now_ms"] - self.last_ms) * 0.001 if self.last_ms and i["now_ms"] - self.last_ms < 100 else 0.1
+        self.look_far = min(LOOK_FAR * self.dist, self.look_far + abs(self.last_v) * dt)
+        ax, ay = self._pursuit(i, max(L, self.look_far, 3.0 * self._route_off(i)), last) or (self.tx, self.ty)
+        bearing = math.degrees(math.atan2(ay - i["y"], ax - i["x"]))
         e = _wrap180(bearing - i["heading"])
-        far = self.dist > 2.0 * arrive
+        far = last > self.idx or self.dist > 2.0 * arrive   # close in to a stop / a sharp corner: don't steer
         align = P("nav.align_deg")
         if not self.blocked:
             if not self.driving and abs(e) < align:
                 self.driving = True
                 self.away = self.away_done = False
-            elif self.driving and far and abs(e) > 3.0 * align:
+            elif self.driving and far and abs(e) > max(3.0 * align, SHARP_DEG):
                 self.driving = False
         if not self.driving:
             self.state = NAV_TURNING
@@ -844,8 +968,14 @@ class Navigator:
             if self._stuck_check(i, True, abs(self.turn) >= P("nav.stop_turn_dps")):
                 self._start_stuck(i, True)
             return
-        v = P("nav.speed_kp") * self.dist * max(0.0, math.cos(math.radians(e)))
+        # corners ahead slow it down (#103); the speed rises at most nav.speed_kp x vmax per s (a balancing robot
+        # leans to speed up: no steps, e.g. after a corner)
+        kp = P("nav.speed_kp")
+        # (a corner to pass: its cap at the pass radius L; a stop / sharp corner: at the point)
+        to_go = max(0.0, self.dist - L) if last > self.idx else self.dist
+        v = min(self._corner_cap(i["heading"], vmax) + kp * to_go, vmax) * max(0.0, math.cos(math.radians(e)))
         v = min(max(v, P("nav.min_speed")), vmax)
+        v = min(v,max(self.last_v, P("nav.min_speed")) + kp * vmax * dt)
         vl = self.limit_speed(v, vmax, True)
         if self.latched or self.stuck:        # EXPLORE: stays blocked until a new list; stuck: backing off
             self.obst_flag = True
