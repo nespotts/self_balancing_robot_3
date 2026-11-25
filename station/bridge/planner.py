@@ -20,6 +20,7 @@ import os
 import time
 
 from . import link_protocol as lp
+from . import zones as zm
 from .occgrid import UNKNOWN, UNIT
 from .places import HOME
 
@@ -79,6 +80,15 @@ SCAN_EVERY_S = 10.0       # explore: a new frontier goal after this long without
 DRIFT_RESEND_MM = 20.0    # LD19 scan matching (#78): resend the route once its next waypoints moved this much
 CONTACT_REPLAN_S = 2.5    # a contact (#104): replan this long after (the back-off of nav.stuck_backoff_mm is done;
                           # GOTO waits 4 s for the new route before it tries the old one again)
+# zone escape (#114): the watchdog stopped it at a zone edge, or a plan starts at one -> a short straight move away first
+ZONE_SETTLE_S = 0.5       # after a watchdog stop (HOLD): plan the escape this much later, once it stands still
+ZONE_STILL_MMS = 30.0     # ... (HOLD rolls it back to where it stopped: a fast robot overshoots first) ...
+ZONE_STILL_S = 0.4        # ... for this long ...
+ZONE_SETTLE_MAX_S = 3.0   # ... or after this long anyway
+ZONE_MAX_STOPS = 10       # watchdog stops in one job before it gives up anyway (each one escapes first)
+BACK_SPEED_MMS = 80.0     # escape straight back (the edge is ahead): STATION cmd_vel at this speed ...
+BACK_MAX_S = 6.0          # ... for at most this long
+BACK_MODE_WAIT_S = 1.0    # the robot did not switch to STATION: the escape point goes as a waypoint instead
 
 
 def clean_settings(s, base):
@@ -891,6 +901,11 @@ class Planner:
         self.solve = None             # goto: the maze being solved (its exit gap counts as a wall, #70)
         self.solve_t0 = 0.0
         self.zone_hits = 0            # watchdog stops in this job (#70)
+        self.zone_settle = False      # replan_at is a zone stop's (#114): also wait until it stands still ...
+        self.zone_still = None        # ... (since when)
+        self.no_station = False       # this job: the robot did not take STATION for an escape - escape by waypoint
+        self.backing = None           # zone escape straight back (#114): {"x0", "y0", "h0" (odometry), "dist", "t0", ...}
+        self._esc_now = None          # (set by the worker with each plan: its zone escape, #114)
 
     # ---------------------------------------------------------- frames
     def robot_map_pose(self):
@@ -929,18 +944,110 @@ class Planner:
             return None
         return z.view(close_exit=self.solve) if self.solve else z.view()
 
+    def zone_fp(self):
+        """The watchdog's footprint radius (mm): the planner's robot radius less the pose noise."""
+        return max(20.0, self.settings["robot_radius_mm"] - zm.FP_TOL_MM)
+
+    def zone_escape(self, pose, cm=None):
+        """#114: the escape move for a plan starting at pose (map frame), or None (not at a zone edge, or no zones);
+        {"boxed": True, ...} when no straight move gets the footprint clear. cm: end points inside real obstacles
+        are refused."""
+        zv = self.zone_view()
+        if not zv:
+            return None
+
+        def ok(x, y):
+            i = cm.cell(x, y)
+            return i is None or cm.cost[i] < BLOCKED
+        return zv.escape(pose[0], pose[1], pose[2], self.zone_fp(), ok=ok if cm is not None else None)
+
     def zone_stop(self, why):
-        """The bridge's watchdog stopped the robot (HOLD): it is in a no-go zone / at a virtual wall / the fence.
-        Replan in a moment (the route keeps the margin again); give up after 3 in one job."""
+        """The bridge's watchdog stopped the robot (HOLD): it drove into a no-go zone / at a virtual wall / the fence
+        (or its pose moved into one). Escape first (#114): in a moment the next plan starts with a short straight move
+        away from the edge (backwards when the edge is ahead), then the route. Gives up only when boxed in (no straight
+        way out) or after ZONE_MAX_STOPS in one job."""
         if self.mode == "idle":
             return
         self.zone_hits += 1
-        if self.zone_hits > 3:
-            self.stop("stopped: %s (3 times - gave up)" % why)
+        if self.zone_hits > ZONE_MAX_STOPS:
+            self.stop("stopped: %s (%d times - check the zones)" % (why, ZONE_MAX_STOPS))
             return
-        self.replan_at = self.clock() + 1.5
+        pose = self.robot_map_pose()
+        esc = self.zone_escape(pose) if pose else None
+        if esc and esc.get("boxed"):
+            self.stop("stopped: %s - boxed in by zones - edit them" % why)
+            return
+        self._back_end(send_stop=True)
+        self.squeeze = False
         self.last_check = self.clock()
-        self._set_status("stopped: %s - replanning" % why)
+        if esc and esc["drive"] != "turn" and self.b.tlm and not self.no_station:
+            # straight back / ahead along the heading: at once (it brakes and reverses in one go - waiting for HOLD
+            # to settle after a fast stop only rocks it to and fro); the route is planned once it is clear
+            self.replan_at = None
+            self._back_start(esc, None, None, why=why)
+            return
+        self.replan_at, self.zone_settle = self.clock() + ZONE_SETTLE_S, True
+        self._set_status("stopped: %s - %s" % (why, "backing away from it" if esc and esc["drive"] == "back"
+                                               else "moving away from it" if esc else "replanning"))
+
+    def _vel(self, v):
+        send = getattr(self.b, "send", None)
+        if send:
+            send(lp.encode_cmd_vel(v, 0.0))
+
+    def _back_start(self, esc, path, status, why=None):
+        """#114: move straight away from the zone edge along the heading - backwards when the edge is ahead (STATION,
+        cmd_vel straight back / ahead, checked clear by ZoneView.escape; no turning beside the edge), then drive the
+        rest of path (path[1] = the escape point), or (path None: after a watchdog stop) plan the route from there."""
+        t = self.b.tlm
+        sign = -1.0 if esc["drive"] == "back" else 1.0
+        self.backing = {"x0": t["x_mm"], "y0": t["y_mm"], "h0": t["heading_deg"], "dist": esc["dist"], "sign": sign,
+                        "t0": self.clock(), "path": path, "status": status}
+        self.path = path or []
+        if path is not None:
+            self.sent_goal = self.goal
+        self.b.handle_command({"t": "set_mode", "mode": lp.MODE_STATION, "arm": self.arm}, "planner")
+        self.arm = False
+        self._vel(sign * BACK_SPEED_MMS)
+        move = "%s %d mm straight away from %s" % ("backing" if sign < 0 else "driving", esc["dist"],
+                                                   "it" if why else "the zone edge")
+        self._set_status("stopped: %s - %s, then replanning" % (why, move) if why else "%s, then %s" % (move, status))
+
+    def _back_tick(self, now):
+        bk = self.backing
+        t = self.b.tlm
+        if t["mode"] != lp.MODE_STATION and now - bk["t0"] > BACK_MODE_WAIT_S:
+            # the robot did not take STATION: the escape point goes as the first waypoint (it turns, drives out)
+            self.backing, self.no_station = None, True
+            self.b.say("planner: robot not in STATION - driving to the zone escape point as a waypoint")
+            if bk["path"] is None:
+                self._start_job(self._plan_goto if self.mode == "goto" else self._plan_explore, go=True)
+                return
+            self.path = bk["path"]
+            self._send(bk["path"][1:], True)
+            self._set_status(bk["status"], log=False)
+            return
+        h = math.radians(bk["h0"])
+        done = bk["sign"] * ((t["x_mm"] - bk["x0"]) * math.cos(h) + (t["y_mm"] - bk["y0"]) * math.sin(h))
+        if done >= bk["dist"] - 5.0 or now - bk["t0"] > BACK_MAX_S:
+            self._back_end(send_stop=True)
+            self.b.say("planner: %s %d mm away from the zone edge" % ("backed" if bk["sign"] < 0 else "drove",
+                                                                     max(0.0, done)))
+            if bk["path"] is None:                     # after a watchdog stop: the route from here
+                self._start_job(self._plan_goto if self.mode == "goto" else self._plan_explore, go=True)
+                return
+            pose = self.robot_map_pose()
+            rest = bk["path"][2:]
+            self.path = [pose[:2]] + rest
+            self._send(rest, True)                     # GOTO / EXPLORE again with the rest of the route
+            self._set_status(bk["status"], log=False)
+            return
+        self._vel(bk["sign"] * BACK_SPEED_MMS)
+    def _back_end(self, send_stop=False):
+        if self.backing is not None:
+            self.backing = None
+            if send_stop:
+                self._vel(0.0)
 
     def zones_changed(self):
         """Layers edited: check the route against them at the next tick."""
@@ -1091,7 +1198,8 @@ class Planner:
             return None
         if act == "explore":
             self.mode, self.goals, self.blacklist, self.goal = "explore", [], [], None
-            self.replan_at, self.squeeze = None, False
+            self.replan_at, self.squeeze, self.no_station = None, False, False
+            self._back_end(send_stop=True)
             self.squeeze_left, self.sq_free = SQUEEZE_TRIES, None
             self.started_at = self.last_scan_t = self.clock()
             self.holding, self.sent_goal, self.scan_wait = False, None, None
@@ -1110,7 +1218,8 @@ class Planner:
         """Plan + drive to map-frame goals. dest: the saved place's name (shown on the map), or None.
         solve: a maze id (Solve, #70)."""
         self.mode, self.goals, self.blacklist = "goto", goals[:20], []
-        self.replan_at, self.squeeze = None, False
+        self.replan_at, self.squeeze, self.no_station = None, False, False
+        self._back_end(send_stop=True)
         self.dest = dest
         self.solve, self.solve_t0, self.zone_hits = solve, self.clock(), 0
         self.arm = arm
@@ -1141,6 +1250,7 @@ class Planner:
         if self.mode == "idle" and not self.path:
             return
         was = self.mode
+        self._back_end(send_stop=True)
         self.gen += 1
         self.pending = None
         self.arm = False
@@ -1232,7 +1342,14 @@ class Planner:
                 self.sq_free = now_free
             elif self.mode == "explore":
                 self.squeeze_left, self.sq_free = SQUEEZE_TRIES, None
-            if self.mode == "explore" and self._scan_on() and self.sent_goal is not None and \
+            esc = self._esc_now
+            if esc and esc["drive"] != "turn" and len(path) > 2 and not self.no_station:
+                # #114: straight back (the zone edge is ahead) / ahead away from it (STATION cmd_vel), then the route
+                self._back_start(esc, path, status)
+                return
+            if esc:
+                status += " (first %d mm straight away from the zone edge)" % esc["dist"]
+            if not esc and self.mode == "explore" and self._scan_on() and self.sent_goal is not None and \
                     self.goal != self.sent_goal and self.clock() - self.last_scan_t > SCAN_EVERY_S:
                 # a new frontier goal and no scan for a while: stop here and scan first, then plan again (#71)
                 t = self.b.tlm
@@ -1276,7 +1393,7 @@ class Planner:
     def on_correction(self, entry):
         """A stop-and-scan moved the map frame (#71): the robot's waypoints are in its odometry frame, so the
         rest of the route goes again, converted with the new correction (the robot is standing still)."""
-        rest = self._remaining() if self.mode != "idle" else []
+        rest = self._remaining() if self.mode != "idle" and self.backing is None else []
         if rest:
             pose = self.robot_map_pose()
             if pose:
@@ -1289,7 +1406,7 @@ class Planner:
         is in its odometry frame, so once the next waypoints are off by DRIFT_RESEND_MM the rest goes again (<= 1 / s)."""
         if self.mode == "idle" or not self.path or self.sent_corr is None or self.clock() - self.sent_at < 1.0:
             return
-        if self.replan_at is not None:        # stuck: backing off (a new list would end that), the replan follows
+        if self.replan_at is not None or self.backing is not None:   # backing off / away: the route follows after
             return
         rest = self._remaining()
         if not rest:
@@ -1338,11 +1455,24 @@ class Planner:
                 self.b.handle_command({"t": "set_mode", "mode": mode, "arm": self.arm}, "planner")
             self.arm = False
 
+    def _start_escape(self, pose, cm):
+        """Escape first (#114): (route head, start of the real route, None) - [robot, escape point] and the escape
+        point when the plan starts at a zone edge, else ([robot], robot); (None, None, why) when boxed in."""
+        esc = self.zone_escape(pose, cm)
+        self._esc_now = esc if esc and not esc.get("boxed") else None
+        if esc and esc.get("boxed"):
+            return None, None, "boxed in by zones (%s) - edit them" % esc["why"]
+        if esc:
+            e = (esc["x"], esc["y"])
+            return [pose[:2], e], e, None
+        return [pose[:2]], pose[:2], None
+
     def _plan_goto(self, pose):
-        start = pose[:2]
         fail = None
         for kind, cm in self._costmaps():
-            route = [start]
+            route, start, boxed = self._start_escape(pose, cm)
+            if boxed:
+                return ("fail", boxed)
             for gpt in self.goals:
                 leg = cm.astar(route[-1], gpt)
                 if leg is None:
@@ -1353,21 +1483,28 @@ class Planner:
                 route += leg[1:]
             if route:
                 n = len(route) - 1
-                self._sq_clear_now = self._route_clear(cm, route) if kind == "squeeze" else None
+                self._sq_clear_now = self._route_clear(cm, route[1:] if self._esc_now else route) \
+                    if kind == "squeeze" else None
                 return ("path", route, "route: %d waypoint%s" % (n, "" if n == 1 else "s"), kind)
         return ("fail", "no route to %.1f, %.1f m" % (fail[0] / 1000, fail[1] / 1000))
 
     def _plan_explore(self, pose):
         fr, kind, normal, held = None, "normal", None, None
+        head, start, esc_cm = [pose[:2]], pose[:2], None
         for kind, cm in self._costmaps():
             if kind == "squeeze" and self.squeeze_left <= 0:
                 break                 # tried enough narrow spots: the rest is done
-            fr = cm.frontiers(pose[:2], self.settings["frontier_min_mm"], self.blacklist,
+            if esc_cm is None:        # escape first (#114), worked out once on the first map
+                esc_cm = cm
+                head, start, boxed = self._start_escape(pose, cm)
+                if boxed:
+                    return ("fail", "explore: " + boxed)
+            fr = cm.frontiers(start, self.settings["frontier_min_mm"], self.blacklist,
                               open_cm=normal if kind == "squeeze" else None)
             if kind == "normal":
                 normal = cm
             if fr and kind != "squeeze" and self.squeeze:
-                i = cm.cell(*pose[:2])
+                i = cm.cell(*start)
                 if i is None or cm.cost[i] >= MARGIN:
                     # squeezing and still in the gap: the wide-margin map only gets out of it through its
                     # escape zone, whose first leg may cut a jamb corner - get through on the squeeze map first
@@ -1389,8 +1526,9 @@ class Planner:
             # standing at it and it is still unknown beyond: the sensors can't see it; skip it
             return ("blacklist", goal)
         self.goal = goal
-        path[0] = pose[:2]
+        path[0] = start
         self._sq_clear_now = self._route_clear(self._sq_cm, path) if kind == "squeeze" else None
+        path = head[:-1] + path
         return ("path", path, "exploring: frontier %.1f m away (%d left)" % (dist / 1000, len(fr)), kind)
 
     @staticmethod
@@ -1447,6 +1585,9 @@ class Planner:
             return
         if self.job and not self.job.done():
             return
+        if self.backing is not None:          # zone escape: backing straight away from the edge (#114)
+            self._back_tick(now)
+            return
         ss = getattr(b.mapper, "stopscan", None)
         if ss is not None and ss.seq != self.scan_seen:
             self.scan_seen, self.last_scan_t = ss.seq, now
@@ -1462,7 +1603,15 @@ class Planner:
         if self.replan_at is not None:        # stuck (#62): let it back off, then plan with the boost
             if now < self.replan_at:
                 return
-            self.replan_at = None
+            if self.zone_settle and now < self.replan_at + ZONE_SETTLE_MAX_S:
+                # zone stop (#114): HOLD brings it to a stand (back to where it stopped, after an overshoot)
+                if abs((t or {}).get("speed_mms", 0.0)) > ZONE_STILL_MMS:
+                    self.zone_still = None
+                    return
+                self.zone_still = self.zone_still or now
+                if now - self.zone_still < ZONE_STILL_S:
+                    return
+            self.replan_at, self.zone_settle, self.zone_still = None, False, None
             self._start_job(self._plan_goto if self.mode == "goto" else self._plan_explore, go=True)
             return
         if state == "blocked" and now - self.last_plan > 2.0:

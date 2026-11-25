@@ -12,8 +12,10 @@ Who enforces what:
 - planner (CostMap): mark_lines() puts walls / zone edges into the grid as occupied cells BEFORE inflation
   (so they get radius + margin like real walls, squeeze plans too); mark_areas() then blocks no-go insides and
   everything outside the fence, and makes slow zones cost more. Frontiers there are never chosen.
-- bridge watchdog: depths() per tick (footprint inside a zone / out of the fence / on or across a wall), and
-  manual_filter() on every forwarded cmd_vel. The firmware only knows real range obstacles.
+- bridge watchdog: watch() per tick (footprint inside a zone / out of the fence / on or across a wall, and only while
+  moving into it, #114), and manual_filter() on every forwarded cmd_vel. The firmware only knows real range obstacles.
+- escape (#114): escape() - the planner's first move when the robot stands at / over an edge (after a watchdog stop,
+  a pose jump into a zone): straight away from it, backwards when the edge is ahead.
 - bump marks count for the planner only (their edges are walls before inflation, like no-go zones), never for the
   watchdog: the robot is standing right at one when it is made and has to back away from it.
 """
@@ -42,6 +44,18 @@ MAZE_SIZE_DEFAULT = 3000.0
 MAZE_MAX_CELLS = 12
 SLOW_COST = 40               # costmap step cost in a slow zone (x5: routes go round when it is not much longer)
 SLOW_GROW_MM = 150.0         # autonomous: the speed cap starts this far before the zone
+FP_TOL_MM = 20.0             # watchdog footprint = planner robot radius - this (pose noise; routes keep radius + margin)
+# direction-aware watchdog + escape (#114)
+MOVING_MMS = 20.0            # slower than this: the direction comes from the pose change, not heading x speed sign
+INTO_STEP_MM = 30.0          # "into a zone" = 30 mm further along the motion the footprint is ...
+INTO_GROW_MM = 2.0           # ... this much deeper (> ~4 deg into the edge; along it or away is fine)
+ESCAPE_NEAR_MM = 30.0        # a plan starting with the footprint this close to a zone edge escapes first
+ESCAPE_CLEAR_MM = 60.0       # ... straight out until the footprint is this far clear of every edge
+ESCAPE_MIN_MM = 150.0        # ... and at least this far (a shorter first leg the navigator counts as passed at once)
+ESCAPE_MAX_MM = 500.0        # ... at most this far
+ESCAPE_STEP_MM = 10.0
+STRAIGHT_WITHIN_DEG = 75.0   # straight back / ahead along the heading (no turn beside the edge) is tried first when
+                             # within this of the way out
 
 
 # ---------------------------------------------------------------- geometry
@@ -436,6 +450,135 @@ class ZoneView:
                 return 0.0, turn, "blocked: %s ahead" % NAMES[kind]
         return speed, turn, why
 
+    # ------------------------------------------------------------ direction (#114)
+    def into(self, x, y, ux, uy, fp, step=INTO_STEP_MM):
+        """Keys of the zones that motion along the unit vector (ux, uy) from (x, y) takes the footprint further into
+        (or into at all): parallel to an edge or away from it is not "into"."""
+        now = self.depths(x, y, fp)
+        nxt = self.depths(x + ux * step, y + uy * step, fp, prev=(x, y))
+        return {k for k, (d, _t, _kind) in nxt.items() if d > now.get(k, (0.0,))[0] + INTO_GROW_MM}
+
+    def watch(self, x, y, h_deg, v, fp, prev, hold, again, active=True, jump_mm=300.0):
+        """The bridge watchdog's 25 Hz check (#70, direction-aware #114). (x, y, h): the pose, v: its speed (mm/s,
+        < 0 = backwards), prev: the last pose, hold: {key: least depth since the last stop}. -> (why or None, hold).
+        A stop (active only: GOTO / EXPLORE, armed) only for motion into a zone or across a wall - never for driving
+        along an edge or away from it (an escape). The direction: the heading x the speed's sign, or the pose change
+        when it barely moves. Again for the same zone only if it got `again` mm deeper in than its least depth since
+        (or once it was `again` mm clear of it). A pose jump (> jump_mm: a
+        relocalisation / Set position) that lands in a zone is no violation: why = "pose moved into ..." (escape)."""
+        jumped = prev is not None and math.hypot(x - prev[0], y - prev[1]) >= jump_mm
+        v_now = self.depths(x, y, fp, prev)
+        # a held zone is let go once the footprint is `again` mm clear of it (rocking back to its edge is no new stop)
+        band = self.depths(x, y, fp + again) if hold else {}
+        hold = {k: min(d, band[k][0] - again) for k, d in hold.items() if k in band}
+        if not active or not v_now:
+            return None, hold
+        new = [k for k, (d, _t, _kind) in v_now.items() if k not in hold or d > hold[k] + again]
+        if not new:
+            return None, hold
+        if jumped:
+            why = "pose moved: now " + v_now[new[0]][1]
+        else:
+            u = None
+            if abs(v) >= MOVING_MMS:
+                a = math.radians(h_deg)
+                sg = 1.0 if v > 0 else -1.0
+                u = (sg * math.cos(a), sg * math.sin(a))
+            elif prev is not None:
+                dx, dy = x - prev[0], y - prev[1]
+                L = math.hypot(dx, dy)
+                if L >= 3.0:
+                    u = (dx / L, dy / L)
+            ins = self.into(x, y, u[0], u[1], fp) if u else set()
+            bad = [k for k in new if k in ins or v_now[k][1].startswith("crossed")]
+            if not bad:
+                return None, hold
+            why = v_now[bad[0]][1]
+        for k, (d, _t, _kind) in v_now.items():
+            hold[k] = d
+        return why, hold
+
+    def _normal(self, x, y, fp):
+        """{key: (depth, (ux, uy) or None, text)} for the zones within fp of (x, y): the unit vector points away
+        from the zone (out of a no-go zone, into the fence, off a wall; None: right on a wall line)."""
+        out = {}
+
+        def off(segs, sign):
+            best = None
+            for x1, y1, x2, y2 in segs:
+                ex, ey = x2 - x1, y2 - y1
+                L2 = ex * ex + ey * ey
+                u = max(0.0, min(1.0, ((x - x1) * ex + (y - y1) * ey) / L2)) if L2 else 0.0
+                cx, cy = x1 + u * ex, y1 + u * ey
+                d = math.hypot(x - cx, y - cy)
+                if best is None or d < best[0]:
+                    best = (d, cx, cy)
+            d, cx, cy = best
+            return d, (((x - cx) / d * sign, (y - cy) / d * sign) if d > 1.0 else None)
+        for k, segs, kind in self.walls:
+            for i, s in enumerate(segs):               # each wall segment (a maze corner: both of its walls)
+                d, n = off([s], 1.0)
+                if d < fp:
+                    out[(k, i)] = (fp - d, n, "at a " + NAMES[kind])
+        for k, pts, es in self.nogo:
+            ins = inside(x, y, pts)
+            d, n = off(es, -1.0 if ins else 1.0)
+            dep = fp + d if ins else fp - d
+            if dep > 0:
+                out[k] = (dep, n, "in a no-go zone")
+        if self.fence:
+            k, pts, es = self.fence
+            ins = inside(x, y, pts)
+            d, n = off(es, -1.0 if ins else 1.0)
+            n = (-n[0], -n[1]) if n else None          # the fence keeps in: away = inwards
+            dep = fp - d if ins else fp + d
+            if dep > 0:
+                out[k] = (dep, n, "at the fence" if ins else "outside the fence")
+        return out
+
+    def escape(self, x, y, h_deg, fp, clear=ESCAPE_CLEAR_MM, near=ESCAPE_NEAR_MM, max_mm=ESCAPE_MAX_MM, ok=None):
+        """#114: the robot at (x, y, heading h) stands at / over a zone edge (its footprint fp within `near` mm of one):
+        a short straight move away from it first. -> None (not at an edge), or {"x", "y": where to, "dist": mm,
+        "drive": "back" / "ahead" (straight along the heading: no turn beside the edge) or "turn" (turn on the spot,
+        then drive there), "reverse": drive == "back", "why": the zone}, or {"boxed": True, "why": ...} when no straight
+        move gets clear (and the robot is really in a zone). Clear = the footprint `clear` mm off every edge, and at
+        least ESCAPE_MIN_MM; on the way it never gets deeper into any zone or crosses a wall. ok(x, y): extra check
+        of the end point (the planner: not inside a real obstacle)."""
+        near_now = self._normal(x, y, fp + near)
+        if not near_now:
+            return None
+        worst = max(near_now.values(), key=lambda e: e[0])
+        sx = sum(n[0] * (dep + 1.0) for dep, n, _t in near_now.values() if n)
+        sy = sum(n[1] * (dep + 1.0) for dep, n, _t in near_now.values() if n)
+        h = math.radians(h_deg)
+        ahead, back = math.atan2(math.sin(h), math.cos(h)), math.atan2(-math.sin(h), -math.cos(h))
+        base = math.atan2(sy, sx) if math.hypot(sx, sy) > 1e-6 else back
+        within = math.cos(math.radians(STRAIGHT_WITHIN_DEG))
+        cands = [(a, k) for a, k in ((back, "back"), (ahead, "ahead")) if math.cos(a - base) > within]
+        cands += [(base + math.radians(s * a), "turn") for a in range(0, 91, 15) for s in ((1,) if a == 0 else (1, -1))]
+        start = self.depths(x, y, fp)
+        segs = [s for _k, ss, _kind in self.walls for s in ss if seg_dist(x, y, *s) > 1.0]
+        for a, how in cands:
+            ux, uy = math.cos(a), math.sin(a)
+            d, good = 0.0, None
+            while d < max_mm:
+                d = min(max_mm, d + ESCAPE_STEP_MM)
+                qx, qy = x + ux * d, y + uy * d
+                now = self.depths(qx, qy, fp)
+                if any(dep > start.get(k, (0.0,))[0] + 1.0 for k, (dep, _t, _kind) in now.items()):
+                    break                                  # deeper into something (or into another zone)
+                if not self._normal(qx, qy, fp + clear) and (ok is None or ok(qx, qy)):
+                    good = (qx, qy, d)                     # clear here; on to ESCAPE_MIN_MM while it stays clear
+                    if d >= ESCAPE_MIN_MM:
+                        break
+                elif good:
+                    break
+            if good and not any(crosses(x, y, good[0], good[1], s) for s in segs):
+                return {"x": round(good[0], 1), "y": round(good[1], 1), "dist": round(good[2], 1), "drive": how,
+                        "reverse": how == "back", "why": worst[2]}
+        if start:
+            return {"boxed": True, "why": worst[2]}
+        return None                                        # only near edges, none touched: plan as usual
 
 # ---------------------------------------------------------------- the store
 class Zones:
