@@ -1200,8 +1200,9 @@ class LidarMatch:
             # a pose the global search found / the user set, now confirmed by the matcher (#105)
             self.n["relocated"] += 1
             rl.update(phase="found", t=now)
-            how = ("%s, found by the whole-map search" if rl.get("by") not in ("set",) else
-                   "%s, from the position set by hand") % how
+            how = ("%s, from the position set by hand" if rl.get("by") == "set" else
+                   "%s, found by the local search after retracing steps" if rl.get("by") == "retrace" else
+                   "%s, found by the whole-map search") % how
         elif rl is not None and rl["phase"] != "found":
             self.reloc = None
         self.confirm_t0 = None
@@ -1338,7 +1339,8 @@ class LidarMatch:
     # ------------------------------------------------------------ #105: relocalisation, Set position
     def request_global(self, why, by="auto", around=None):
         """Search the whole map (around: (x, y, half_mm, half_deg) only there) with the next turn: lost (not mapped)
-        until the pose is found and confirmed. by: "auto" | "reset" | "load" | "user" | "set"."""
+        until the pose is found and confirmed. by: "auto" | "reset" | "load" | "user" | "set" | "retrace" (the planner,
+        back at a well-mapped spot: retrace.py)."""
         self.glob_req = {"why": why, "by": by, "around": around}
         self.prev_h = None                         # the map heading may jump: not "turning fast"
         if by != "set":

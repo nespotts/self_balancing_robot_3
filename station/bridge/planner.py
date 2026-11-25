@@ -22,6 +22,7 @@ import time
 
 from . import link_protocol as lp
 from . import zones as zm
+from .retrace import Retracer
 from .loopprof import worker_yield as _yield     # (#110) long loops in the worker thread give way to the event loop
 from .occgrid import UNKNOWN, UNIT
 from .places import HOME
@@ -67,9 +68,11 @@ DEFAULTS = {
     "scan_pause": True,         # explore: stand still at each frontier goal for a stop-and-scan (#71; only
                                 # while the map's stop_scan correction is on)
     "zones_block_manual": True,  # bridge: joystick cmd_vel that would drive into a zone / across a virtual wall -> 0 (#70)
+    "retrace_lost": True,      # pose lost during a job: pause it, drive back along the path to a well-mapped spot (retrace.py)
+    "retrace_max_mm": 5000.0,  # ... at most this far back, then the whole-map search / Set position
 }
 LIMITS = {"robot_radius_mm": (20, 400), "margin_mm": (0, 500), "soft_mm": (0, 1000), "squeeze_mm": (0, 200),
-          "frontier_min_mm": (50, 2000)}
+          "frontier_min_mm": (50, 2000), "retrace_max_mm": (500, 20000)}
 STUCK_BOOST_MM = 100.0    # the robot reported "nav: stuck": plan with this much more margin ...
 STUCK_BOOST_MAX = 200.0
 BOOST_DECAY_MM = 50.0     # ... less by this after each goal reached
@@ -960,6 +963,7 @@ class Planner:
         self.loop_marks = 0           # ... loops marked in this job
         self._cms = {}                # costmap kind -> the last one built (set by the worker)
         self._stale_retry = False     # the plan running is the one more after a stale route that could not be joined
+        self.retrace = Retracer(self)  # pose lost: back along the breadcrumbs to a well-mapped spot (retrace.py)
 
     # ---------------------------------------------------------- frames
     def robot_map_pose(self):
@@ -1023,6 +1027,9 @@ class Planner:
         away from the edge (backwards when the edge is ahead), then the route. Gives up only when boxed in (no straight
         way out) or after ZONE_MAX_STOPS in one job."""
         if self.mode == "idle":
+            return
+        if self.retrace.active():     # the map pose is not trusted: no escape move, retracing ends here
+            self.retrace.on_zone_stop(why)
             return
         self.zone_hits += 1
         if self.zone_hits > ZONE_MAX_STOPS:
@@ -1153,6 +1160,10 @@ class Planner:
         "nav: blocked ..." / "nav: stuck ...": a stop at this spot (#111, see _spot)."""
         if self.mode == "idle":
             return
+        if self.retrace.active():     # retracing (untrusted map pose): no spot loop marks; a stuck = look again
+            if text.startswith("nav: stuck"):
+                self.retrace.on_bump("the robot got stuck")
+            return
         m = BLOCKED_RE.match(text)
         if m:
             self._spot("block", float(m.group(1)) + LOOP_AHEAD_MM)
@@ -1170,6 +1181,9 @@ class Planner:
         costmap). The robot backs off and waits (GOTO: 4 s, EXPLORE: for a new list): replan round the mark
         once it has backed off (no extra margin - the mark is the obstacle)."""
         if self.mode == "idle":
+            return
+        if self.retrace.active():
+            self.retrace.on_bump("touched something")
             return
         self.squeeze = False
         self.replan_at = self.clock() + CONTACT_REPLAN_S
@@ -1230,7 +1244,8 @@ class Planner:
                            if self.solve and self.mode == "goto" else None,
                            "path": [[round(x), round(y)] for x, y in self.to_odom(self.path)],
                            "goals": [[round(x), round(y)] for x, y in self.to_odom(self.goals)],
-                           "settings": self.settings, "boost": self.boost, "squeeze": self.squeeze},
+                           "settings": self.settings, "boost": self.boost, "squeeze": self.squeeze,
+                           "retrace": self.retrace.msg()},
                           separators=(",", ":"))
 
     def _push(self):
@@ -1303,6 +1318,7 @@ class Planner:
             self._begin_goto(goals, None, bool(m.get("arm")))
             return None
         if act == "explore":
+            self.retrace.reset()
             self.mode, self.goals, self.blacklist, self.goal = "explore", [], [], None
             self.replan_at, self.squeeze, self.no_station = None, False, False
             self._back_end(send_stop=True)
@@ -1324,6 +1340,7 @@ class Planner:
     def _begin_goto(self, goals, dest, arm, solve=None):
         """Plan + drive to map-frame goals. dest: the saved place's name (shown on the map), or None.
         solve: a maze id (Solve, #70)."""
+        self.retrace.reset()
         self.mode, self.goals, self.blacklist = "goto", goals[:20], []
         self.replan_at, self.squeeze, self.no_station = None, False, False
         self._back_end(send_stop=True)
@@ -1358,6 +1375,7 @@ class Planner:
         if self.mode == "idle" and not self.path:
             return
         was = self.mode
+        self.retrace.reset()
         self._back_end(send_stop=True)
         self.gen += 1
         self.pending = None
@@ -1767,6 +1785,8 @@ class Planner:
             return
         if self.backing is not None:          # zone escape: backing straight away from the edge (#114)
             self._back_tick(now)
+            return
+        if self.retrace.tick(now):            # pose lost: the job waits while it retraces its steps
             return
         ss = getattr(b.mapper, "stopscan", None)
         if ss is not None and ss.seq != self.scan_seen:

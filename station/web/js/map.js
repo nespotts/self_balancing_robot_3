@@ -310,7 +310,7 @@ function updateBar() {
   wpHint.hidden = !!hasAny;
   wpCount.hidden = !hasAny;
   wpCount.textContent = pending.length ? `${pending.length} new point${pending.length > 1 ? "s" : ""}`
-    : planning ? (plan.dest ? "To " + plan.dest : plan.status || (exploring ? "Exploring" : "Route"))
+    : planning ? (plan.retrace ? plan.status : plan.dest ? "To " + plan.dest : plan.status || (exploring ? "Exploring" : "Route"))
     : `${sent} waypoint${sent > 1 ? "s" : ""}`;
   bUndo.hidden = !pending.length;
   bClear.hidden = !hasAny || exploring;
