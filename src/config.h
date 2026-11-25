@@ -17,7 +17,16 @@ constexpr uint8_t REBOOT_BTN = 31;
 constexpr uint8_t RNG_SERVO = 2;
 constexpr uint8_t RNG_XSHUT0 = 34, RNG_INT0 = 35;
 constexpr uint8_t RNG_XSHUT1 = 28, RNG_INT1 = 29;
+// LD19 lidar (issue #100) on the PCB's "RPLidar C1" header: 5V, D28 = RX7 <- LD19 Tx, D29 = TX7 (unused, kept an input),
+// GND. The same two pins as the sweep's sensor 1 above: Serial7 runs only while the sweep is off (rng.enable 0 at boot).
+constexpr uint8_t LIDAR_RX = 28, LIDAR_TX = 29;
 }  // namespace pins
+
+// LD19 on Serial7: 230400 8N1, ~17.6 kB/s. Receive buffer = 64 (core) + this: ~120 ms of data, so blocking work in the
+// loop (IMU / radio re-init, motors off) loses nothing. (cfg.save's flash write turns interrupts off for a while: the
+// UART can overrun then; that is flagged, LINK_LIDAR_RAW_OVERFLOW.)
+constexpr uint32_t LIDAR_BAUD = 230400;
+constexpr uint32_t LIDAR_RX_EXTRA = 2048;
 
 // IMU: gyro-integrated rotation vector (no magnetometer), one report = quaternion + gyro.
 // Report rate = balance loop rate = param ctl.rate_hz (default 400 Hz, same as v3).

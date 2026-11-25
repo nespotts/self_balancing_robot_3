@@ -13,6 +13,7 @@
 #include "config.h"
 #include "controller.h"
 #include "imu.h"
+#include "lidar_fwd.h"
 #include "mode_manager.h"
 #include "motor_test.h"
 #include "motors.h"
@@ -37,6 +38,8 @@ static Battery batt;
 static RebootButton button;
 static MotorTest mtest;  // wheels-up motor test (mot.test), owns the motors while driving()
 static Navigator nav;    // waypoints, GOTO / EXPLORE / HOLD, obstacle check (issue #8)
+static LidarForwarder lidar;  // LD19 on Serial7 -> MSG_LIDAR_RAW (issue #100)
+static uint8_t lidar_rx_mem[LIDAR_RX_EXTRA];
 
 // control step state
 static bool have_step = false, motors_active = false;
@@ -240,6 +243,59 @@ static bool sendNavStatus() {
   n.distance_mm = nav.distance();
   n.obstacle_mm = nav.obstacleMm();
   return link.send(MSG_NAV_STATUS, &n, sizeof(n));
+}
+
+// ------------------------------------------------------------------ LD19 lidar on Serial7 (issue #100)
+
+struct Serial7LidarIo : LidarFwdIo {
+  int available() override { return Serial7.available(); }
+  int read(uint8_t* dst, int n) override {
+    int k = 0;
+    while (k < n) {
+      const int c = Serial7.read();
+      if (c < 0) break;
+      dst[k++] = (uint8_t)c;
+    }
+    return k;
+  }
+  int room() override { return Serial.availableForWrite(); }
+  bool send(const uint8_t* payload, uint8_t len) override { return link.send(MSG_LIDAR_RAW, payload, len); }
+  bool takeOverrun() override {  // LPUART7 receiver overrun (its 4-byte FIFO overflowed: interrupts were off)
+    const uint32_t s = LPUART7_STAT;
+    if (!(s & LPUART_STAT_OR)) return false;
+    // write 1 to OR only: the other write-1-to-clear flags (IDLE is the receive interrupt's) are written as 0
+    LPUART7_STAT = (s & ~(LPUART_STAT_LBKDIF | LPUART_STAT_RXEDGIF | LPUART_STAT_IDLE | LPUART_STAT_NF |
+                          LPUART_STAT_FE | LPUART_STAT_PF | LPUART_STAT_MA1F | LPUART_STAT_MA2F)) |
+                   LPUART_STAT_OR;
+    return true;
+  }
+};
+static Serial7LidarIo lidar_io;
+
+static void lidarBegin() {
+  Serial7.addMemoryForRead(lidar_rx_mem, sizeof(lidar_rx_mem));
+  Serial7.begin(LIDAR_BAUD);      // 8N1
+  pinMode(pins::LIDAR_TX, INPUT);  // TX7 is not used (the LD19 takes no commands): D29 stays high impedance
+  lidar.begin(64 + (int)sizeof(lidar_rx_mem), millis());  // 64 = SERIAL7_RX_BUFFER_SIZE (core)
+}
+
+static void lidarEnd() {
+  Serial7.end();
+  lidar.end();
+}
+
+// Background, after the telemetry: one chunk at most, and only in the first 60 % of the balance period after a step, so
+// the ~20 us of work can never be running when the next IMU sample comes (no added jitter in the balance step). With no
+// IMU steps (fault) any time.
+static void lidarService(uint32_t now_us, uint32_t now_ms) {
+  if (!lidar.on()) return;
+  const float rate = P(P_CTL_RATE_HZ);
+  const uint32_t window_us = (uint32_t)(600000.0f / (rate < 50.0f ? 50.0f : rate));
+  const uint32_t since = now_us - last_step_us;
+  if (since >= window_us && since <= IMU_STALE_US) return;
+  const uint32_t c0 = ARM_DWT_CYCCNT;
+  lidar.service(now_us, now_ms, lidar_io);
+  lidar.noteCycles(ARM_DWT_CYCCNT - c0);
 }
 
 static void handleEvent(uint8_t ev) {
@@ -454,6 +510,8 @@ static void sendOutput(uint32_t now_us) {
   if (nav.statusDue(now_ms) && sendNavStatus()) nav.statusSent(now_ms);
   for (const char* l; (l = nav.peekLog()) != nullptr && link.log("%s", l);) nav.popLog();
   if (const char* r = radio.stats(now_ms)) link.log("%s", r);
+  // LD19 bytes last: the telemetry above goes first, and the forwarder leaves it USB room (LidarForwarder::kReserve)
+  if (!imu.dataReady()) lidarService(micros(), now_ms);
 }
 
 // Motor test (issues #16, #26): own safety interlocks inside MotorTest; here only the wiring.
@@ -612,7 +670,14 @@ static void background() {
   const bool motors_off = !motors_active && !mtest.driving();
   imu.service(now_ms, motors_off);
   radio.service(now_ms, motors_off);
+  // rng.enable 1 while the lidar runs: the sweep is about to start (motors off) and drive D28 / D29 (its sensor 1's
+  // XSHUT / INT): Serial7 lets go of them first. The lidar comes back after a reboot with rng.enable 0.
+  if (lidar.on() && P(P_RNG_ENABLE) >= 0.5f && motors_off && !sweep.started()) {
+    lidarEnd();
+    link.log("lidar: Serial7 off, rng.enable 1 takes D28 / D29 (sweep sensor 1); reboot with rng.enable 0 for the LD19");
+  }
   if (const char* s = sweep.serviceSlow(now_ms, motors_off)) link.log("%s", s);
+  if (const char* s = lidar.status(now_ms)) link.log("%s", s);
   if (g_param_save_requested) {
     if (motors_off) {
       g_param_save_requested = false;
@@ -668,6 +733,13 @@ void setup() {
     link.log("rng: sensor0 %s, sensor1 %s", sweep.sensorOk(0) ? "ok" : "FAIL", sweep.sensorOk(1) ? "ok" : "FAIL");
   else
     link.log("rng: off (rng.enable 0)");
+  // LD19 (issue #100): Serial7 on the "RPLidar C1" header, only while the sweep doesn't own D28 / D29
+  if (!sweep.started()) {
+    lidarBegin();
+    link.log("lidar: Serial7 %lu 8N1 on D28 (RX7), forwarding LD19 bytes as MSG_LIDAR_RAW", (unsigned long)LIDAR_BAUD);
+  } else {
+    link.log("lidar: Serial7 off (rng.enable 1: D28 / D29 are the sweep's sensor 1 pins)");
+  }
   rate_t0_ms = millis();
 }
 

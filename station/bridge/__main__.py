@@ -28,9 +28,12 @@ def build_parser():
     ap.add_argument("--map-dir", default=os.environ.get("SBR3_MAP_DIR", "~/sbr3-maps"), help="saved occupancy maps")
     ap.add_argument("--falls-dir", default=os.environ.get("SBR3_FALLS_DIR", "~/sbr3-falls"),
                     help="black-box fall records (Logs page > Falls), capped at 200 files / 100 MB")
-    ap.add_argument("--lidar", default=os.environ.get("SBR3_LIDAR", "/dev/ttyS5"), metavar="PORT",
-                    help="LD19 lidar UART: /dev/ttyS5 (Orange Pi Zero 2W header UART5, see docs/ld19.md), COM7, or "
-                         "tcp://host:port (simulator); 'off' = no lidar. A missing port is retried quietly (default /dev/ttyS5)")
+    ap.add_argument("--lidar", default=os.environ.get("SBR3_LIDAR", "teensy"), metavar="SOURCE",
+                    help="LD19 lidar (docs/ld19.md): 'teensy' (default; 'auto' is the same) = the bytes the Teensy forwards "
+                         "from its Serial7 over the robot link (MSG_LIDAR_RAW, link v7), or a serial port: "
+                         "/dev/serial/by-id/... (USB adapter), /dev/ttyS5 (a header UART), COM7, tcp://host:port "
+                         "(simulator); with a port the Teensy's frames are still used while the port has no valid "
+                         "packets. 'off' = no lidar. A missing port is retried quietly")
     ap.add_argument("--allow-any-origin", action="store_true",
                     default=os.environ.get("SBR3_ALLOW_ANY_ORIGIN", "") in ("1", "true", "yes"),
                     help="turn off the Origin / Host checks on /ws and /api/* (default: only pages served by the "
@@ -46,13 +49,23 @@ def build_parser():
     return ap
 
 
+def lidar_source(v):
+    """--lidar value -> Bridge(lidar_port=...): None = off, "teensy", or a port."""
+    v = (v or "").strip()
+    if v.lower() in ("", "off", "none", "0"):
+        return None
+    if v.lower() in ("teensy", "auto"):
+        return "teensy"
+    return v
+
+
 def main(argv=None):
     a = build_parser().parse_args(argv)
     b = Bridge(a.port, a.web, a.log_dir, a.host, a.http_port, a.baud, a.release_file, a.log_max_mb, a.quiet,
                preset_dir=a.preset_dir, map_dir=a.map_dir, allow_any_origin=a.allow_any_origin,
                allow_hosts=a.allow_host, allow_origins=a.allow_origin, falls_dir=a.falls_dir,
                robot=a.robot,
-               lidar_port=None if a.lidar.strip().lower() in ("", "off", "none", "0") else a.lidar.strip())
+               lidar_port=lidar_source(a.lidar))
     try:
         asyncio.run(b.run())
     except KeyboardInterrupt:

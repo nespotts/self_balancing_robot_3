@@ -8,6 +8,7 @@ flowchart LR
   R[nRF24 remote] --> MM[mode manager<br>arm, E-stop, failsafe]
   P[Pi link<br>USB] --> MM --> C
   RNG[range sweep] --> P
+  L[LD19 lidar<br>Serial7] -- raw bytes --> P
 ```
 
 `loop()`: new IMU sample, balance step, encoders (if due), range slice (at most 1/4 step). Nothing blocks the balance step.
@@ -21,6 +22,7 @@ flowchart LR
 | Encoders | 200 Hz (speed over the last 80 ms) |
 | Remote | 50 Hz in, telemetry in each ACK |
 | TelemetryFrame to Pi | `tlm.hz` (100; set ≥ 400 to get every balance step) |
+| LD19 bytes to Pi (`MSG_LIDAR_RAW`) | ~98 frames/s, in the first 60 % of a step period only ([ld19.md](ld19.md#teensy-loop-timing)) |
 
 
 | Page | What |

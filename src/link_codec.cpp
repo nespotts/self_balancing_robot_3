@@ -2,13 +2,24 @@
 
 #include <string.h>
 
-uint16_t link_crc16(const uint8_t* data, size_t len, uint16_t crc) {
-  for (size_t i = 0; i < len; i++) {
-    crc ^= (uint16_t)data[i] << 8;
-    for (uint8_t b = 0; b < 8; b++) {
-      crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+// CRC-16/CCITT-FALSE, one table lookup per byte (the bitwise loop took ~5x as long: with ~100 MSG_LIDAR_RAW frames of
+// 184 bytes a second, issue #100, that mattered). The table is built at compile time from the polynomial.
+namespace {
+struct Crc16Table {
+  uint16_t t[256];
+  constexpr Crc16Table() : t() {
+    for (int i = 0; i < 256; i++) {
+      uint16_t c = (uint16_t)(i << 8);
+      for (int b = 0; b < 8; b++) c = (c & 0x8000) ? (uint16_t)((c << 1) ^ 0x1021) : (uint16_t)(c << 1);
+      t[i] = c;
     }
   }
+};
+constexpr Crc16Table kCrc16;
+}  // namespace
+
+uint16_t link_crc16(const uint8_t* data, size_t len, uint16_t crc) {
+  for (size_t i = 0; i < len; i++) crc = (uint16_t)((crc << 8) ^ kCrc16.t[((crc >> 8) ^ data[i]) & 0xFF]);
   return crc;
 }
 

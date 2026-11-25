@@ -224,27 +224,61 @@ class ScanAssembler:
         return done
 
 
+TEENSY = "teensy"
+
+
+def source_label(port):
+    """Health tile name of a byte source: "Teensy" (MSG_LIDAR_RAW over the robot link, #100), "USB" (a USB serial
+    adapter), "UART" (a header UART), "TCP" (the simulator's fake port)."""
+    p = (port or "").lower()
+    if p == TEENSY:
+        return "Teensy"
+    if p.startswith("tcp://"):
+        return "TCP"
+    if p.startswith(("/dev/ttyusb", "/dev/ttyacm", "/dev/serial/by-id", "/dev/serial/by-path", "com")):
+        return "USB"
+    return "UART"
+
+
+class _Source:
+    """One byte source's own parser (packets never mix across sources): the serial port, or the Teensy's frames."""
+    __slots__ = ("name", "stream", "asm", "bytes", "last_data", "last_pkt")
+
+    def __init__(self, name):
+        self.name = name
+        self.reset()
+
+    def reset(self):
+        self.stream = Ld19Stream()
+        self.asm = ScanAssembler()
+        self.bytes = 0
+        self.last_data = None             # clock time of the last bytes
+        self.last_pkt = None              # ... of the last valid packet
+
+
 class Ld19Reader:
     """Owns the serial port: opens it (retrying quietly while it is missing), feeds the stream, calls on_scan(scan).
-    port: "/dev/ttyS5", "COM7" (pyserial), or "tcp://host:port" (simulator). Counters for the Health page in .stats()."""
+    port: "/dev/ttyS5", "/dev/serial/by-id/...", "COM7" (pyserial), "tcp://host:port" (simulator), or "" = none.
+    teensy: also take the LD19 bytes the Teensy forwards (MSG_LIDAR_RAW, link v7, #100) through feed_teensy().
+    With both, scans come from one source at a time: the one that has valid packets, the current one first (a second
+    source takes over only once the current one has had no valid packet for SILENT_S). Counters for Health in .stats()."""
 
     RETRY_S = 3.0
     SILENT_S = 2.0
 
-    def __init__(self, port, on_scan, say=None, clock=time.monotonic):
+    def __init__(self, port, on_scan, say=None, clock=time.monotonic, teensy=False):
         self.port = port
+        self.teensy_on = bool(teensy)
         self.on_scan = on_scan
         self.say = say or (lambda text: None)
         self.clock = clock
-        self.stream = Ld19Stream()
-        self.asm = ScanAssembler()
+        self.serial = _Source("serial")
+        self.teensy = _Source(TEENSY)
+        self.active = None                # the _Source scans come from (None until one has valid packets)
         self.link = None
         self.error = ""
-        self.last_data = None             # clock time of the last bytes
-        self.last_pkt = None              # ... of the last valid packet
-        self.last_scan = None             # ... of the last whole revolution
+        self.last_scan = None             # clock time of the last whole revolution
         self.scans = 0
-        self.bytes = 0
         self.speed_dps = 0.0
         self._rate_t = clock()
         self._rate_pk = 0
@@ -253,6 +287,38 @@ class Ld19Reader:
         self.scan_hz = 0.0
         self._said_open = False
         self._said_err = None
+        # MSG_LIDAR_RAW (#100)
+        self.raw = {"frames": 0, "seq_gaps": 0, "overflows": 0, "bad": 0, "ignored": 0}
+        self.fw = {}                      # the firmware's own counters from its "lidar: ..." log line (usb drop, overflow)
+        self._seq = None
+
+    # the source on show (Health / stats): the active one, else the one that got bytes, else the serial port
+    def _shown(self):
+        if self.active is not None:
+            return self.active
+        if self.teensy_on and (self.teensy.bytes or not self.port):
+            return self.teensy
+        return self.serial
+
+    @property
+    def stream(self):
+        return self._shown().stream
+
+    @property
+    def asm(self):
+        return self._shown().asm
+
+    @property
+    def bytes(self):
+        return self.serial.bytes + self.teensy.bytes
+
+    @property
+    def last_data(self):
+        return self._shown().last_data
+
+    @property
+    def last_pkt(self):
+        return self._shown().last_pkt
 
     # ---------------------------------------------------------------- port
     async def run(self):
@@ -278,9 +344,9 @@ class Ld19Reader:
             return
         self.error = ""
         self._said_err = None
-        self.stream = Ld19Stream()
-        self.asm = ScanAssembler()
-        self.last_data = self.last_pkt = None
+        self.serial.reset()
+        if self.active is self.serial:
+            self.active = None
         self.say("lidar: opened %s" % self.port)
 
     def _on_lost(self):
@@ -297,13 +363,45 @@ class Ld19Reader:
 
     # ---------------------------------------------------------------- data
     def _on_data(self, data):
-        now = self.clock()
-        self.last_data = now
-        self.bytes += len(data)
-        for p in self.stream.feed(data, now):
-            self.last_pkt = now
+        """Bytes from the serial port."""
+        self._feed(self.serial, data, self.clock())
+
+    def feed_teensy(self, seq, flags, data):
+        """One MSG_LIDAR_RAW frame (#100): seq + 1 per chunk the Teensy took from its Serial7 (a gap = chunks it dropped,
+        or frames lost on the link), flags LINK_LIDAR_RAW_OVERFLOW = its UART buffer overflowed before this chunk. Either
+        way the bytes before this chunk are incomplete: the partial packet waiting in the stream is thrown away (the CRC
+        would catch it, this just never lets a packet straddle a hole)."""
+        if not self.teensy_on:
+            self.raw["ignored"] += 1
+            return
+        r = self.raw
+        r["frames"] += 1
+        hole = False
+        if self._seq is not None and seq != (self._seq + 1) & 0xFF:
+            r["seq_gaps"] += (seq - self._seq - 1) & 0xFF
+            hole = True
+        self._seq = seq
+        if flags & 0x01:                                  # link_protocol.LINK_LIDAR_RAW_OVERFLOW
+            r["overflows"] += 1
+            hole = True
+        st = self.teensy.stream
+        if hole and st.buf:
+            st.bytes_dropped += len(st.buf)
+            del st.buf[:]
+        self._feed(self.teensy, data, self.clock())
+
+    def _feed(self, src, data, now):
+        src.last_data = now
+        src.bytes += len(data)
+        pkts = src.stream.feed(data, now)
+        if not pkts:
+            return
+        src.last_pkt = now
+        if not self._use(src, now):
+            return
+        for p in pkts:
             self.speed_dps = p.speed_dps
-            sc = self.asm.add(p)
+            sc = src.asm.add(p)
             if sc is not None:
                 self.scans += 1
                 self.last_scan = now
@@ -312,37 +410,79 @@ class Ld19Reader:
                 except Exception as e:                    # a bug in mapping must not stop the reader
                     self.error = "scan handler: %s: %s" % (type(e).__name__, e)
 
+    def _ok(self, src, now):
+        return src.last_pkt is not None and now - src.last_pkt < self.SILENT_S
+
+    def _use(self, src, now):
+        """Scans from src? It is the active source, or it takes over from one without valid packets for SILENT_S."""
+        a = self.active
+        if a is src:
+            return True
+        if a is not None and self._ok(a, now):
+            return False                                  # the other source is fine: keep it, never mix the two
+        self.active = src
+        src.asm = ScanAssembler()                         # start its turns afresh
+        if self.teensy_on:                                # two possible sources: say which one is used
+            self.say("lidar: reading the LD19 from %s" % (
+                "the Teensy (MSG_LIDAR_RAW)" if src is self.teensy else self.port))
+        return True
+
+    def source(self):
+        """"teensy" | "serial" | None: where the scans come from."""
+        a = self.active
+        return None if a is None else (TEENSY if a is self.teensy else "serial")
+
+    def source_label(self):
+        """"Teensy" | "USB" | "UART" | "TCP" | "" for the Health tile."""
+        a = self._shown()
+        if a is self.teensy:
+            return "Teensy"
+        return source_label(self.port) if self.port else ""
+
     def tick(self, now):
         """~1 Hz: packet and scan rates."""
         dt = now - self._rate_t
         if dt >= 0.9:
-            pk, sc = self.stream.packets, self.scans
+            pk, sc = self.serial.stream.packets + self.teensy.stream.packets, self.scans
             self.pps = (pk - self._rate_pk) / dt
             self.scan_hz = (sc - self._rate_sc) / dt
             self._rate_t, self._rate_pk, self._rate_sc = now, pk, sc
 
     def state(self, now=None):
-        """off | waiting (port missing) | no data (port open, nothing arrives) | junk (bytes but no packets) | ok | stale"""
+        """off | waiting (port missing / no Teensy frame yet) | no data (port open, nothing arrives) | junk (bytes but no
+        packets) | ok | stale"""
         now = self.clock() if now is None else now
-        if not self.port:
+        if not self.port and not self.teensy_on:
             return "off"
-        if not self.link:
+        a = self.active
+        if a is not None:
+            if self._ok(a, now):
+                return "ok"
+            other = self.serial if a is self.teensy else self.teensy
+            if not (other.bytes and now - (other.last_data or -1e9) < self.SILENT_S):
+                return "stale"
+        open_ = [s for s in ((self.serial if self.port and self.link else None),
+                             (self.teensy if self.teensy_on and self.teensy.bytes else None)) if s is not None]
+        if not open_:
             return "waiting"
-        if self.last_pkt is not None and now - self.last_pkt < self.SILENT_S:
-            return "ok"
-        if self.last_pkt is not None:
-            return "stale"
-        return "junk" if self.bytes else "no data"
+        return "junk" if any(s.bytes for s in open_) else "no data"
 
     def stats(self, now=None):
         now = self.clock() if now is None else now
-        s = self.stream
-        return {"port": self.port, "state": self.state(now), "error": self.error,
-                "pps": round(self.pps, 1), "scan_hz": round(self.scan_hz, 1),
-                "rpm": round(self.speed_dps / 6.0, 1),                      # deg/s / 360 * 60
-                "packets": s.packets, "crc_errors": s.crc_errors, "bytes_dropped": s.bytes_dropped,
-                "scans": self.scans, "partial": self.asm.partial,
-                "scan_age_s": None if self.last_scan is None else round(now - self.last_scan, 2)}
+        src = self._shown()
+        s = src.stream
+        out = {"port": self.port or (TEENSY if self.teensy_on else ""), "state": self.state(now), "error": self.error,
+               "source": self.source(), "source_label": self.source_label(),
+               "pps": round(self.pps, 1), "scan_hz": round(self.scan_hz, 1),
+               "rpm": round(self.speed_dps / 6.0, 1),                      # deg/s / 360 * 60
+               "packets": s.packets, "crc_errors": s.crc_errors, "bytes_dropped": s.bytes_dropped,
+               "scans": self.scans, "partial": src.asm.partial,
+               "scan_age_s": None if self.last_scan is None else round(now - self.last_scan, 2)}
+        if self.teensy_on:
+            t = self.teensy
+            out["teensy"] = dict(self.raw, bytes=t.bytes, **{"fw_" + k: v for k, v in self.fw.items()},
+                                 age_s=None if t.last_data is None else round(now - t.last_data, 2))
+        return out
 
 
 def main(argv=None):

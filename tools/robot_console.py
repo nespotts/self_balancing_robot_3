@@ -25,7 +25,8 @@ MAX_PAYLOAD = 200
 LINK_VERSION = 3   # v3 appends remote_flags, nav_state, nav_index to TelemetryFrame (read as v2 here)
 MSG_TELEMETRY, MSG_RANGE, MSG_LOG, MSG_PARAM_INFO, MSG_NAV_STATUS, MSG_HELLO = 1, 2, 3, 4, 5, 6
 MSG_GET_PARAMS = 0x84
-NAMES = {1: "TELEMETRY", 2: "RANGE", 3: "LOG", 4: "PARAM_INFO", 5: "NAV_STATUS", 6: "HELLO"}
+NAMES = {1: "TELEMETRY", 2: "RANGE", 3: "LOG", 4: "PARAM_INFO", 5: "NAV_STATUS", 6: "HELLO",
+         7: "LIDAR_RAW"}   # link v7 (#100): ~98/s raw LD19 bytes, only counted here
 MODES = ["IDLE", "BALANCE", "MANUAL", "STATION", "GOTO", "EXPLORE", "HOLD"]
 TLM_BITS = [(0x01, "ARMED"), (0x02, "UPRIGHT"), (0x04, "FAILSAFE"), (0x08, "PI_LINK"),
             (0x10, "OBSTACLE"), (0x20, "LOW_BATT"), (0x40, "NAV"), (0x80, "NAV_DONE")]

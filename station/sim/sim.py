@@ -1785,7 +1785,8 @@ BOOT_TEXT = b"\r\nTeensy 4.1 sim: plain-text boot output before the first frame\
 
 
 class SimServer:
-    def __init__(self, robot, host="127.0.0.1", port=5761, garbage=0.0, quiet=False, lidar=None, lidar_port=0):
+    def __init__(self, robot, host="127.0.0.1", port=5761, garbage=0.0, quiet=False, lidar=None, lidar_port=0,
+                 lidar_teensy=False):
         self.robot = robot
         self.host, self.port = host, port
         self.garbage = garbage
@@ -1794,6 +1795,12 @@ class SimServer:
         self.lidar = lidar                 # lidar_sim.LidarSim: a fake LD19 on its own TCP port (issue #76)
         self.lidar_port = lidar_port
         self.lidar_writers = []
+        # ... or on the Teensy's Serial7 (#100): its bytes go out on the robot link as MSG_LIDAR_RAW frames, chunked like
+        # src/lidar_fwd.cpp (180 bytes, or 12 ms after the first of fewer). Like the firmware, only while rng.enable is 0
+        # (the range sweep's sensor 1 shares D28 / D29).
+        self.lidar_teensy = bool(lidar and lidar_teensy)
+        self.lidar_packer = lp.LidarRawPacker()
+        self.lidar_fwd_on = None
 
     async def _lidar_client(self, reader, writer):
         """The LD19 only transmits: whoever connects gets packets until it goes away."""
@@ -1848,6 +1855,8 @@ class SimServer:
                 base = time.monotonic() - robot.t
                 continue
             robot.run_until(target)
+            if self.lidar_teensy:
+                self._lidar_via_teensy(robot)
             out, robot.out = robot.out, []
             w = self.writer
             if w and out:
@@ -1859,7 +1868,7 @@ class SimServer:
                     w.write(data)
                 except Exception:
                     self.writer = None
-            if self.lidar:
+            if self.lidar and not self.lidar_teensy:
                 pk = self.lidar.step(robot, active=bool(self.lidar_writers))
                 if pk:
                     for lw in list(self.lidar_writers):
@@ -1868,12 +1877,23 @@ class SimServer:
                         except Exception:
                             self.lidar_writers.remove(lw)
 
+    def _lidar_via_teensy(self, robot):
+        """The LD19 on Serial7 (#100): its bytes since the last call, as MSG_LIDAR_RAW frames into the robot's output."""
+        on = robot.P("rng.enable") < 0.5
+        if on != self.lidar_fwd_on:
+            self.lidar_fwd_on = on
+            robot.log("lidar: Serial7 230400 8N1 on D28 (RX7), forwarding LD19 bytes as MSG_LIDAR_RAW" if on else
+                      "lidar: Serial7 off (rng.enable 1: D28 / D29 are the sweep's sensor 1 pins)")
+        data = self.lidar.step(robot, active=on and self.writer is not None)
+        if on:
+            robot.out += self.lidar_packer.feed(data, robot.t)
+
     async def run(self):
         srv = await asyncio.start_server(self._client, self.host, self.port)
         if not self.quiet:
             print("[sim] fake Teensy on tcp://%s:%d" % (self.host, self.port), flush=True)
         lsrv = None
-        if self.lidar:
+        if self.lidar and not self.lidar_teensy:
             lsrv = await asyncio.start_server(self._lidar_client, self.host, self.lidar_port)
             if not self.quiet:
                 print("[sim] fake LD19 on tcp://%s:%d" % (self.host, lsrv.sockets[0].getsockname()[1]), flush=True)

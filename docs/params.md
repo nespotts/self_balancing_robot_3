@@ -25,7 +25,7 @@ Gains are br3ttb units: ki per second, kd seconds.
 | ctl.settle_ms | 500 | |
 | batt.low_cell / adc_per_v | 3.4 V / 73.3 | |
 | tlm.hz | 100 | |
-| rng.enable | 0 | 1 = range sweep on (starts at boot, or live when motors are off); 0 = off, servo limp |
+| rng.enable | 0 | 1 = range sweep on (starts at boot, or live when motors are off); 0 = off, servo limp. Must be 0 (saved) for the LD19 on Serial7: they share D28 / D29 ([ld19.md](ld19.md#wiring-the-pcbs-rplidar-c1-header-100)) |
 | cfg.save | — | set 1 → write EEPROM (when motors off) |
 | cfg.defaults | — | set 1 → defaults, not saved (when motors off) |
 | rng.servo_trim_deg | 0 | ± added to every servo command: **horn fix** (see Range sweep) |
